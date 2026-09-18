@@ -1,0 +1,17 @@
+# Virtualenv (720 MB, and reproducible from setup.py)
+.venv/
+venv/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime artifacts: derived question banks, rendered MIDI, synthesized audio,
+# session logs, microphone recordings. All regenerable -- see
+# memorization/README.md and tutor/README.md.
+memorization/output/
+tutor/output/
