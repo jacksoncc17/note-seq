@@ -5,6 +5,9 @@
 #   ./run.sh quiz      drill questions in the terminal (no servers needed)
 #   ./run.sh text      free text conversation with the tutor
 #   ./run.sh voice     full voice conversation (needs ASR + TTS servers)
+#   ./run.sh serve     HTTP server for a phone/tablet browser (needs ASR + TTS)
+#   ./run.sh serve-tls same, over HTTPS with the certs from --make-cert
+#                      (browsers only allow the microphone on https or localhost)
 #   ./run.sh mic       microphone + VAD test (needs ASR)
 #   ./run.sh lessons   scripted demo of the whole loop, no hardware needed
 #   ./run.sh tts ...   TTS probe, e.g. ./run.sh tts --roundtrip
@@ -57,6 +60,30 @@ case "$mode" in
     exec "$PY" -m tutor.cli --voice --mode converse \
          --mic-seconds "${TUTOR_SECONDS:-120}" "$@"
     ;;
+  serve)
+    # Reachable from a phone on the same network. The microphone needs a secure
+    # context, so see the README (adb reverse, or --cert/--key for TLS).
+    use_servers
+    exec "$PY" -m tutor.cli --serve \
+         --host "${TUTOR_HOST:-0.0.0.0}" --port "${TUTOR_PORT:-8080}" "$@"
+    ;;
+  serve-tls)
+    # HTTPS: the only way a tablet browser will grant microphone access over
+    # the LAN. Create the certificates once with:
+    #   python -m tutor.cli --make-cert
+    use_servers
+    if [[ ! -f certs/server.pem || ! -f certs/server.key ]]; then
+      echo "no certificates in ./certs. Create them with:" >&2
+      echo "    ./run.sh make-cert" >&2
+      exit 2
+    fi
+    exec "$PY" -m tutor.cli --serve \
+         --host "${TUTOR_HOST:-0.0.0.0}" --port "${TUTOR_PORT:-8443}" \
+         --cert certs/server.pem --key certs/server.key "$@"
+    ;;
+  make-cert)
+    exec "$PY" -m tutor.cli --make-cert "$@"
+    ;;
   mic)
     use_servers
     exec "$PY" -m tutor.cli --mic-test "$@"
@@ -70,7 +97,7 @@ case "$mode" in
     exec "$PY" -m tutor.cli --asr-probe "$@"
     ;;
   *)
-    echo "usage: run.sh [check|quiz|text|voice|mic|lessons|tts|asr] [args...]" >&2
+    echo "usage: run.sh [check|quiz|text|voice|serve|serve-tls|make-cert|mic|lessons|tts|asr] [args...]" >&2
     exit 2
     ;;
 esac

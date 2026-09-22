@@ -145,6 +145,59 @@ What to look at in the analyzer's output for a new piece:
 * **`repeated passages`** — verified note-for-note repeats. For a piece assembled
   from blocks, this is the single biggest memory saving.
 
+### Driving it from a phone (or any browser)
+
+```bash
+./run.sh serve          # binds 0.0.0.0:8080; TUTOR_PORT / TUTOR_HOST override
+```
+
+Then open `http://<this-machine>:8080` on the phone. The page is served by the
+tutor itself — no internet needed — and gives you hold-to-talk with a live level
+meter, a text box, mode chips (drill / listen & coach / teach / converse), the
+current question with its options, the tutor's reply, grounded/latency pills and
+a log.
+
+**The microphone needs a secure context.** Browsers refuse `getUserMedia` on
+plain `http://` over a LAN IP, and the page now warns *before* you tap the mic
+rather than only when it fails. Three ways round it, easiest first:
+
+| | steps |
+|---|---|
+| **Chrome flag** (no cable, no certs) | `chrome://flags/#unsafely-treat-insecure-origin-as-secure` → add `http://<this-machine>:8080` → relaunch Chrome. A developer flag, so an update may reset it. |
+| **USB or wireless adb** (no warnings) | `adb reverse tcp:8080 tcp:8080`, then open `http://localhost:8080` on the tablet — localhost counts as secure. Over Wi-Fi on Android 11+: `adb pair`, `adb connect`, then the same command. |
+| **HTTPS with a trusted local CA** (survives updates) | `./run.sh make-cert`, then `./run.sh serve-tls`. Fetch the CA from `http://<this-machine>:8080/ca.pem`, install it (Settings → Security → Encryption & credentials → Install a certificate → CA certificate), then open `https://<this-machine>:8443`. |
+
+`--make-cert` builds a local CA plus a server certificate whose `subjectAltName`
+covers `localhost`, `127.0.0.1` and this machine's LAN IPs — a bare CN is not
+enough for Chrome — and the running server hands the CA out at `/ca.pem`, so
+nothing needs copying to the tablet by hand. Files land in `certs/`.
+
+Typing works over plain http regardless, so you can try the app immediately.
+
+**How it works:** one request is one turn. The browser records a single blob
+(WebM/Opus on Chrome, MP4 on Safari) and POSTs it; the server hands the bytes to
+Whisper as-is — its ffmpeg decodes the container — then runs the *same*
+conductor the desktop uses and returns the reply text plus the synthesized WAV as
+base64. No WebSocket, no extra dependency, and the mode state machine, fact gate,
+grading and grounding are all the desktop code.
+
+| endpoint | purpose |
+|---|---|
+| `GET /health` | piece, mode, which ASR/TTS clients are wired |
+| `GET /state` | mode, pending question, progress, weak spots |
+| `POST /start` | greeting; if already greeted, where you left off |
+| `POST /turn` | audio blob, or `{"text": "..."}` → reply, tools, grounding, timings, audio |
+
+Two behaviours worth knowing, both learned from a live outage:
+
+* **A dead TTS server degrades to text.** The reply still arrives (with a
+  `warnings` entry) instead of failing the turn, so the lesson continues and
+  typing still works.
+* **Audio is only ever the turn's own.** The sentence counter restarts each
+  process and filenames are reused, so an earlier version served a *previous
+  session's* `tts_0001.wav` as a fresh reply. The adapter now records what it
+  actually synthesized and the server slices that.
+
 ### The original question-bank tool
 
 `memorization/` is the simpler, non-conversational half of this project: it
