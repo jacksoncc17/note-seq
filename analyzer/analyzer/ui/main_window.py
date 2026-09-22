@@ -475,17 +475,23 @@ class MainWindow(QMainWindow):
     return self.expansion.played_numbers if self.expansion else []
 
   def estimate(self, auto: bool = False) -> None:
-    align = self._align_module()
-    if align is None:
-      self.map_label.setText('alignment module unavailable')
-      return
+    """Produce a rough map to correct by hand.
+
+    Uses the aligner's own baseline when it is available; otherwise falls back to
+    the map layer's uniform division, so the window is never left unable to show
+    or play a range just because the alignment module is missing.
+    """
     duration = self.player.duration or (self.piece.audio.duration_s if self.piece and self.piece.audio else 0.0)
     if not self.played() or duration <= 0:
       if not auto:
         QMessageBox.information(self, 'Nothing to estimate',
                                 'A score and a recording are both needed.')
       return
-    result = align.linear_estimate(self.played(), duration)
+    align = self._align_module()
+    if align is not None:
+      result = align.linear_estimate(self.played(), duration)
+    else:
+      result = syncmap.uniform_map(self.played(), duration)
     self._apply_result(result, source='average-tempo estimate')
     self.map_label.setText('average-tempo estimate: %s. This is a guess — use '
                            '"Align to recording", then drag any bar that is off.'
@@ -512,12 +518,25 @@ class MainWindow(QMainWindow):
       QMessageBox.information(self, 'No recording', 'Fetch a recording first.')
       return
 
+    # Re-aligning replaces whatever is on screen, including bars the user has
+    # placed by hand -- ask before throwing that work away.
+    if self.dirty and self.result is not None and any(
+        'hand-corrected' in w for w in self.result.warnings):
+      if QMessageBox.question(
+          self, 'Replace your corrections?',
+          'You have hand-corrected bars. Aligning again will discard those moves. '
+          'Continue?') != QMessageBox.Yes:
+        return
+
     self.align_btn.setEnabled(False)
     self.download_bar.setVisible(True)
     self.download_bar.setValue(0)
     self.status.showMessage('aligning…')
+    # No baseline: the aligner compares against the average-tempo estimate, which
+    # is what `median_abs_change_vs_linear_s` means. Passing the map already on
+    # screen made that number report 0.00 s.
     worker = AlignWorker(self.cfg, self.played(), self.piece.audio.path, midi,
-                         baseline=self.result, parent=self)
+                         baseline=None, parent=self)
     worker.progressed.connect(self._on_align_progress)
     worker.aligned.connect(self._on_aligned)
     worker.failed.connect(self._on_align_failed)

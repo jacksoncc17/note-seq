@@ -29,3 +29,6 @@ tutor/certs/
 # analyzer: downloaded audio and derived maps are local artifacts
 analyzer/cache/
 analyzer/output/
+
+# analyzer: scratch space while a module is being developed
+analyzer/.scratch/

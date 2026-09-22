@@ -50,25 +50,36 @@ that an existing map was fitted to the old recording).
   wrong per bar**, and only a few percent of bars land within half a second. Fine
   for "roughly this region", useless for "this exact bar".
 * **Align to recording** — chroma features plus dynamic time warping, fitted to
-  what is actually played. On controlled material with rubato this recovers bar
-  onsets to about **±0.1 s** (one analysis frame).
+  what is actually played. The score side is rendered to audio with FluidSynth so
+  both sides are compared with the same features; leading silence is trimmed and
+  added back; a transposed recording is detected and corrected; and the result is
+  clamped so no bar is given an impossible length.
 
-  On a *real* recording it is rougher, and you should know the numbers: against a
-  real 309.7 s YouTube performance of this very Chopin waltz, the fit landed a
-  median 7.2 s away from the even division — which is musically plausible for a
-  *Lento rubato* waltz, only 2.3% cumulative — but its *local* behaviour was
-  erratic: implied bar lengths from 0.0 s to 7.2 s, with a 5.8 s jump between
-  neighbouring bars. So treat an automatic map on real audio as a **starting
-  point at the region level**, not a bar-accurate result. The app enforces
-  plausibility on every map it loads (no zero-length bars, strictly increasing
-  markers) and says so when it had to clamp, and the match cost is shown so a
-  poor fit is visible instead of silent.
+  What to expect: on controlled material with rubato this recovers bar onsets to
+  about **±0.1 s** (one analysis frame), and aligning a rendered score to itself
+  is exact. On a *real* recording it is rougher, and the numbers from a real
+  309.7 s YouTube performance of this very Chopin waltz are worth knowing: the fit
+  landed a median 3.15 s away from the even division and **20 of 204 bars had to
+  be clamped** (raw bar lengths ran 0.09–7.24 s). So an automatic map on real
+  audio is a **starting point at the region level**, not a bar-accurate result.
+  The app says so rather than pretending: bars the machinery had to overrule get
+  low confidence, the waveform greys them, and the warning text reports how many
+  there were.
+
+  One thing that looks like a quality measure but is not: the DTW match cost.
+  Calibrated here, an identical render scores 0.00, the same music with rubato
+  1.69, the same music transposed 1.01, and *different* music 1.41 — a correct
+  rubato performance scores worse than the wrong piece, because the number is
+  dominated by path length. It is reported as a diagnostic and nothing gates on
+  it; the checks that do discriminate are bar-length plausibility and whether the
+  recording lasts about as long as the score implies.
 
 Then **correct it**: drag any green marker, or hover it and use ← / → (Shift for
 fine steps). Moving a marker switches the map to `manual` and records that a human
 touched it. This is not a fallback for a bad algorithm — every tool in this space
 needs it, because fermatas, rolled chords, ornaments, page turns and ambiguous
 repeats are exactly where automatic alignment is least reliable and most visible.
+Aligning again asks first, since it replaces those corrections.
 
 **Save map** writes JSON under `analyzer/output/sync/<slug>.json`.
 
@@ -143,15 +154,13 @@ analyzer/
 
 ## Status
 
-**M1 and M2 are complete and verified against the real thing**: the window, the
-piece list, the repeat-aware measure list, and the cached-audio download (a live
-YouTube search and download of a 309.7 s performance was fetched, converted to
-mono 22 kHz WAV and served from cache on the second call).
+**M1, M2 and M3 are implemented**, with 127 tests (one opt-in network test).
 
-**M3 is in progress.** Working today: the average-tempo estimate, manual
-correction by dragging (saved as `method: "manual"`), the sidecar JSON with
-staleness detection, and a plausibility validator that every map passes through.
-The chroma + DTW refinement is the remaining piece.
+Verified beyond the unit tests: a live YouTube search and download of a 309.7 s
+performance (cached, and served from cache on the second call); a full align run
+through the real Qt worker threads on that recording (204 markers, bars 40–83 →
+62.38–122.99 s, saved and reloaded); and the window rendered head-less with the
+real piece to check the layout.
 
 **M4**, planned next, replaces fighting the PDF for clickable bars: render the
 authoritative MusicXML with `verovio`, which gives an exact page and rectangle for

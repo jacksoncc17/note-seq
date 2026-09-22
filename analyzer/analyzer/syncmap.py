@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from . import schema
 from .config import AnalyzerConfig
-from .schema import AudioSource, SyncResult
+from .schema import AudioSource, MeasureTime, SyncResult
 
 
 SYNC_VERSION = 1
@@ -197,6 +197,50 @@ def summary_line(stored: StoredSync) -> str:
     parts.append('moved %.2f s from the average-tempo guess'
                  % result.quality['median_abs_change_vs_linear_s'])
   return ', '.join(parts)
+
+
+def uniform_map(played: List[int], duration_s: float, lead_in_s: float = 0.0,
+                tail_s: float = 0.0) -> SyncResult:
+  """A map that just spreads the recording evenly over the measures.
+
+  This is the one map the app can always produce, with no analysis at all, so it
+  is defined here rather than in the aligner: it keeps "give me something to drag"
+  working even if alignment is unavailable or fails. It is a *guess* and says so
+  in its warnings -- measured against a real performance it is one to two seconds
+  wrong per bar, which is fine for roughly this region and useless for exactly
+  this bar.
+
+  Args:
+    played: printed measure numbers in performance order.
+    duration_s: length of the recording.
+    lead_in_s: seconds before the music starts, kept outside the division.
+    tail_s: seconds after the music ends, likewise.
+
+  Returns:
+    A `SyncResult` with method 'linear'.
+
+  Raises:
+    ValueError: when there are no measures or the span is not positive.
+  """
+  count = len(played)
+  if count == 0:
+    raise ValueError('no measures to map')
+  span = float(duration_s) - float(lead_in_s) - float(tail_s)
+  if span <= 0:
+    raise ValueError('the recording is shorter than the lead-in and tail')
+
+  step = span / count
+  measures = []
+  for index, number in enumerate(played):
+    start = lead_in_s + index * step
+    measures.append(MeasureTime(measure=int(number), play_index=index,
+                                start_s=start, end_s=start + step))
+  return SyncResult(
+      method=SyncResult.METHOD_LINEAR, measures=measures,
+      seconds_per_measure=step, audio_duration_s=float(duration_s),
+      offset_s=float(lead_in_s),
+      warnings=['this map spreads the recording evenly over the bars; it is an '
+                'average-tempo guess, not a measurement of the performance'])
 
 
 def check_plausibility(result: SyncResult) -> List[str]:

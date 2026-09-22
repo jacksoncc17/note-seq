@@ -232,3 +232,35 @@ def test_unsaved_changes_are_flagged_for_close(window, cfg):
   assert window.dirty is False
   window._on_tick_moved(0, 0.4)
   assert window.dirty is True
+
+
+def test_realigning_over_hand_corrections_asks_first(window, cfg, monkeypatch):
+  """Re-aligning replaces the whole map, so it must not silently discard drags."""
+  from PyQt5.QtWidgets import QMessageBox
+  from test_align import write_midi
+
+  make_piece(cfg, with_audio=True)
+  # a reference performance, or the align slot stops before the confirmation
+  write_midi(cfg.bank_dir / 'demo' / 'fingerprint_steady.mid', bars=6, beats=3, qpm=120)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_tick_moved(0, 0.4)                 # hand-corrected -> dirty
+  assert window.dirty is True
+
+  monkeypatch.setattr(QMessageBox, 'question',
+                      staticmethod(lambda *a, **k: QMessageBox.No))
+  window.align()
+  assert window._align is None, 'aligning should not have started'
+
+
+def test_aligning_is_refused_politely_without_a_reference_midi(window, cfg, monkeypatch):
+  from PyQt5.QtWidgets import QMessageBox
+
+  make_piece(cfg, with_audio=True)               # no fingerprint_steady.mid written
+  window.refresh_pieces('demo')
+  seen = {}
+  monkeypatch.setattr(QMessageBox, 'information',
+                      staticmethod(lambda *a, **k: seen.setdefault('told', a[2])))
+  window.align()
+  assert window._align is None
+  assert 'analyze.py' in seen.get('told', ''), 'the message should say how to fix it'

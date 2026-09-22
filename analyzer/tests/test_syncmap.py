@@ -157,3 +157,41 @@ def test_a_bar_ending_before_it_starts_is_reported():
 def test_a_sudden_swing_in_bar_length_is_reported():
   problems = syncmap.check_plausibility(_map([1.5] * 5 + [6.0] + [1.5] * 5))
   assert any('swings' in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# the map the app can always produce
+# ---------------------------------------------------------------------------
+
+def test_uniform_map_arithmetic():
+  result = syncmap.uniform_map([1, 2, 3, 4], 8.0)
+  assert result.method == SyncResult.METHOD_LINEAR
+  assert result.is_trusted is False            # a guess is not a measurement
+  assert result.seconds_per_measure == pytest.approx(2.0)
+  assert [m.start_s for m in result.measures] == pytest.approx([0.0, 2.0, 4.0, 6.0])
+  assert [m.end_s for m in result.measures] == pytest.approx([2.0, 4.0, 6.0, 8.0])
+  assert result.warnings and 'guess' in result.warnings[0]
+  assert syncmap.check_plausibility(result) == []
+
+
+def test_uniform_map_keeps_a_lead_in_outside_the_division():
+  result = syncmap.uniform_map([1, 2], 8.0, lead_in_s=2.0)
+  assert result.measures[0].start_s == pytest.approx(2.0)
+  assert result.seconds_per_measure == pytest.approx(3.0)
+  assert result.measures[-1].end_s == pytest.approx(8.0)
+  assert result.offset_s == pytest.approx(2.0)
+
+
+def test_uniform_map_refuses_nonsense():
+  with pytest.raises(ValueError):
+    syncmap.uniform_map([], 10.0)
+  with pytest.raises(ValueError):
+    syncmap.uniform_map([1, 2], 0.5, lead_in_s=2.0)
+
+
+def test_uniform_map_handles_a_repeated_bar():
+  """A bar played twice appears twice in the performance, so it gets two slots."""
+  result = syncmap.uniform_map([1, 2, 3, 2, 3, 4], 9.0)
+  assert [m.measure for m in result.measures] == [1, 2, 3, 2, 3, 4]
+  assert [m.play_index for m in result.measures] == list(range(6))
+  assert result.seconds_per_measure == pytest.approx(1.5)
