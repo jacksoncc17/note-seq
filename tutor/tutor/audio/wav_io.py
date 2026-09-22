@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 
 
-def read_wav(path: str) -> tuple:
+def read_wav(path: str, quiet: bool = False) -> tuple:
   """Return (float32 mono samples in [-1, 1], sample_rate).
 
   Frame counts are derived from the bytes actually present, never from the
@@ -35,7 +35,7 @@ def read_wav(path: str) -> tuple:
       chunks.append(chunk)
   frames = b''.join(chunks)
   actual = len(frames) // max(width * channels, 1)
-  if declared > actual * 2:
+  if declared > actual * 2 and not quiet:
     # Worth surfacing: silently accepting it is how a 6s file becomes 25 hours.
     import sys
     print('note: %s declares %d frames but holds %d; using the real count'

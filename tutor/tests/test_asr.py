@@ -170,15 +170,20 @@ def test_404_error_message_names_the_right_api():
 
 def test_connection_reset_is_not_reported_as_server_down():
   """Live behaviour: whisper-asr-webservice resets the connection on an
-  unknown path rather than returning 404, so the advice must differ."""
+  unknown path rather than returning 404, so the advice must differ.
+
+  It must not claim the server is down (it isn't), and it must not claim the
+  endpoint is wrong either -- a firewall in between produces the same reset, as
+  a live outage here showed. It offers both readings.
+  """
   client = OpenAiCompatAsr('http://192.168.2.174:9000')
   err = client._error(urllib.error.URLError(
       ConnectionResetError(104, 'Connection reset by peer')))
   message = str(err)
-  assert 'running' in message               # server is up...
-  assert '/audio/transcriptions' in message
-  assert 'whisper_asr' in message
-  assert 'unreachable' not in message
+  assert '/audio/transcriptions' in message      # names what it tried
+  assert 'whisper_asr' in message                # and how to switch shape
+  assert 'unreachable' not in message            # not the same as a dead host
+  assert 'does not exist' in message or 'refused' in message
 
   # A genuine connection failure still gets the plain message.
   down = client._error(urllib.error.URLError(ConnectionRefusedError(111,

@@ -130,6 +130,7 @@ class Conductor:
                     extra_state: Optional[Dict] = None,
                     depth: int = 0) -> Optional[str]:
     started = time.monotonic()
+    self.tts_error: Optional[str] = None
     if user_text:
       self.history.append({'role': 'user', 'content': user_text})
     state = self._state_block(trigger, extra_state)
@@ -170,7 +171,14 @@ class Conductor:
                           latency_ms=latency_ms, think_ms=think_ms,
                           playback_ms=playback_ms)
     self.transcript.append({'trigger': trigger, 'user': user_text,
-                            'reply': repaired, 'tools': [t['name'] for t in tool_log],
+                            'reply': repaired,
+                            # Full records, not just names: the summaries are the
+                            # evidence the reply was allowed to cite, and a
+                            # client showing "what the tutor looked up" wants
+                            # them.
+                            'tools': [{'name': t['name'], 'ok': t.get('ok'),
+                                       'summary': (t.get('summary') or '')[:200]}
+                                      for t in tool_log],
                             'grounded': report.ok, 'spoken_fully': spoken,
                             'ungrounded': [(c.kind, c.value)
                                            for c in report.ungrounded],
@@ -264,10 +272,18 @@ class Conductor:
     self._tts_cancel = asyncio.Event()
     self.state.speaking = True
     self.state.floor = Floor.TUTOR
-    self._tts_task = asyncio.create_task(self.tts.speak(text, self._tts_cancel))
+    completed = False
     try:
+      self._tts_task = asyncio.create_task(self.tts.speak(text, self._tts_cancel))
       completed = await self._tts_task
     except asyncio.CancelledError:
+      completed = False
+    except Exception as exc:  # noqa: BLE001 - a voice outage must not end the lesson
+      # The reply text still reaches the client, which can show it. Losing the
+      # whole turn because synthesis failed would be worse than being silent.
+      self.tts_error = str(exc)[:200]
+      self.session.log({'event': 'tts_error', 'error': self.tts_error})
+      print('  [tts unavailable: %s]' % self.tts_error)
       completed = False
     finally:
       self.state.speaking = False
@@ -284,8 +300,10 @@ class Conductor:
   async def greet(self) -> None:
     if self.greeted:
       return
-    self.greeted = True
     await self.respond('greeting')
+    # Marked only after it succeeds: a transient failure (a TTS box that is
+    # briefly away) used to consume the greeting permanently.
+    self.greeted = True
 
 
 def _json(value) -> str:

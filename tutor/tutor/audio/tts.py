@@ -69,6 +69,11 @@ class OpenAiCompatTts:
     self.timeout_s = timeout_s
     self.play = play
     self.verbose = verbose          # the doctor runs without the chatter
+    # Successfully synthesized files, in order. Clients slice this to collect
+    # exactly the audio produced by one turn: the sentence counter restarts each
+    # process and filenames are reused, so scanning the output directory would
+    # happily return yesterday's audio.
+    self.written: list = []
     # Language code for non-English voices ('z' = Mandarin). Passed through when
     # set; measured on a live server, zf_xiaoxiao produced the same Chinese with
     # and without it, so treat this as schema-correct rather than load-bearing.
@@ -111,6 +116,7 @@ class OpenAiCompatTts:
             % (self.base_url, exc)) from exc
       if self.verbose:
         print('  [tutor] %s   (%s)' % (sentence, path))
+      self.written.append(path)
       if self.play:
         await self._play(path, cancel)
     return True

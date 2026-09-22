@@ -455,6 +455,172 @@ async def cmd_mic_replay(cfg: TutorConfig, path: str,
   return 0
 
 
+def build_app(cfg: TutorConfig, mode: str = 'converse', asr=None,
+              ca_path: Optional[str] = None):
+  """A served session: the conductor plus the HTTP app around it.
+
+  The server never plays audio itself -- the phone does -- so TTS playback is
+  forced off even when `tts_play` is on, otherwise both devices would speak.
+  """
+  conductor, facts, session, tools, verifier = build(cfg, mode)
+  if hasattr(conductor.tts, 'play'):
+    conductor.tts.play = False
+  if asr is None and cfg.asr != 'stub':
+    from .audio.asr import make_asr
+    asr = make_asr(cfg)
+  from .server import TutorHttpApp
+  return TutorHttpApp(cfg, conductor, facts, session, tools,
+                      asr=asr, tts=conductor.tts, ca_path=ca_path)
+
+
+def _local_addresses() -> List[str]:
+  import socket
+  addresses = []
+  try:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    probe.connect(('192.168.0.1', 1))       # no packets sent; just picks a route
+    addresses.append(probe.getsockname()[0])
+    probe.close()
+  except OSError:
+    pass
+  return addresses
+
+
+def cmd_make_cert(ips: Optional[str], out_dir: Optional[str],
+                  days: int) -> int:
+  """Create a local CA and a server certificate with correct SANs.
+
+  Browsers only grant microphone access on a secure origin, and a LAN IP over
+  plain http is not one. TLS fixes that, but a self-signed certificate needs the
+  IP in its subjectAltName (a bare CN is not enough for Chrome) and still shows
+  a warning unless the signing CA is trusted. This produces both halves, so the
+  tablet can trust the CA once and never see a warning again.
+  """
+  import shutil
+  import subprocess
+  import tempfile
+
+  openssl = shutil.which('openssl')
+  if not openssl:
+    print('openssl not found on PATH. Either install it, or skip TLS entirely\n'
+          'with a USB cable: adb reverse tcp:8080 tcp:8080, then open\n'
+          'http://localhost:8080 on the tablet (localhost is a secure origin).',
+          file=sys.stderr)
+    return 2
+
+  out = os.path.abspath(out_dir or os.path.join(
+      os.path.dirname(os.path.abspath(__file__)), '..', 'certs'))
+  os.makedirs(out, exist_ok=True)
+  addresses = [a.strip() for a in (ips or '').split(',') if a.strip()]
+  if not addresses:
+    addresses = _local_addresses() or ['127.0.0.1']
+  san = ['DNS:localhost', 'DNS:piano-tutor.local', 'IP:127.0.0.1'] + [
+      'IP:%s' % a for a in addresses]
+
+  def run(args):
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+      raise SystemExit('openssl failed (%s):\n%s'
+                       % (' '.join(args[:2]), result.stderr.strip()[:400]))
+
+  ca_key = os.path.join(out, 'ca.key')
+  ca_pem = os.path.join(out, 'ca.pem')
+  key = os.path.join(out, 'server.key')
+  csr = os.path.join(out, 'server.csr')
+  pem = os.path.join(out, 'server.pem')
+
+  run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+       '-keyout', ca_key, '-out', ca_pem, '-days', str(days),
+       '-subj', '/CN=Piano Tutor Local CA'])
+  run([openssl, 'req', '-newkey', 'rsa:2048', '-nodes', '-keyout', key,
+       '-out', csr, '-subj', '/CN=piano-tutor'])
+  with tempfile.NamedTemporaryFile('w', suffix='.cnf', delete=False) as ext:
+    ext.write('subjectAltName=%s\n' % ','.join(san))
+    ext.write('basicConstraints=CA:FALSE\n')
+    ext.write('keyUsage=digitalSignature,keyEncipherment\n')
+    ext.write('extendedKeyUsage=serverAuth\n')
+    ext_path = ext.name
+  try:
+    run([openssl, 'x509', '-req', '-in', csr, '-CA', ca_pem, '-CAkey', ca_key,
+         '-CAcreateserial', '-out', pem, '-days', str(days),
+         '-extfile', ext_path])
+  finally:
+    os.unlink(ext_path)
+  os.chmod(key, 0o600)
+  os.chmod(ca_key, 0o600)
+
+  print('== certificates written to %s ==' % out)
+  print('  ca.pem      install this on the tablet, once')
+  print('  server.pem  server certificate   (.key: its private key)')
+  print('  valid for  : %s' % ', '.join(san[2:]))
+  print('\n1. serve over TLS:')
+  print('     ./run.sh serve --cert %s --key %s --port 8443' % (pem, key))
+  print('\n2. on the tablet, fetch and trust the CA -- the http server hands it out:')
+  print('     http://%s:8080/ca.pem' % addresses[0])
+  print('     Settings > Security > Encryption & credentials >')
+  print('     Install a certificate > CA certificate > pick the file')
+  print('\n3. then open this on the tablet (trusted, so the mic is allowed):')
+  for address in addresses:
+    print('     https://%s:8443' % address)
+  print('\nNo certificates wanted? Use a USB cable instead:')
+  print('     adb reverse tcp:8080 tcp:8080   ->   http://localhost:8080')
+  return 0
+
+
+async def cmd_serve(cfg: TutorConfig, host: str, port: int,
+                    certfile: Optional[str], keyfile: Optional[str],
+                    mode: str) -> int:
+  from .server import start
+
+  # If a CA sits beside the certificate, hand it out at /ca.pem so the tablet
+  # can install it without copying files around.
+  ca_path = None
+  if certfile:
+    candidate = os.path.join(os.path.dirname(os.path.abspath(certfile)), 'ca.pem')
+    if os.path.isfile(candidate):
+      ca_path = candidate
+  app = build_app(cfg, mode, ca_path=ca_path)
+  server, actual_port = await start(cfg, app, host, port, certfile, keyfile)
+  scheme = 'https' if certfile and keyfile else 'http'
+  print('\n== tutor server ==')
+  print('  piece : %s' % cfg.piece)
+  print('  llm   : %s' % cfg.llm)
+  print('  asr   : %s' % (type(app.asr).__name__ if app.asr else 'none (text only)'))
+  print('  tts   : %s' % type(app.tts).__name__)
+  print('\n  on this machine : %s://127.0.0.1:%d' % (scheme, actual_port))
+  if host == '0.0.0.0':
+    for address in _local_addresses():
+      print('  on your phone   : %s://%s:%d' % (scheme, address, actual_port))
+    if scheme == 'http':
+      print('\n  NOTE: over plain http on a LAN IP, browsers refuse microphone')
+      print('        access. Pick one:')
+      print('          a) USB cable (nothing to install):')
+      print('               adb reverse tcp:%d tcp:%d' % (actual_port, actual_port))
+      print('             then open http://localhost:%d on the tablet' % actual_port)
+      print('          b) TLS, one command to set up:')
+      print('               python -m tutor.cli --make-cert')
+      print('             then serve with --cert/--key and trust the CA')
+      print('\n  typing works right now either way.')
+    elif ca_path:
+      print('\n  trust the CA on the tablet once, then no warnings:')
+      print('    http://%s:%d/ca.pem' % (_local_addresses()[:1] or ['<lan-ip>'],
+                                        8080))
+  else:
+    print('\n  bound to %s: only this machine can reach it (use --host 0.0.0.0'
+          ' for your phone).' % host)
+  print('\n  Ctrl-C to stop\n')
+  try:
+    async with server:
+      await server.serve_forever()
+  except asyncio.CancelledError:
+    pass
+  except KeyboardInterrupt:
+    print('\nstopped')
+  finally:
+    server.close()
+  return 0
+
+
 async def cmd_mic_oneshot(cfg: TutorConfig, seconds: float,
                           device: Optional[str] = None,
                           delay: float = 0.0) -> int:
@@ -801,7 +967,8 @@ def _report(conductor, facts, session, tools) -> None:
   print('=' * 70)
   for turn in conductor.transcript:
     print(' trigger=%-16s user=%-34r tools=%s grounded=%s'
-          % (turn['trigger'], turn['user'], ','.join(turn['tools']) or '-',
+          % (turn['trigger'], turn['user'],
+             ','.join(t['name'] for t in turn['tools']) or '-',
              turn['grounded']))
     print('   think %.0fms + speech %.0fms = %.0fms total'
           % (turn.get('think_ms', 0), turn.get('playback_ms', 0),
@@ -834,6 +1001,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                   help='show every question bank on disk')
   ap.add_argument('--doctor', action='store_true',
                   help='check the environment, question bank, servers and mic')
+  ap.add_argument('--serve', action='store_true',
+                  help='serve the tutor over HTTP for a phone browser')
+  ap.add_argument('--host', default='127.0.0.1',
+                  help='bind address for --serve (0.0.0.0 to reach it from a phone)')
+  ap.add_argument('--port', type=int, default=8080, help='port for --serve')
+  ap.add_argument('--cert', default=None, help='TLS certificate (enables https)')
+  ap.add_argument('--key', default=None, help='TLS private key')
+  ap.add_argument('--make-cert', action='store_true',
+                  help='create a local CA plus a server certificate with the '
+                       'right SANs, then print the tablet setup steps')
+  ap.add_argument('--cert-ip', default=None,
+                  help='comma-separated IPs to include in the certificate '
+                       '(default: this machine\'s)')
+  ap.add_argument('--cert-dir', default=None, help='where to write certificates')
   ap.add_argument('--asr-url', default=None,
                   help='ASR server base URL, e.g. http://192.168.2.174:9000')
   ap.add_argument('--asr-api', default=None,
@@ -907,6 +1088,11 @@ def main(argv: Optional[List[str]] = None) -> int:
   if args.doctor:
     from .doctor import run_doctor
     return asyncio.run(run_doctor(cfg))
+  if args.make_cert:
+    return cmd_make_cert(args.cert_ip, args.cert_dir, 3650)
+  if args.serve:
+    return asyncio.run(cmd_serve(cfg, args.host, args.port, args.cert,
+                                 args.key, args.mode))
   if args.tts_voices:
     return asyncio.run(cmd_tts_probe(cfg, None, None, False, True))
   if args.tts_probe is not None:

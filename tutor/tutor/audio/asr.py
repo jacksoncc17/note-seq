@@ -194,6 +194,9 @@ class StubAsr:
       return Transcript(text=self.script.pop(0), confidence=0.99)
     return Transcript(text=self.default, confidence=1.0)
 
+  async def transcribe_file(self, data: bytes, filename: str) -> Transcript:
+    return await self.transcribe(b'', 0)
+
 
 class _HttpAsrBase:
   """Shared plumbing: POST a multipart body in a thread, wrap errors."""
@@ -238,10 +241,10 @@ class _HttpAsrBase:
     if isinstance(reason, (ConnectionResetError, ConnectionAbortedError,
                            BrokenPipeError)) or 'reset' in str(reason).lower():
       return RuntimeError(
-          'ASR server at %s accepted the connection but closed it on %s -- the '
-          'server is running, this endpoint probably is not. Try '
-          'TUTOR_ASR_API=auto (it reads the server\'s OpenAPI document) or set '
-          'it to whisper_asr for whisper-asr-webservice (%s).'
+          'ASR connection to %s was closed on %s (%s). Either that endpoint '
+          'does not exist on the server (try TUTOR_ASR_API=auto, which reads '
+          'its OpenAPI document, or whisper_asr for whisper-asr-webservice), '
+          'or something between the two hosts refused it.'
           % (self.base_url, self.endpoint, reason))
     return RuntimeError(
         'ASR server unreachable at %s (%s). Start it, or use TUTOR_ASR=stub.'
@@ -254,7 +257,24 @@ class _HttpAsrBase:
       raise self._error(exc) from exc
     return self._parse(payload)
 
+  async def transcribe_file(self, data: bytes, filename: str) -> Transcript:
+    """Transcribe an already-encoded file (WebM/Opus from a phone, MP4, WAV).
+
+    Browser recorders emit containers, not raw PCM -- Chrome sends
+    audio/webm;codecs=opus and Safari sends audio/mp4 -- so the bytes are
+    forwarded as-is and the server's ffmpeg decodes them. Requiring PCM would
+    mean re-encoding in JavaScript.
+    """
+    try:
+      payload = await asyncio.to_thread(self._post_file, data, filename)
+    except Exception as exc:  # noqa: BLE001
+      raise self._error(exc) from exc
+    return self._parse(payload)
+
   def _transcribe_sync(self, pcm: bytes, sample_rate: int) -> dict:
+    raise NotImplementedError
+
+  def _post_file(self, data: bytes, filename: str) -> dict:
     raise NotImplementedError
 
   def _parse(self, payload: dict) -> Transcript:
@@ -276,12 +296,14 @@ class OpenAiCompatAsr(_HttpAsrBase):
     self.language = language
 
   def _transcribe_sync(self, pcm: bytes, sample_rate: int) -> dict:
+    return self._post_file(pcm16_to_wav_bytes(pcm, sample_rate), 'speech.wav')
+
+  def _post_file(self, data: bytes, filename: str) -> dict:
     fields = {'model': self.model, 'language': self.language,
               'response_format': 'json'}
     if self.hotwords:
       fields['prompt'] = self.hotwords
-    body, content_type = build_multipart(
-        fields, 'file', 'speech.wav', pcm16_to_wav_bytes(pcm, sample_rate))
+    body, content_type = build_multipart(fields, 'file', filename, data)
     return self._post(self.base_url + '/audio/transcriptions', body, content_type)
 
   def _parse(self, payload: dict) -> Transcript:
@@ -309,11 +331,13 @@ class WhisperAsrWebservice(_HttpAsrBase):
     self.word_timestamps = word_timestamps
 
   def _transcribe_sync(self, pcm: bytes, sample_rate: int) -> dict:
+    return self._post_file(pcm16_to_wav_bytes(pcm, sample_rate), 'speech.wav')
+
+  def _post_file(self, data: bytes, filename: str) -> dict:
     url = whisper_asr_url(self.base_url, self.language, self.hotwords,
                           vad_filter=self.vad_filter,
                           word_timestamps=self.word_timestamps)
-    body, content_type = build_multipart(
-        {}, 'audio_file', 'speech.wav', pcm16_to_wav_bytes(pcm, sample_rate))
+    body, content_type = build_multipart({}, 'audio_file', filename, data)
     return self._post(url, body, content_type)
 
   def _parse(self, payload: dict) -> Transcript:

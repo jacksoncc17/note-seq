@@ -111,10 +111,9 @@ class ScriptedTutor:
       return LlmReply(text='Hello. Ask me about a bar, a key area or a repeat, '
                            'or say drill me.')
 
-    if mode == 'drill':
-      return LlmReply(tool_calls=[self._call(
-          'next_question', {'tier': int(state.get('tier_max', 1))})])
-
+    # An explicit question outranks the mode's default. Asking "what is the
+    # structure?" while drilling should be answered, not treated as a request
+    # for the next question -- a real tutor would answer it.
     if any(w in lowered for w in ('end of', 'ending', 'coda', 'last bar',
                                   'finish', 'final bar')):
       last = int(state.get('last_bar') or 1)
@@ -127,6 +126,12 @@ class ScriptedTutor:
     bar = _BAR_RE.search(text)
     if bar:
       return LlmReply(tool_calls=[self._call('get_bar', {'bar': int(bar.group(1))})])
+
+    # Nothing specific was asked: in drill mode that means "next question".
+    if mode == 'drill':
+      return LlmReply(tool_calls=[self._call(
+          'next_question', {'tier': int(state.get('tier_max', 1))})])
+
     num = _PLAIN_NUM_RE.search(text)
     if num:
       return LlmReply(tool_calls=[self._call('get_bar', {'bar': int(num.group(1))})])
