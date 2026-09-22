@@ -29,7 +29,7 @@ cd analyzer
 Reaching it: `PyQt5` and `yt-dlp` are the only additions to the project venv:
 
 ```bash
-../.venv/bin/pip install PyQt5 yt-dlp
+../.venv/bin/pip install PyQt5 yt-dlp verovio cairosvg
 ```
 
 ## The three steps in the window
@@ -82,6 +82,45 @@ repeats are exactly where automatic alignment is least reliable and most visible
 Aligning again asks first, since it replaces those corrections.
 
 **Save map** writes JSON under `analyzer/output/sync/<slug>.json`.
+
+## The score view (M4)
+
+The **Score** tab shows the engraved score, and **every bar is clickable**: click a
+bar to select it, double-click to hear it, `←`/`→` to step bar by bar, Ctrl+wheel or
+`+`/`−` to zoom, and *follow playback* to keep the page under the music as it plays.
+
+The bars come from the **authoritative MusicXML**, not from your PDF:
+
+```
+MusicXML --verovio--> SVG per page --cairosvg--> PNG --Qt--> the tab
+                            |
+                            +--> a page and a rectangle for every measure
+```
+
+Verovio is used because it hands back *structure*: with `svgBoundingBoxes` every
+element gets a bounding box, so each measure's exact rectangle is known (the
+*number* comes from the matching MEI `xml:id`). Those rectangles are what a click
+is tested against, so clicking a bar plays the bar you clicked.
+
+Two notes on that pipeline, because both cost real debugging time:
+
+* **Qt cannot rasterise Verovio's SVG.** QtSvg fails to resolve Verovio's
+  `<use xlink:href>` references into its `<defs>` glyph layer (the glyphs are
+  `<g><path>` there, not `<symbol>`), and on this machine it did not merely drop
+  glyphs — it segfaulted the process. cairosvg resolves them correctly, so Qt only
+  ever draws a PNG.
+* **Your PDF is still there**, behind *Open PDF*, and it is the edition you
+  actually read. The rendered view is a *re-engraving*: page breaks, fingering and
+  layout will differ from your copy, which is the price of getting exact measure
+  coordinates.
+
+Rendering takes about fifteen seconds for a 200-bar piece and is then cached under
+`analyzer/output/render/`, keyed by the score's size and mtime; *Engrave again*
+forces a fresh one. It needs `verovio` and `cairosvg`:
+
+```bash
+../.venv/bin/pip install verovio cairosvg
+```
 
 ## What the map knows about itself
 
@@ -144,28 +183,30 @@ analyzer/
     align.py                linear estimate, silence trim, chroma + DTW alignment
     syncmap.py              the sidecar JSON: save, load, staleness
     library.py              finds pieces, their scores, PDFs, recordings, maps
+    scoreview.py            MusicXML -> page images with a rectangle per measure
     ui/
       main_window.py        the window
       waveform.py           envelope + draggable measure markers
+      score_widget.py       the engraved score: click a bar, highlight a range
       player.py             sample-accurate playback of a bar range
-      workers.py            download and alignment on background threads
+      workers.py            download, alignment and engraving on background threads
   tests/                    pytest, head-less (QT_QPA_PLATFORM=offscreen)
 ```
 
 ## Status
 
-**M1, M2 and M3 are implemented**, with 127 tests (one opt-in network test).
+**M1-M4 are implemented**, with 175 tests (one opt-in network test).
 
-Verified beyond the unit tests: a live YouTube search and download of a 309.7 s
-performance (cached, and served from cache on the second call); a full align run
-through the real Qt worker threads on that recording (204 markers, bars 40–83 →
-62.38–122.99 s, saved and reloaded); and the window rendered head-less with the
-real piece to check the layout.
+* **M1** the window: piece picker, repeat-aware measure list, range selector, transport.
+* **M2** the recording: fetched once with yt-dlp, converted with ffmpeg, cached locally.
+* **M3** the map: average-tempo estimate, chroma + DTW refinement, draggable markers, sidecar JSON.
+* **M4** the score view: engraved pages from the MusicXML, every bar clickable, following playback.
 
-**M4**, planned next, replaces fighting the PDF for clickable bars: render the
-authoritative MusicXML with `verovio`, which gives an exact page and rectangle for
-every measure (verified on the Chopin: 204 of 204 measures), and keep the PDF
-beside it as the edition you actually read.
+Verified beyond the unit tests: a live YouTube search and download (309.7 s
+recording, served from cache on the second call); a full align run through the real
+Qt worker threads (204 markers, bars 40-83 -> 62.38-122.99 s, saved and reloaded);
+and the score tab driven end to end (9 pages, 204 measures clickable, clicking bar
+10 selecting and playing it, follow playback turning to page 6 for bar 150).
 
 ## Troubleshooting
 

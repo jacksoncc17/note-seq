@@ -90,3 +90,42 @@ class AlignWorker(QThread):
       self.failed.emit(str(e))
       return
     self.aligned.emit(result)
+
+
+class RenderWorker(QThread):
+  """Engrave the score into page images (Verovio + cairosvg).
+
+  Engraving a 200-bar piano piece into nine pages takes on the order of fifteen
+  seconds the first time and is then cached, so it runs off the UI thread like the
+  other slow work.
+
+  Signals:
+    progressed: (percent 0..100, message)
+    rendered: (ScoreRender)
+    failed: (message)
+  """
+
+  progressed = pyqtSignal(float, str)
+  rendered = pyqtSignal(object)
+  failed = pyqtSignal(str)
+
+  def __init__(self, cfg: AnalyzerConfig, musicxml, force: bool = False, parent=None):
+    super().__init__(parent)
+    self.cfg = cfg
+    self.musicxml = str(musicxml)
+    self.force = force
+
+  def run(self) -> None:                        # pragma: no cover - needs Qt loop
+    try:
+      from .. import scoreview
+    except ImportError as e:
+      self.failed.emit('the score view is unavailable: %s' % e)
+      return
+    try:
+      render = scoreview.render_score(
+          self.cfg, self.musicxml, force=self.force,
+          progress=lambda percent, message: self.progressed.emit(percent, message))
+    except Exception as e:                      # ScoreRenderError, and anything else
+      self.failed.emit(str(e))
+      return
+    self.rendered.emit(render)

@@ -22,14 +22,16 @@ from PyQt5.QtGui import QDesktopServices, QKeySequence
 from PyQt5.QtWidgets import (QAction, QCheckBox, QComboBox, QFileDialog, QFormLayout,
                              QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-                             QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget)
+                             QPushButton, QScrollArea, QSpinBox, QSplitter, QTabWidget,
+                             QVBoxLayout, QWidget)
 
-from .. import library, measures, syncmap
+from .. import library, measures, scoreview, syncmap
 from ..config import AnalyzerConfig
 from ..schema import MeasureTime, SyncResult
 from .player import RangePlayer
+from .score_widget import ScoreView
 from .waveform import WaveformView
-from .workers import AlignWorker, DownloadWorker
+from .workers import AlignWorker, DownloadWorker, RenderWorker
 
 # Starting exactly on the downbeat clips the piano's attack, and stopping exactly
 # at the barline cuts the final resonance; a little air on both sides is what
@@ -52,6 +54,7 @@ class MainWindow(QMainWindow):
     self.dirty = False
     self._download: Optional[DownloadWorker] = None
     self._align: Optional[AlignWorker] = None
+    self._render: Optional[RenderWorker] = None
     self._loop = False
 
     self.setWindowTitle('Analyzer — align measures with a recording')
@@ -78,7 +81,11 @@ class MainWindow(QMainWindow):
 
     splitter = QSplitter(Qt.Horizontal)
     splitter.addWidget(self._measure_list_panel())
-    splitter.addWidget(self._waveform_panel())
+
+    self.tabs = QTabWidget()
+    self.tabs.addTab(self._waveform_panel(), 'Recording')
+    self.tabs.addTab(self._score_panel(), 'Score')
+    splitter.addWidget(self.tabs)
     splitter.setStretchFactor(0, 0)
     splitter.setStretchFactor(1, 1)
     splitter.setSizes([280, 900])
@@ -195,6 +202,73 @@ class MainWindow(QMainWindow):
                   '(hold Shift for fine steps) · space plays the selected range')
     hint.setStyleSheet('color: #7f8c93;')
     hint.setWordWrap(True)
+    layout.addWidget(hint)
+    return box
+
+  def _score_panel(self) -> QWidget:
+    """The engraved score: click a bar to select it, double-click to hear it."""
+    box = QWidget()
+    layout = QVBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+
+    bar = QHBoxLayout()
+    self.page_prev = QPushButton('‹ page')
+    self.page_prev.clicked.connect(lambda: self.score_view.previous_page())
+    bar.addWidget(self.page_prev)
+
+    self.page_label = QLabel('—')
+    bar.addWidget(self.page_label)
+
+    self.page_next = QPushButton('page ›')
+    self.page_next.clicked.connect(lambda: self.score_view.next_page())
+    bar.addWidget(self.page_next)
+
+    bar.addSpacing(12)
+    self.zoom_out_btn = QPushButton('−')
+    self.zoom_out_btn.setFixedWidth(32)
+    self.zoom_out_btn.clicked.connect(lambda: self.score_view.zoom_out())
+    bar.addWidget(self.zoom_out_btn)
+
+    self.zoom_label = QLabel('100%')
+    bar.addWidget(self.zoom_label)
+
+    self.zoom_in_btn = QPushButton('+')
+    self.zoom_in_btn.setFixedWidth(32)
+    self.zoom_in_btn.clicked.connect(lambda: self.score_view.zoom_in())
+    bar.addWidget(self.zoom_in_btn)
+
+    self.fit_btn = QPushButton('fit width')
+    self.fit_btn.clicked.connect(lambda: self.score_view.fit_width(self.score_scroll.viewport().width()))
+    bar.addWidget(self.fit_btn)
+
+    self.follow_check = QCheckBox('follow playback')
+    self.follow_check.setChecked(True)
+    bar.addWidget(self.follow_check)
+
+    bar.addSpacing(12)
+    self.rerender_btn = QPushButton('Engrave again')
+    self.rerender_btn.setToolTip('Ignore the cached rendering and engrave the MusicXML afresh')
+    self.rerender_btn.clicked.connect(lambda: self.render_score(force=True))
+    bar.addWidget(self.rerender_btn)
+
+    self.score_status = QLabel('')
+    bar.addWidget(self.score_status, 1)
+    layout.addLayout(bar)
+
+    self.score_view = ScoreView()
+    self.score_view.measureClicked.connect(self._on_score_measure_clicked)
+    self.score_view.measureActivated.connect(self._on_score_measure_activated)
+    self.score_view.pageChanged.connect(self._on_score_page_changed)
+
+    self.score_scroll = QScrollArea()
+    self.score_scroll.setWidget(self.score_view)
+    self.score_scroll.setWidgetResizable(True)
+    self.score_scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+    layout.addWidget(self.score_scroll, 1)
+
+    hint = QLabel('click a bar to select it · double-click to play it · '
+                  'Ctrl+wheel or +/− to zoom · ← / → step bar by bar')
+    hint.setStyleSheet('color: #7f8c93;')
     layout.addWidget(hint)
     return box
 
@@ -322,6 +396,8 @@ class MainWindow(QMainWindow):
     self.measure_list.clear()
     self.waveform.set_ticks([], [])
     self.waveform.set_selection(None, None)
+    self.score_view.set_render(None)
+    self.score_status.setText('')
     self.map_label.setText('no map yet')
     self.save_btn.setEnabled(False)
 
@@ -374,6 +450,9 @@ class MainWindow(QMainWindow):
         self.map_label.setText('%s — %s' % (syncmap.summary_line(self.stored), reason))
     elif piece.has_audio:
       self.estimate(auto=True)
+
+    if piece.has_score:
+      self.render_score()
 
     self._update_buttons()
 
@@ -670,6 +749,7 @@ class MainWindow(QMainWindow):
   # ------------------------------------------------------------------ transport
 
   def _on_range_changed(self) -> None:
+    self._sync_score_selection()
     if self.result is not None and self.result.measures:
       span = self.result.range_for_measures(self.first_spin.value(), self.last_spin.value())
       if span:
@@ -692,6 +772,7 @@ class MainWindow(QMainWindow):
       span = self.result.range_for_measures(min(numbers), max(numbers))
       if span:
         self.waveform.set_selection(*span)
+    self.show_measure_in_score(min(numbers))
     self.waveform.set_playhead(self.waveform.ticks()[index] if index < len(self.waveform.ticks()) else None)
     self._on_range_changed()
 
@@ -724,6 +805,15 @@ class MainWindow(QMainWindow):
 
   def _on_position(self, seconds: float) -> None:
     self.waveform.set_playhead(seconds)
+    measure = self._measure_at_time(seconds)
+    if measure is not None:
+      self.score_view.set_playhead_measure(measure)
+      if self.follow_check.isChecked() and not self._measure_on_shown_page(measure):
+        self.score_view.show_measure(measure)
+
+  def _measure_on_shown_page(self, measure: int) -> bool:
+    page = self.score_view.page()
+    return bool(page and any(b.number == measure for b in page.measures))
 
   def _on_playback_finished(self) -> None:
     self.waveform.set_playhead(None)
@@ -735,12 +825,95 @@ class MainWindow(QMainWindow):
 
   # ------------------------------------------------------------------ misc
 
+  # ------------------------------------------------------------------ score
+
+  def render_score(self, force: bool = False) -> None:
+    """Engrave the score into page images, off the UI thread.
+
+    The first render of a 200-bar piece takes about fifteen seconds and is then
+    cached next to the piece, so this is a worker with progress rather than a
+    blocking call.
+    """
+    if self.piece is None or not self.piece.has_score:
+      self.score_status.setText('no score to engrave')
+      self.score_view.set_render(None)
+      return
+    if self._render is not None and self._render.isRunning():
+      return
+    self.score_status.setText('engraving…')
+    self.rerender_btn.setEnabled(False)
+    worker = RenderWorker(self.cfg, self.piece.musicxml, force=force, parent=self)
+    worker.progressed.connect(self._on_render_progress)
+    worker.rendered.connect(self._on_rendered)
+    worker.failed.connect(self._on_render_failed)
+    self._render = worker
+    worker.start()
+
+  def _on_render_progress(self, percent: float, message: str) -> None:
+    if message:
+      self.score_status.setText('%s (%.0f%%)' % (message, percent))
+
+  def _on_rendered(self, render) -> None:
+    self.rerender_btn.setEnabled(True)
+    self.score_view.set_render(render)
+    pages = len(render.pages)
+    measures = render.measure_count
+    note = ''
+    if render.warnings:
+      note = ' · ' + '; '.join(render.warnings[:1])
+    self.score_status.setText('%d page(s), %d measures clickable%s' % (pages, measures, note))
+    self._on_score_page_changed(self.score_view.page_number)
+    self._sync_score_selection()
+
+  def _on_render_failed(self, message: str) -> None:
+    self.rerender_btn.setEnabled(True)
+    self.score_status.setText('score not engraved')
+    self.status.showMessage(message)
+    QMessageBox.warning(self, 'Could not engrave the score', message)
+
+  def _on_score_page_changed(self, number: int) -> None:
+    total = len(self.score_view.render.pages) if self.score_view.render else 0
+    self.page_label.setText('page %d / %d' % (number, total) if total else '—')
+    self.zoom_label.setText('%d%%' % round(100 * self.score_view.zoom()))
+
+  def _on_score_measure_clicked(self, measure: int) -> None:
+    self.first_spin.setValue(measure)
+    self.last_spin.setValue(measure)
+    self.status.showMessage('bar %d selected — press Play range to hear it' % measure)
+
+  def _on_score_measure_activated(self, measure: int) -> None:
+    self._on_score_measure_clicked(measure)
+    self.play_range()
+
+  def _sync_score_selection(self) -> None:
+    """Mirror the current range onto the score page."""
+    if self.result is None or not self.result.measures:
+      self.score_view.set_selection(None, None)
+      return
+    self.score_view.set_selection(self.first_spin.value(), self.last_spin.value())
+
+  def show_measure_in_score(self, measure: int) -> None:
+    if self.score_view.render is not None:
+      self.score_view.show_measure(measure)
+
+  def _measure_at_time(self, seconds: float):
+    """Which measure the recording is inside at `seconds`."""
+    if self.result is None or not self.result.measures:
+      return None
+    for m in self.result.measures:
+      if m.start_s <= seconds < m.end_s:
+        return m.measure
+    return None
+
   def _update_buttons(self) -> None:
     has_score = bool(self.expansion and self.expansion.events)
     has_audio = bool(self.piece and self.piece.has_audio)
     self.estimate_btn.setEnabled(has_score and has_audio)
     self.align_btn.setEnabled(has_score and has_audio)
     self.play_btn.setEnabled(bool(self.result and self.result.measures))
+    for widget in (self.rerender_btn, self.page_prev, self.page_next,
+                   self.zoom_in_btn, self.zoom_out_btn, self.fit_btn):
+      widget.setEnabled(has_score)
 
   def open_pdf(self) -> None:
     if self.piece and self.piece.pdf:
@@ -764,7 +937,7 @@ class MainWindow(QMainWindow):
       if answer == QMessageBox.Yes:
         self.save_map()
     self.player.stop()
-    for worker in (self._download, self._align):
+    for worker in (self._download, self._align, self._render):
       if worker is not None and worker.isRunning():
         worker.wait(2000)
     super().closeEvent(event)

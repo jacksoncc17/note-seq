@@ -58,8 +58,18 @@ def cfg(tmp_path):
 
 
 @pytest.fixture
-def window(qapp, cfg):
+def window(qapp, cfg, monkeypatch):
+  # Engraving the score is a background job; the tests that care about the score
+  # tab feed a synthetic render instead of waiting for Verovio, and one test
+  # asserts the job is started at all.
+  calls = []
+
+  def spy(self, force=False):
+    calls.append(force)
+
+  monkeypatch.setattr(MainWindow, 'render_score', spy)
   win = MainWindow(cfg)
+  win.engrave_calls = calls
   yield win
   win.player.stop()
   win.dirty = False
@@ -264,3 +274,98 @@ def test_aligning_is_refused_politely_without_a_reference_midi(window, cfg, monk
   window.align()
   assert window._align is None
   assert 'analyze.py' in seen.get('told', ''), 'the message should say how to fix it'
+
+
+# ---------------------------------------------------------------------------
+# the score tab
+# ---------------------------------------------------------------------------
+
+def synthetic_render(tmp_path, pages=2, per_page=3):
+  """A tiny page render, so the score wiring can be tested without Verovio."""
+  from PIL import Image
+  from analyzer.scoreview import MeasureBox, ScorePage, ScoreRender
+
+  built = []
+  number = 1
+  for page in range(1, pages + 1):
+    image = tmp_path / ('synth-%d.png' % page)
+    Image.new('RGB', (400, 200), 'white').save(image)
+    boxes = [MeasureBox(number=n, x0=20.0 + 130 * i, y0=40.0, x1=20.0 + 130 * i + 110,
+                        y1=140.0) for i, n in enumerate(range(number, number + per_page))]
+    number += per_page
+    built.append(ScorePage(number=page, image=str(image), width=400, height=200, measures=boxes))
+  return ScoreRender(slug='demo', source='demo.musicxml', pages=built)
+
+
+def test_the_window_has_a_score_tab(window):
+  assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ['Recording', 'Score']
+
+
+def test_loading_a_piece_with_a_score_starts_engraving(window, cfg):
+  make_piece(cfg)
+  window.refresh_pieces('demo')
+  assert window.engrave_calls == [False], 'the score should be engraved when a piece loads'
+
+
+def test_a_failed_engraving_is_reported(window, monkeypatch):
+  from PyQt5.QtWidgets import QMessageBox
+  monkeypatch.setattr(QMessageBox, 'warning', staticmethod(lambda *a, **k: None))
+  window._on_render_failed('cairosvg is missing')
+  assert 'not engraved' in window.score_status.text()
+  assert 'cairosvg' in window.status.currentMessage()
+
+
+def test_clicking_a_bar_on_the_page_sets_the_range(window, cfg, tmp_path):
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+  assert 'clickable' in window.score_status.text()
+  assert window.page_label.text() == 'page 1 / 2'
+
+  window._on_score_measure_clicked(4)
+  assert window.first_spin.value() == 4 and window.last_spin.value() == 4
+  assert window.score_view._selection == (4, 4)
+  assert 'bar 4' in window.status.currentMessage()
+
+
+def test_double_clicking_a_bar_plays_it(window, cfg, tmp_path):
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+  window._on_score_measure_activated(2)
+  assert 'playing bars 2-2' in window.status.currentMessage()
+  window.player.stop()
+
+
+def test_the_page_follows_the_range_and_the_playhead(window, cfg, tmp_path):
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+
+  window.first_spin.setValue(5)
+  window.last_spin.setValue(6)
+  window.show_measure_in_score(5)
+  assert window.score_view.page_number == 2
+
+  # a playhead inside bar 5 must be highlighted, and follow must stay on page 2
+  start = window.result.time_for_measure(5).start_s
+  window._on_position(start + 0.1)
+  assert window.score_view._playhead == 5
+  assert window.score_view.page_number == 2
+
+
+def test_follow_playback_can_be_turned_off(window, cfg, tmp_path):
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+  window.score_view.set_page(1)
+  window.follow_check.setChecked(False)
+
+  start = window.result.time_for_measure(6).start_s
+  window._on_position(start + 0.1)
+  assert window.score_view._playhead == 6
+  assert window.score_view.page_number == 1, 'with follow off, the page must not turn'

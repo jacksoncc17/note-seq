@@ -35,7 +35,10 @@ def _report(cfg: AnalyzerConfig) -> int:
   for module, why in (('PyQt5.QtWidgets', 'the window'),
                       ('numpy', 'alignment'),
                       ('soundfile', 'reading audio'),
-                      ('librosa', 'alignment')):
+                      ('librosa', 'alignment'),
+                      ('verovio', 'engraving the score'),
+                      ('cairosvg', 'turning the engraving into page images'),
+                      ('PIL', 'measuring the rendered pages')):
     try:
       __import__(module)
       print('  %-11s : ok' % module.split('.')[0])
