@@ -417,3 +417,154 @@ def _status_of(raw: bytes) -> int:
 def _get_request(path):
   from tutor.server import Request
   return Request(method='GET', path=path, headers={}, body=b'')
+
+
+# -- pieces, map and progress routes ---------------------------------------
+
+def _two_piece_world(tmp_path, monkeypatch):
+  """Two banks in an isolated pieces dir, so switching can be exercised."""
+  from tutor import pieces as pieces_module
+  root = tmp_path / 'output'
+  pdir = root / 'pieces'
+  pdir.mkdir(parents=True)
+  monkeypatch.setattr(pieces_module, 'OUTPUT_DIR', str(root))
+  monkeypatch.setattr(pieces_module, 'PIECES_DIR', str(pdir))
+  monkeypatch.setattr(pieces_module, 'INDEX_PATH', str(pdir / 'index.json'))
+  monkeypatch.setattr(pieces_module, 'LEGACY_FINGERPRINT',
+                      str(root / 'fingerprint.json'))
+  return pdir
+
+
+def _write_bank(pdir, slug, bars, key='A minor', questions=2, mtime=None):
+  import os
+  directory = pdir / slug
+  directory.mkdir(parents=True, exist_ok=True)
+  def measure(i):
+    return {'measure': i, 'chord': 'Am', 'melody': 'A4', 'notes_count': 4,
+            'rhythm': 'Q Q E E', 'contour': 'up', 'avg_velocity': 64.0,
+            'pitches': ['A4', 'E4']}
+  raw = {
+      'source_file': '/scores/%s.mxl' % slug,
+      'grid_source': 'score-measures', 'section_basis': 'key-signatures',
+      'repeat_basis': 'score-content', 'climax_measure': bars // 2,
+      'global': {'title': slug.title(), 'num_measures': bars,
+                 'time_signatures_declared': ['3/4'], 'key_inferred': key,
+                 'key_from_score': key, 'lowest_note': 'E2', 'highest_note': 'A5',
+                 'total_time_s': 30.0, 'total_notes': bars * 4},
+      'sections': [{'label': 'A', 'key': key, 'start_measure': 1,
+                    'end_measure': bars, 'measures': bars,
+                    'signature_in_score': key}],
+      'repetitions': [],
+      'measures': [measure(i) for i in range(1, bars + 1)],
+      'questions': [{'id': 'q%d' % i, 'tier': 1, 'type': 'chord',
+                     'prompt': 'What is the chord in measure %d?' % (i + 1),
+                     'answer': 'Am'} for i in range(questions)],
+  }
+  path = directory / 'fingerprint.json'
+  path.write_text(json.dumps(raw))
+  if mtime:
+    os.utime(path, (mtime, mtime))
+  return path
+
+
+@pytest.fixture
+def two_pieces(tmp_path, monkeypatch):
+  pdir = _two_piece_world(tmp_path, monkeypatch)
+  _write_bank(pdir, 'older-piece', bars=4, mtime=1000)
+  _write_bank(pdir, 'newer-piece', bars=12, key='B minor', mtime=2000)
+  cfg = TutorConfig()
+  cfg.asr, cfg.tts = 'stub', 'stub'
+  cfg.log_path = str(tmp_path / 'pieces.jsonl')
+  cfg.render_dir = str(tmp_path)
+  harness = Harness(cfg)
+  yield harness.harness
+  harness.close()
+
+
+def test_pieces_route_lists_banks_with_the_active_one(two_pieces):
+  status, payload = two_pieces.json('/pieces')
+  assert status == 200
+  slugs = [p['slug'] for p in payload['pieces']]
+  assert slugs == ['newer-piece', 'older-piece']       # newest first
+  assert payload['active'] == 'newer-piece'
+  assert [p['active'] for p in payload['pieces']] == [True, False]
+  assert payload['pieces'][0]['bars'] == 12
+
+
+def test_map_route_returns_the_piece_anatomy(two_pieces):
+  status, payload = two_pieces.json('/map')
+  assert status == 200
+  assert payload['piece']['bars'] == 12
+  assert len(payload['measures']) == 12
+  assert payload['trust']['verified'] is True
+  assert payload['questions']['total'] == 2
+  assert payload['unique']['count'] == 12              # no repeats in this bank
+
+
+def test_progress_route_reports_shapes(two_pieces):
+  status, payload = two_pieces.json('/progress')
+  assert status == 200
+  assert payload['piece']['slug'] == 'newer-piece'
+  assert 'totals' in payload['history'] and 'by_type' in payload['history']
+  assert payload['current_run']['status']['attempts'] == 0
+  assert isinstance(payload['pieces'], list)
+
+
+def test_switching_piece_rebuilds_the_lesson(two_pieces):
+  status, before = two_pieces.json('/state')
+  assert before['piece']['bars'] == 12                 # the newest bank
+
+  status, payload = two_pieces.json('/piece', method='POST',
+                                    body={'slug': 'older-piece'})
+  assert status == 200 and payload['ok'] is True
+  assert payload['piece']['slug'] == 'older-piece'
+  assert payload['piece']['bars'] == 4                 # a different bank loaded
+
+  # The views follow the switch, and the new piece has no pending question.
+  status, state = two_pieces.json('/state')
+  assert state['piece']['slug'] == 'older-piece'
+  assert state['pending_question'] is None
+  status, mapping = two_pieces.json('/map')
+  assert mapping['piece']['bars'] == 4
+
+
+def test_switching_keeps_the_mode(two_pieces):
+  two_pieces.json('/turn', method='POST', body={'text': 'drill me'})
+  status, state = two_pieces.json('/state')
+  assert state['mode'] == 'drill'
+  two_pieces.json('/piece', method='POST', body={'slug': 'older-piece'})
+  status, state = two_pieces.json('/state')
+  assert state['mode'] == 'drill'                      # still drilling
+
+
+def test_switching_to_the_active_piece_is_a_noop(two_pieces):
+  status, payload = two_pieces.json('/piece', method='POST',
+                                    body={'slug': 'newer-piece'})
+  assert status == 200 and payload['already'] is True
+  assert payload['piece']['slug'] == 'newer-piece'
+
+
+def test_switching_to_an_unknown_piece_fails_loudly(two_pieces):
+  status, payload = two_pieces.json('/piece', method='POST',
+                                    body={'slug': 'no-such-piece'})
+  assert status == 404
+  assert 'no-such-piece' in payload['error']
+  assert sorted(payload['available']) == ['newer-piece', 'older-piece']
+
+
+def test_switching_with_no_slug_is_a_bad_request(two_pieces):
+  status, payload = two_pieces.json('/piece', method='POST', body={})
+  assert status == 400 and 'no slug' in payload['error']
+
+
+def test_switching_must_be_a_post(two_pieces):
+  status, payload = two_pieces.json('/piece')
+  assert status == 405
+
+
+def test_the_client_page_carries_the_new_tabs(two_pieces):
+  status, raw = two_pieces.request('/')
+  body = raw.decode('utf-8')
+  for needle in ('data-tab="practice"', 'data-tab="map"', 'data-tab="progress"',
+                 'id="piece-select"', 'id="map-table"', 'id="prog-types"'):
+    assert needle in body, needle

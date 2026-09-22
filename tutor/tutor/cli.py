@@ -77,36 +77,12 @@ def pitches_of_bars(facts: FactStore, bars: List[int], drop: int = 0) -> List[in
 
 
 def build(cfg: TutorConfig, mode: str, auto_advance: bool = True):
-  # Resolve which piece this session is about, here rather than in main(), so
-  # commands that need no question bank (the ASR/TTS probes, the mic tests) keep
-  # working on a machine with no bank at all.
-  from .pieces import resolve
-  cfg.fingerprint, cfg.piece, why = resolve(cfg)
-  print('piece: %s  (%s)' % (cfg.piece, why))
-  facts = FactStore(cfg.fingerprint)
-  session = Session(log_path=cfg.log_path, piece=facts.raw.get('source_file', ''))
-  tools = ToolBox(facts, session, tier_max=cfg.tier_max,
-                  render_dir=cfg.render_dir)
-  evidence = Evidence(facts)
-  verifier = GroundingVerifier(evidence, facts, policy=cfg.grounding_policy)
-
-  if cfg.llm == 'openai':
-    from .llm.openai_compat import OpenAiCompatLlm
-    llm = OpenAiCompatLlm(cfg.llm_base_url, cfg.llm_model, cfg.llm_api_key,
-                          cfg.llm_timeout_s)
-  else:
-    llm = ScriptedTutor()
-
-  if cfg.tts == 'openai':
-    tts = OpenAiCompatTts(cfg.tts_base_url, cfg.tts_model, cfg.tts_voice,
-                          out_dir=cfg.render_dir, play=cfg.tts_play,
-                          lang_code=cfg.tts_lang_code)
-  else:
-    tts = StubTts()
-
-  conductor = Conductor(cfg, facts, tools, session, llm, tts, verifier,
-                        mode=mode, auto_advance=auto_advance)
-  return conductor, facts, session, tools, verifier
+  """Construct a session for the resolved piece (thin wrapper on the factory,
+  which the HTTP server also uses when the client switches pieces)."""
+  from .factory import build_piece_session
+  session = build_piece_session(cfg, mode=mode, announce=True,
+                                auto_advance=auto_advance)
+  return session.as_tuple()
 
 
 # --------------------------------------------------------------------------
@@ -462,15 +438,17 @@ def build_app(cfg: TutorConfig, mode: str = 'converse', asr=None,
   The server never plays audio itself -- the phone does -- so TTS playback is
   forced off even when `tts_play` is on, otherwise both devices would speak.
   """
-  conductor, facts, session, tools, verifier = build(cfg, mode)
-  if hasattr(conductor.tts, 'play'):
-    conductor.tts.play = False
+  from .factory import build_piece_session
+  from .server import TutorHttpApp
+
+  session = build_piece_session(cfg, mode=mode, announce=True)
+  if hasattr(session.tts, 'play'):
+    session.tts.play = False
   if asr is None and cfg.asr != 'stub':
     from .audio.asr import make_asr
     asr = make_asr(cfg)
-  from .server import TutorHttpApp
-  return TutorHttpApp(cfg, conductor, facts, session, tools,
-                      asr=asr, tts=conductor.tts, ca_path=ca_path)
+  return TutorHttpApp(cfg, session.conductor, session.facts, session.session,
+                      session.tools, asr=asr, tts=session.tts, ca_path=ca_path)
 
 
 def _local_addresses() -> List[str]:

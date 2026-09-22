@@ -202,6 +202,75 @@ class TutorHttpApp:
 
   # -- endpoints ----------------------------------------------------------
 
+  # -- pieces -------------------------------------------------------------
+
+  def _log_dir(self) -> str:
+    return os.path.dirname(os.path.abspath(self.cfg.log_path)) or '.'
+
+  def pieces_payload(self) -> dict:
+    """Every bank on disk, with the active one flagged."""
+    from .pieces import available
+    out = []
+    for entry in available():
+      out.append({'slug': entry.get('slug'),
+                  'title': entry.get('title') or '',
+                  'bars': entry.get('bars') or 0,
+                  'questions': entry.get('questions') or 0,
+                  'key': entry.get('key') or '',
+                  'legacy': bool(entry.get('legacy')),
+                  'active': entry.get('slug') == self.cfg.piece})
+    return {'pieces': out, 'active': self.cfg.piece}
+
+  async def switch_piece(self, slug: str):
+    """Load another piece's bank and rebuild the lesson around it.
+
+    Only the per-piece objects are replaced -- the ASR, TTS and LLM clients are
+    reused, which is what makes this cheap. Runs under the turn lock so an
+    in-flight turn finishes against a consistent piece, and the mode carries
+    over (switching pieces should not silently stop drilling).
+    """
+    from .factory import build_piece_session
+
+    slug = (slug or '').strip()
+    if not slug:
+      return {'error': 'no slug given'}, 400
+    async with self.lock:
+      if slug == self.cfg.piece:
+        return {'ok': True, 'already': True, 'piece': self._piece_info(),
+                'state': self.state()}, 200
+      mode = self.conductor.state.mode.value
+      try:
+        session = build_piece_session(self.cfg, mode=mode, tts=self.tts,
+                                      piece=slug)
+      except SystemExit as exc:
+        return {'error': str(exc).splitlines()[0],
+                'available': [p['slug'] for p in self.pieces_payload()['pieces']]}, 404
+      self.conductor = session.conductor
+      self.facts = session.facts
+      self.session = session.session
+      self.tools = session.tools
+      self.verifier = session.verifier
+      self.tts = session.tts
+      self.turns = 0
+    return {'ok': True, 'already': False, 'piece': self._piece_info(),
+            'state': self.state()}, 200
+
+  # -- study + progress views ---------------------------------------------
+
+  def map_payload(self) -> dict:
+    from .views import build_map
+    return build_map(self.facts)
+
+  def progress_payload(self) -> dict:
+    from .progress import log_files, read_attempts
+    from .views import build_progress
+    log_dir = self._log_dir()
+    attempts = read_attempts(log_dir)          # all pieces; filtered downstream
+    return build_progress(self.facts, attempts, self.session.status(),
+                          self.session.weak_spot_prompts(5),
+                          [os.path.basename(p) for p in log_files(log_dir)],
+                          slug=self.cfg.piece)
+
   async def handle(self, request: Request) -> bytes:
     path = request.path
     if path in ('/', '/index.html'):
@@ -222,6 +291,21 @@ class TutorHttpApp:
       if request.method != 'POST':
         return json_response({'error': 'use POST'}, 405)
       return json_response(await self.turn(request))
+    if path == '/pieces':
+      return json_response(self.pieces_payload())
+    if path == '/piece':
+      if request.method != 'POST':
+        return json_response({'error': 'use POST'}, 405)
+      try:
+        body = json.loads(request.body.decode('utf-8') or '{}')
+      except ValueError:
+        return json_response({'error': 'body is not valid JSON'}, 400)
+      payload, status = await self.switch_piece(str(body.get('slug', '')))
+      return json_response(payload, status)
+    if path == '/map':
+      return json_response(self.map_payload())
+    if path == '/progress':
+      return json_response(self.progress_payload())
     if path == '/ca.pem':
       # Handing the CA to the tablet is the one step that cannot happen over
       # https (it is not trusted yet), so this route is served in the clear.
