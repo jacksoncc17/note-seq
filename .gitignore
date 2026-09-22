@@ -25,3 +25,7 @@ tutor/certs/
 *.swp
 *.swo
 *~
+
+# analyzer: downloaded audio and derived maps are local artifacts
+analyzer/cache/
+analyzer/output/
