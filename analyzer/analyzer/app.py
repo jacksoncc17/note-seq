@@ -74,6 +74,32 @@ def _report(cfg: AnalyzerConfig) -> int:
   return 0
 
 
+def _install_excepthook(get_window=None) -> None:
+  """Report an unexpected error instead of letting Qt abort the process.
+
+  PyQt5 terminates the application when an exception escapes a slot -- which is
+  how a single wrong attribute name turned into a core dump rather than a message.
+  Installing a hook turns any such bug into a dialog plus a traceback on stderr,
+  so the window survives and the user can say what they were doing.
+  """
+  import traceback
+
+  def hook(exc_type, exc, tb) -> None:
+    text = ''.join(traceback.format_exception(exc_type, exc, tb))
+    print(text, file=sys.stderr, flush=True)
+    try:
+      from PyQt5.QtWidgets import QMessageBox
+      window = get_window() if get_window else None
+      QMessageBox.critical(
+          window, 'Something went wrong',
+          '%s: %s\n\nThe rest of the window still works; the traceback is in the '
+          'terminal.' % (exc_type.__name__, exc))
+    except Exception:
+      pass
+
+  sys.excepthook = hook
+
+
 def main(argv: Optional[List[str]] = None) -> int:
   args = build_parser().parse_args(argv)
   cfg = AnalyzerConfig()
@@ -98,6 +124,7 @@ def main(argv: Optional[List[str]] = None) -> int:
   app = QApplication(sys.argv[:1])
   app.setApplicationName('analyzer')
   window = MainWindow(cfg, piece_slug=args.piece)
+  _install_excepthook(lambda: window)
   if args.score:
     path = pathlib.Path(args.score).expanduser()
     if path.is_file():

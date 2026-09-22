@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 from PyQt5.QtCore import QBuffer, QByteArray, QElapsedTimer, QObject, QTimer, pyqtSignal
-from PyQt5.QtMultimedia import QAudioFormat, QAudioOutput
+from PyQt5.QtMultimedia import QAudio, QAudioFormat, QAudioOutput
 
 
 class PlayerError(RuntimeError):
@@ -88,10 +88,34 @@ class RangePlayer(QObject):
 
   @property
   def is_playing(self) -> bool:
-    return self._output is not None and self._output.state() == QAudioOutput.ActiveState
+    # State and error live in the QAudio namespace, not on QAudioOutput: asking
+    # QAudioOutput for ActiveState raises AttributeError, and an exception in a
+    # Qt slot aborts the process rather than showing a message.
+    if self._output is None:
+      return False
+    try:
+      return self._output.state() == QAudio.ActiveState
+    except RuntimeError:                       # the C++ object is already gone
+      return False
 
   def play_range(self, start_s: float, end_s: float) -> bool:
-    """Play `[start_s, end_s)` of the loaded recording."""
+    """Play `[start_s, end_s)` of the loaded recording.
+
+    Any failure is reported through `errorOccurred` instead of raising, because an
+    exception escaping a Qt slot terminates the application -- an audio-device
+    quirk must never take the window down with it.
+    """
+    try:
+      return self._play_range(start_s, end_s)
+    except Exception as e:                     # deliberately broad: see docstring
+      self.errorOccurred.emit('could not start playback: %s' % e)
+      try:
+        self.stop()
+      except Exception:
+        pass
+      return False
+
+  def _play_range(self, start_s: float, end_s: float) -> bool:
     if self._pcm is None or self._sample_rate <= 0:
       self.errorOccurred.emit('no recording loaded')
       return False
@@ -121,7 +145,7 @@ class RangePlayer(QObject):
       self.errorOccurred.emit('no audio output available: %s' % e)
       self._output = None
       return False
-    if self._output.error() != QAudioOutput.NoError:
+    if self._output.error() != QAudio.NoError:
       self.errorOccurred.emit('audio device problem: %s' % self._output.error())
       self._output = None
       return False
@@ -161,9 +185,14 @@ class RangePlayer(QObject):
   def _tick(self) -> None:
     if self._output is None:
       return
+    try:
+      state = self._output.state()
+    except RuntimeError:                       # deleted underneath us
+      self.stop()
+      return
     elapsed = self._clock.elapsed() / 1000.0
     start_s, end_s = self._range
     position = start_s + elapsed
     self.positionChanged.emit(min(position, end_s))
-    if position >= end_s or self._output.state() == QAudioOutput.IdleState:
+    if position >= end_s or state == QAudio.IdleState:
       self.stop()
