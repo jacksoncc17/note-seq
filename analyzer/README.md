@@ -245,6 +245,18 @@ back    the same passage, plus what the bank already knows:
         and the recording of exactly those bars
 ```
 
+**Fingering** can be added too, in the same dialog: tick *tap notes to set the
+fingering*, choose a digit (1-5) and tap the notes, or step through them with `◀ ▶`
+and press *assign to this note* when the mouse is fiddly. Right-hand numbers are
+engraved **above** the staff and left-hand ones **below**, and they are **hidden on
+the front** and shown on the back — the card asks "what fingering would you use?"
+and answers it. A note-by-note *undo* covers a mis-tap.
+
+Fingerings are kept **with the piece**, so you enter them once and every card of
+those bars picks them up; a card also records the ones it used, so re-exporting an
+old card does not depend on the piece's current set. *clear fingerings* empties the
+card's set.
+
 Hiding works two ways, and you can combine them:
 
 * **rules** — `everything` (pitches go, rhythm stays), `staves_only` (a bar left to
@@ -262,6 +274,14 @@ package, so AnkiDroid can open it straight from the phone.
 and the review history live in Anki's collection, on your devices; we only author.
 Multi-device sync is AnkiWeb, or Anki's own self-hosted sync server if you would
 rather not use it.
+
+A word on how fingering is added, because it is the one place the tool writes score
+content: the numbers are injected into a **copy of the MusicXML held in memory**,
+which Verovio engraves — so they are placed by the engraver (clear of stems and
+slurs) instead of painted over the picture. Verovio takes the document as a string,
+so **no file is written anywhere**, and your score is never modified. Verified: after
+injection the measure count, note count and every pitch come back identical, and the
+source file's bytes *and* mtime are untouched.
 
 Two things worth knowing about how the hiding actually works, because the obvious
 approach is wrong:

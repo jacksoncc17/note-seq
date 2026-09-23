@@ -461,3 +461,72 @@ def test_the_back_does_not_repeat_the_front(real, tmp_path):
   assert 'back-' in back_field and 'front-' not in back_field, \
       'each side carries its own image'
   db.close()
+
+
+# ---------------------------------------------------------------------------
+# fingering, engraved rather than painted
+# ---------------------------------------------------------------------------
+
+@needs_real
+def test_adding_fingering_does_not_change_the_music(real):
+  """The one place the tool writes score content, so it is checked hardest: the
+  measures, the notes and every pitch must come back identical."""
+  import xml.etree.ElementTree as ET
+  cfg, piece, render = real
+  from analyzer.scoreview import _score_xml
+  original = _score_xml(pathlib.Path(piece.musicxml))
+
+  def shape(text):
+    root = ET.fromstring(text)
+    local = lambda t: t.rsplit('}', 1)[-1]
+    notes = [e for e in root.iter() if local(e.tag) == 'note']
+    pitches = [''.join(c.text or '' for c in n if local(c.tag) == 'pitch') for n in notes]
+    measures = [e for e in root.iter() if local(e.tag) == 'measure']
+    return len(measures), len(notes), pitches
+
+  fingered = cards.fingered_score_xml(original, {
+      '53:1:note:0': '3', '53:2:note:0': '1', '53:2:note:4': '5'})
+  assert shape(fingered) == shape(original), 'the music must be untouched'
+  assert fingered.count('<fingering') == 3
+  # right hand above, left hand below
+  assert 'placement="above"' in fingered and 'placement="below"' in fingered
+
+
+@needs_real
+def test_fingering_is_engraved_and_hidden_on_the_front(real, tmp_path):
+  """The number is engraved by Verovio (so it is placed properly) and the front
+  hides it, which is the question the card asks."""
+  import numpy as np
+  import PIL.Image
+  cfg, piece, render = real
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53,
+                        fingering={'53:1:note:0': '3', '53:2:note:0': '1'})
+  xml_text = cards.card_score_xml(piece, spec)
+  assert xml_text and '<fingering' in xml_text
+
+  svg, _ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, 2, scale=cards.CARDS_SCALE,
+                                         xml_text=xml_text)
+  assert 'class="fing"' in svg, 'the fingering should be engraved'
+  plain, _ = scoreview.page_svg_and_ids(cfg, piece.musicxml, 2, scale=cards.CARDS_SCALE)
+  assert 'class="fing"' not in plain
+
+  built = cards.build_card(cfg, piece, render, spec, tmp_path)
+  front = np.asarray(PIL.Image.open(str(built.front_png)).convert('L'))
+  back = np.asarray(PIL.Image.open(str(built.back_png)).convert('L'))
+  assert front.shape == back.shape
+  assert (back < 128).sum() > (front < 128).sum(), \
+      'the back shows the numbers the front hides'
+  assert 'fingering' in built.fields, 'the back should also say them in words'
+  assert built.fields['fingering'].strip()
+
+
+@needs_real
+def test_a_card_with_fingering_is_self_describing(real):
+  """The card records the fingerings it used, so re-exporting it does not depend on
+  the piece's current set."""
+  cfg, piece, render = real
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, fingering={'53:1:note:0': '2'})
+  assert cards.fingerings_in(spec, piece) == {'53:1:note:0': '2'}
+  other = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53)
+  assert cards.fingerings_in(other, piece) == {}, 'nothing invented for a card without'
+  assert spec.signature() != other.signature(), 'fingering is part of the card identity'

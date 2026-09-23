@@ -162,6 +162,12 @@ class ScoreView(QWidget):
     self.setCursor(Qt.CrossCursor if self._mask_mode else Qt.ArrowCursor)
     self.update()
 
+  def set_hover_glyph(self, key: Optional[str]) -> None:
+    """Point at a note without tapping it, for stepping through them."""
+    self._hover_glyph = key
+    self._masked = self._masked            # unchanged; only the cursor target moves
+    self.update()
+
   def set_masked(self, keys) -> None:
     """Which notes the dialog currently has masked, so they can be shown."""
     self._masked = set(keys or ())

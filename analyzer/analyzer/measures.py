@@ -117,7 +117,10 @@ def load_score_xml(path) -> str:
   path = pathlib.Path(path)
   if not path.is_file():
     raise ScoreError('no such score file: %s' % path)
-  if path.suffix.lower() in ('.mxl', '.zip'):
+  with open(path, 'rb') as handle:
+    magic = handle.read(4)
+  # by content, not by name: a renamed archive used to fail with a confusing error
+  if magic[:2] == b'PK' or path.suffix.lower() in ('.mxl', '.zip'):
     try:
       with zipfile.ZipFile(path) as z:
         names = [n for n in z.namelist()

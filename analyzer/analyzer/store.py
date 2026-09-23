@@ -106,6 +106,9 @@ class PieceRecord:
   key: str = ''
   tags: List[str] = field(default_factory=list)
   notes: List[str] = field(default_factory=list)
+  # Fingering the user entered, keyed by note position ("53:2:note:3" -> "1").
+  # Curated, not derived: the score has none, so this is the only record of it.
+  fingerings: Dict[str, str] = field(default_factory=dict)
 
   score: Optional[BlobRef] = None
   pdf: Optional[BlobRef] = None
@@ -166,6 +169,7 @@ class PieceRecord:
       kwargs[name] = BlobRef.from_dict(raw) if isinstance(raw, dict) else None
     kwargs.setdefault('tags', [])
     kwargs.setdefault('notes', [])
+    kwargs.setdefault('fingerings', {})
     return cls(**kwargs)
 
 
@@ -445,8 +449,21 @@ class _FilesystemBlobs(BlobStore):
       raise KeyError(ref.key) from e
 
   def write(self, key: str, data: bytes, media_type: str = 'application/octet-stream') -> BlobRef:
+    """Store bytes under a path, skipping the write when nothing would change.
+
+    Registering a piece references the score where it lives, so the same bytes come
+    back to the same path. Rewriting them would bump the file's mtime, and the render
+    cache is keyed on size and mtime -- so a score would be re-engraved for no reason,
+    and the user's file would be touched on every launch.
+    """
     path = pathlib.Path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+      try:
+        if path.read_bytes() == data:
+          return BlobRef(key=str(path), media_type=media_type, size=len(data))
+      except OSError:
+        pass
     temp = path.with_suffix(path.suffix + '.tmp')
     temp.write_bytes(data)
     os.replace(temp, path)
@@ -665,6 +682,8 @@ class _FilesystemPieces(PieceStore):
       record.composer = str(sidecar['composer'])
     if sidecar.get('tags'):
       record.tags = [str(t) for t in sidecar['tags']]
+    if sidecar.get('fingerings'):
+      record.fingerings = {str(k): str(v) for k, v in sidecar['fingerings'].items()}
     record.hidden = bool(sidecar.get('hidden'))
     return record
 
@@ -713,6 +732,7 @@ class _FilesystemPieces(PieceStore):
         'title': record.title,
         'composer': record.composer,
         'tags': list(record.tags),
+        'fingerings': dict(record.fingerings or {}),
         'hidden': bool(record.hidden),
         'updated_at': _now(),
         # a piece with no bank still needs its own facts remembered

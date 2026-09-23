@@ -55,6 +55,8 @@ MASK_RULES = {
 }
 
 MASKS_STAFF_KIND = ('note', 'rest', 'accid')      # what a tap can target
+FINGERING_DIGITS = ('1', '2', '3', '4', '5')     # piano fingering, per hand
+FINGERING_PLACEMENT = {1: 'above', 2: 'below'}   # right hand above, left hand below
 CARDS_SCALE = 2.5               # card images are rendered larger than the app's view
 
 
@@ -76,6 +78,7 @@ class CardSpec:
   title: str = ''
   masks: List[str] = field(default_factory=list)          # explicit glyph keys
   rules: List[str] = field(default_factory=list)          # rule names
+  fingering: Dict[str, str] = field(default_factory=dict)  # glyph key -> digit
   fields: Dict[str, str] = field(default_factory=dict)     # curated back text
   tags: List[str] = field(default_factory=list)
   audio_side: str = 'back'                                 # back | front | both | none
@@ -94,6 +97,7 @@ class CardSpec:
     payload = json.dumps({
         'slug': self.slug, 'range': self.bar_range,
         'masks': sorted(self.masks), 'rules': sorted(self.rules),
+        'fingering': sorted(self.fingering.items()),
     }, sort_keys=True)
     return hashlib.sha1(payload.encode('utf-8')).hexdigest()[:16]
 
@@ -389,8 +393,154 @@ def expand_to_ink(image, strip, budget: float = 120.0, bridge: float = 34.0,
           min(image.height, int(band_top + bottom + 1 + margin)))
 
 
+def fingered_score_xml(score_xml: str, fingerings: Dict[str, str]) -> str:
+  """The score with fingerings added, as text. The source file is never touched.
+
+  Fingering is written into a copy of the MusicXML held in memory so Verovio
+  engraves it: the number is then placed by the engraver (the right side of the
+  notehead, clear of stems and slurs) instead of being painted over the picture. The
+  caller passes the result straight to Verovio, which takes XML as a string, so no
+  file is written anywhere.
+
+  Notes are addressed the way masks are -- `bar:staff:note:index` -- and resolved by
+  counting the drawn notes of that staff within the bar, which is the same order
+  Verovio draws them in. Rests are skipped, and each hand gets its own placement.
+
+  Args:
+    score_xml: the original MusicXML text.
+    fingerings: glyph key -> digit.
+
+  Returns:
+    MusicXML text with `<fingering>` added, or the input unchanged when there is
+    nothing to add.
+
+  Raises:
+    CardError: if the score cannot be parsed or written back.
+  """
+  import xml.etree.ElementTree as ET
+
+  if not fingerings:
+    return score_xml
+  try:
+    root = ET.fromstring(score_xml)
+  except ET.ParseError as e:
+    raise CardError('could not read the score to add fingerings: %s' % e)
+
+  def local(tag: str) -> str:
+    return tag.rsplit('}', 1)[-1]
+
+  for element in root.iter():
+    namespace = element.tag.split('}')[0][1:] if '}' in element.tag else ''
+    if namespace:
+      ET.register_namespace('', namespace)
+      break
+
+  wanted: Dict[tuple, str] = {}
+  for key, digit in fingerings.items():
+    parts = str(key).split(':')
+    if len(parts) < 4 or parts[2] != 'note':
+      continue
+    try:
+      wanted[(int(parts[0]), int(parts[1]), int(parts[3]))] = str(digit)
+    except ValueError:
+      continue
+  if not wanted:
+    return score_xml
+
+  placed = 0
+  for measure in root.iter():
+    if local(measure.tag) != 'measure':
+      continue
+    try:
+      number = int(str(measure.get('number') or '').strip())
+    except ValueError:
+      continue
+    staff = 1
+    counters: Dict[int, int] = {}
+    for note in list(measure):
+      if local(note.tag) != 'note':
+        continue
+      for child in note:
+        if local(child.tag) == 'staff' and (child.text or '').strip().isdigit():
+          staff = int(child.text.strip())
+      if any(local(child.tag) == 'rest' for child in note):
+        continue
+      index = counters.get(staff, 0)
+      counters[staff] = index + 1
+      digit = wanted.get((number, staff, index))
+      if digit is None:
+        continue
+      _attach_fingering(ET, note, local, digit,
+                        FINGERING_PLACEMENT.get(staff, 'above'))
+      placed += 1
+
+  if not placed:
+    return score_xml
+  try:
+    return ET.tostring(root, encoding='unicode')
+  except (TypeError, ValueError) as e:
+    raise CardError('could not write the fingerings back: %s' % e)
+
+
+def _attach_fingering(ET, note, local, digit: str, placement: str) -> None:
+  """Put `<notations><technical><fingering>` on a note, in schema order.
+
+  MusicXML expects notations before lyric and play, so a note that carries lyrics
+  must not simply have this appended.
+  """
+  notations = next((c for c in note if local(c.tag) == 'notations'), None)
+  if notations is None:
+    notations = ET.Element(note.tag.split('}')[0] + 'notations' if '}' in note.tag
+                           else 'notations')
+    at = len(note)
+    for position, child in enumerate(note):
+      if local(child.tag) in ('lyric', 'play'):
+        at = position
+        break
+    note.insert(at, notations)
+  technical = next((c for c in notations if local(c.tag) == 'technical'), None)
+  if technical is None:
+    technical = ET.SubElement(notations, notations.tag.split('}')[0] + 'technical'
+                              if '}' in notations.tag else 'technical')
+  fingering = ET.SubElement(technical, technical.tag.split('}')[0] + 'fingering'
+                            if '}' in technical.tag else 'fingering')
+  fingering.set('placement', placement)
+  fingering.text = digit
+
+
+def card_score_xml(piece, spec: CardSpec) -> Optional[str]:
+  """The MusicXML to engrave for this card: the score, with this card's fingerings.
+
+  Fingerings come from the piece (entered once) and the card records the subset it
+  used, so a card stays self-describing after the piece's set changes.
+  """
+  if piece is None or piece.musicxml is None:
+    return None
+  text = scoreview._score_xml(pathlib.Path(piece.musicxml))
+  merged: Dict[str, str] = {}
+  if piece.record is not None:
+    merged.update(piece.record.fingerings or {})
+  merged.update({k: v for k, v in (spec.fingering or {}).items() if v})
+  low, high = spec.bar_range
+  merged = {k: v for k, v in merged.items()
+            if k.split(':')[0].isdigit() and low <= int(k.split(':')[0]) <= high}
+  return fingered_score_xml(text, merged)
+
+
+def fingerings_in(spec: CardSpec, piece=None) -> Dict[str, str]:
+  """The fingerings this card will engrave: the piece's set, the card's overrides."""
+  merged: Dict[str, str] = {}
+  if piece is not None and piece.record is not None:
+    merged.update(piece.record.fingerings or {})
+  merged.update({k: v for k, v in (spec.fingering or {}).items() if v})
+  low, high = spec.bar_range
+  return {k: v for k, v in merged.items()
+          if k.split(':')[0].isdigit() and low <= int(k.split(':')[0]) <= high}
+
+
 def passage_regions(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
-                    scale: float = CARDS_SCALE) -> Dict[int, Tuple[float, float, float, float]]:
+                    scale: float = CARDS_SCALE,
+                    xml_text: Optional[str] = None) -> Dict[int, Tuple[float, float, float, float]]:
   """The rectangle each page's passage occupies, measured from the ink.
 
   Computed once and used for both sides of the card, so the front and the back show
@@ -416,7 +566,8 @@ def passage_regions(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardS
     if page is None:
       continue
     try:
-      svg, _ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale)
+      svg, _ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale,
+                                             xml_text=xml_text)
       png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
     except Exception as e:
       raise CardError('could not engrave page %d for the card: %s' % (page_number, e))
@@ -435,7 +586,9 @@ def passage_regions(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardS
 
 def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
                   hidden: Sequence[str], scale: float = CARDS_SCALE, hide: bool = True,
-                  regions: Optional[Dict[int, Tuple[float, float, float, float]]] = None):
+                  regions: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
+                  xml_text: Optional[str] = None,
+                  hide_fingering: bool = False):
   """One image of the passage, optionally with the chosen glyphs suppressed.
 
   Usage:
@@ -470,7 +623,8 @@ def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpe
     if page is None:
       continue
     try:
-      svg, ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale)
+      svg, ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale,
+                                            xml_text=xml_text)
     except Exception as e:
       raise CardError('could not engrave page %d for the card: %s' % (page_number, e))
     if hide and hidden:
@@ -478,6 +632,9 @@ def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpe
       if not wanted:
         raise CardError('the masks do not match this engraving (page %d)' % page_number)
       svg = scoreview.hide_elements(svg, wanted)
+    if hide_fingering and fingerings_in(spec, piece):
+      # the front asks "what fingering would you use?" by not showing the answer
+      svg = scoreview.hide_classes(svg, ['fing'])
     try:
       png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
     except Exception as e:
@@ -706,10 +863,15 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
   glyphs = render.glyphs_in_measures(low, high)
   hidden = masked_keys(spec, glyphs)
 
-  regions = passage_regions(cfg, piece, render, spec)
-  back_image = passage_image(cfg, piece, render, spec, hidden, hide=False, regions=regions)
-  front_image = (passage_image(cfg, piece, render, spec, hidden, hide=True, regions=regions)
-                 if hidden else back_image.copy())
+  xml_text = card_score_xml(piece, spec)
+  has_fingering = bool(fingerings_in(spec, piece))
+  # one engraving, used for both sides, so the two images line up
+  regions = passage_regions(cfg, piece, render, spec, xml_text=xml_text)
+  back_image = passage_image(cfg, piece, render, spec, hidden, hide=False, regions=regions,
+                             xml_text=xml_text)
+  front_image = (passage_image(cfg, piece, render, spec, hidden, hide=True, regions=regions,
+                               xml_text=xml_text, hide_fingering=has_fingering)
+                 if (hidden or has_fingering) else back_image.copy())
   assert front_image.size == back_image.size, 'the two sides must line up' 
 
   front_path = workspace / ('front-%s.png' % spec.signature())
@@ -730,6 +892,10 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
   fields.update({k: v for k, v in (spec.fields or {}).items() if v})
   if spec.title:
     fields['card'] = spec.title
+  fingering = fingerings_in(spec, piece)
+  if fingering:
+    ordered = sorted(fingering.items(), key=lambda kv: _key_order(kv[0]))
+    fields['fingering'] = ' '.join('%s:%s' % (_key_label(k), v) for k, v in ordered[:24])
   hidden_notes = [k for k in hidden if ':note:' in k]
   if hidden_notes:
     fields['masked'] = ('%d notehead(s) hidden — name them before revealing'
@@ -746,6 +912,26 @@ def _stored_map(cfg: AnalyzerConfig, piece):
   from . import store
   repo = store.open_repository(cfg)
   return repo.maps.get(piece.slug)
+
+
+def _key_order(key: str):
+  parts = key.split(':')
+  try:
+    return (int(parts[0]), int(parts[1]), int(parts[3]))
+  except (IndexError, ValueError):
+    return (0, 0, 0)
+
+
+def _key_label(key: str) -> str:
+  """`53:2:note:3` reads better as `53/L4` on the back of a card."""
+  parts = key.split(':')
+  if len(parts) < 4:
+    return key
+  hand = 'R' if parts[1] == '1' else 'L'
+  try:
+    return '%s%s%d' % (parts[0], hand, int(parts[3]) + 1)
+  except ValueError:
+    return key
 
 
 def _guid_for(spec: CardSpec) -> str:

@@ -212,3 +212,59 @@ def test_the_repository_reports_its_deck_store(repo):
   assert repo.decks is not None
   assert store.open_repository(AnalyzerConfig(cache_dir=pathlib.Path('/tmp/x'),
                                               output_dir=pathlib.Path('/tmp/y'))).decks is not None
+
+
+# ---------------------------------------------------------------------------
+# fingering
+# ---------------------------------------------------------------------------
+
+@needs_real
+def test_fingering_can_be_assigned_by_tapping_and_by_stepping(qapp, real):
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.fingering_check.setChecked(True)
+  assert not dialog.tap_check.isChecked(), 'one meaning for a tap at a time'
+
+  key = dialog._notes()[0].key
+  dialog.toggle_note(key)                       # tap
+  assert dialog.fingering.get(key) == dialog.digit
+  dialog.toggle_note(key)                       # same digit again clears it
+  assert key not in dialog.fingering
+
+  dialog.step_note(1)                           # stepping points at the next note
+  dialog.assign_to_pointed()
+  assert dialog.fingering, 'assigning to the pointed note should record something'
+
+  dialog.undo()
+  assert len(dialog.fingering) == 1 or not dialog.fingering
+
+
+@needs_real
+def test_tapping_still_masks_when_fingering_mode_is_off(qapp, real):
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  key = dialog._notes()[0].key
+  dialog.toggle_note(key)
+  assert key in dialog.masked and not dialog.fingering
+
+
+@needs_real
+def test_fingerings_are_kept_with_the_piece(qapp, real, silent, tmp_path):
+  """Entered once, reusable by any card of the same bars."""
+  cfg, piece, render = real
+  cfg.output_dir = tmp_path / 'out'
+  cfg.ensure_dirs()
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.rule_boxes['everything'].setChecked(True)
+  dialog.fingering_check.setChecked(True)
+  key = dialog._notes()[0].key
+  dialog.toggle_note(key)
+  dialog.title_edit.setText('fingered')
+  dialog.save_for_phone()
+
+  again = library.find(cfg, SLUG)
+  assert again.record.fingerings.get(key), 'the piece should remember the fingering'
+
+  second = CardDialog(cfg, again, render, None, first_bar=53, last_bar=53)
+  assert cards.fingerings_in(second.spec(), again), \
+      'a new card for the same bars should find the fingerings already there'

@@ -17,10 +17,10 @@ from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-                             QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                             QMessageBox, QPushButton, QScrollArea, QSpinBox,
-                             QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
+                             QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                             QLineEdit, QMessageBox, QPushButton, QRadioButton,
+                             QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import cards, library, store
 from ..config import AnalyzerConfig
@@ -38,6 +38,10 @@ class CardDialog(QDialog):
     self.render = render
     self.repo = store.open_repository(cfg)
     self.masked: List[str] = []
+    self.fingering: Dict[str, str] = {}
+    self.digit = '1'
+    self.undo_stack: List[tuple] = []
+    self.pointed = 0                       # index into the passage's notes
     self.built: Optional[cards.BuiltCard] = None
     self.exported: List[pathlib.Path] = []
 
@@ -94,6 +98,53 @@ class CardDialog(QDialog):
     clear.clicked.connect(self._clear_tapped)
     tapped_layout.addWidget(clear)
     box.addWidget(tapped)
+
+    fingering = QGroupBox('Fingering')
+    fingering_layout = QVBoxLayout(fingering)
+    self.fingering_check = QCheckBox('tap notes to set the fingering')
+    self.fingering_check.stateChanged.connect(self._fingering_mode_changed)
+    fingering_layout.addWidget(self.fingering_check)
+
+    digits = QHBoxLayout()
+    self.digit_group = QButtonGroup(self)
+    for digit in cards.FINGERING_DIGITS:
+      button = QRadioButton(digit)
+      button.setChecked(digit == '1')
+      button.toggled.connect(lambda on, d=digit: self._digit_chosen(d) if on else None)
+      self.digit_group.addButton(button)
+      digits.addWidget(button)
+    digits.addStretch(1)
+    fingering_layout.addLayout(digits)
+
+    step = QHBoxLayout()
+    step.addWidget(QLabel('note'))
+    self.note_prev = QPushButton('◀')
+    self.note_prev.setFixedWidth(36)
+    self.note_prev.clicked.connect(lambda: self.step_note(-1))
+    step.addWidget(self.note_prev)
+    self.note_next = QPushButton('▶')
+    self.note_next.setFixedWidth(36)
+    self.note_next.clicked.connect(lambda: self.step_note(1))
+    step.addWidget(self.note_next)
+    self.note_label = QLabel('—')
+    step.addWidget(self.note_label, 1)
+    fingering_layout.addLayout(step)
+
+    self.fingering_label = QLabel('none')
+    self.fingering_label.setWordWrap(True)
+    fingering_layout.addWidget(self.fingering_label)
+    row = QHBoxLayout()
+    assign = QPushButton('assign to this note')
+    assign.clicked.connect(self.assign_to_pointed)
+    row.addWidget(assign)
+    undo = QPushButton('undo last tap')
+    undo.clicked.connect(self.undo)
+    row.addWidget(undo)
+    clear_fingering = QPushButton('clear fingerings')
+    clear_fingering.clicked.connect(self.clear_fingerings)
+    row.addWidget(clear_fingering)
+    fingering_layout.addLayout(row)
+    box.addWidget(fingering)
 
     sound = QGroupBox('Sound')
     sound_layout = QVBoxLayout(sound)
@@ -164,6 +215,7 @@ class CardDialog(QDialog):
         slug=self.piece.slug, first_bar=self.first_spin.value(),
         last_bar=self.last_spin.value(), title=self.title_edit.text().strip(),
         masks=list(self.masked), rules=rules, tags=tags,
+        fingering={k: v for k, v in self.fingering.items() if v},
         audio_side=self.audio_side.text().strip() if self.audio_check.isChecked() else 'none')
 
   def _range_changed(self) -> None:
@@ -172,19 +224,110 @@ class CardDialog(QDialog):
                                                   self.last_spin.value())
     self._preview()
 
+  def _fingering_mode_changed(self, state) -> None:
+    """Tapping means one thing at a time: masking notes, or setting a fingering."""
+    if self.fingering_check.isChecked() and self.tap_check.isChecked():
+      self.tap_check.setChecked(False)
+    self._pointed_changed()
+
+  def _digit_chosen(self, digit: str) -> None:
+    self.digit = digit
+
+  def step_note(self, delta: int) -> None:
+    """Walk the passage note by note, for when the mouse is fiddly."""
+    notes = self._notes()
+    if not notes:
+      return
+    self.pointed = max(0, min(len(notes) - 1, self.pointed + delta))
+    self._pointed_changed()
+
+  def _notes(self):
+    return [g for g in self._glyphs if g.kind == 'note' and g.has_hit]
+
+  def _pointed_changed(self) -> None:
+    notes = self._notes()
+    if not notes:
+      self.note_label.setText('no notes in this passage')
+      return
+    glyph = notes[min(self.pointed, len(notes) - 1)]
+    self.note_label.setText('%s  (bar %d, %s hand, note %d)%s'
+                            % (glyph.key, glyph.measure, 'right' if glyph.staff == 1 else 'left',
+                               glyph.index + 1,
+                               '  → %s' % self.fingering.get(glyph.key, '')
+                               if glyph.key in self.fingering else ''))
+    if self.parent() is not None and hasattr(self.parent(), 'score_view'):
+      self.parent().score_view.set_hover_glyph(glyph.key)
+
+  def pointed_key(self) -> Optional[str]:
+    notes = self._notes()
+    return notes[min(self.pointed, len(notes) - 1)].key if notes else None
+
+  def assign_to_pointed(self) -> None:
+    key = self.pointed_key()
+    if key:
+      self.set_fingering(key, self.digit)
+
+  def set_fingering(self, key: str, digit: str) -> None:
+    previous = self.fingering.get(key)
+    self.fingering[key] = digit
+    self.undo_stack.append(('fingering', key, previous))
+    self._preview()
+
+  def undo(self) -> None:
+    """Undo the last tap or fingering, whichever came last."""
+    if not self.undo_stack:
+      self.status_message('nothing to undo')
+      return
+    kind, key, previous = self.undo_stack.pop()
+    if kind == 'fingering':
+      if previous is None:
+        self.fingering.pop(key, None)
+      else:
+        self.fingering[key] = previous
+    else:
+      if key in self.masked:
+        self.masked.remove(key)
+      else:
+        self.masked.append(key)
+    self._preview()
+
+  def clear_fingerings(self) -> None:
+    for key in list(self.fingering):
+      self.undo_stack.append(('fingering', key, self.fingering[key]))
+    self.fingering = {}
+    self._preview()
+
+  def status_message(self, text: str) -> None:
+    self.summary.setText(text)
+
+  def toggle_tapped(self, key: str) -> None:
+    """A note was tapped: mask it, or give it the chosen fingering."""
+    if self.fingering_check.isChecked():
+      if self.fingering.get(key) == self.digit:
+        self.fingering.pop(key, None)          # tapping the same digit clears it
+      else:
+        self.fingering[key] = self.digit
+      self.undo_stack.append(('fingering', key, None))
+    else:
+      if key in self.masked:
+        self.masked.remove(key)
+      else:
+        self.masked.append(key)
+      self.undo_stack.append(('mask', key, None))
+    self._preview()
+
   def _clear_tapped(self) -> None:
     self.masked = []
     self._preview()
 
   def toggle_note(self, key: str) -> None:
     """A note was tapped on the score."""
+    if self.fingering_check.isChecked():
+      self.toggle_tapped(key)
+      return
     if not self.tap_check.isChecked():
       self.tap_check.setChecked(True)
-    if key in self.masked:
-      self.masked.remove(key)
-    else:
-      self.masked.append(key)
-    self._preview()
+    self.toggle_tapped(key)
 
   def masked_keys(self) -> List[str]:
     return cards.masked_keys(self.spec(), self._glyphs)
@@ -200,6 +343,11 @@ class CardDialog(QDialog):
       self.summary.setText('masking problem: %s' % e)
       return
     self.tapped_label.setText(', '.join(self.masked) if self.masked else 'none')
+    if self.fingering:
+      self.fingering_label.setText(' '.join(
+          '%s:%s' % (key, value) for key, value in sorted(self.fingering.items())))
+    else:
+      self.fingering_label.setText('none')
     try:
       front = cards.passage_image(self.cfg, self.piece, self.render, spec, hidden,
                                  scale=1.2, hide=True)
@@ -223,16 +371,30 @@ class CardDialog(QDialog):
         '%s: %s' % (key, value) for key, value in fields.items() if value))
     hidden_notes = [k for k in hidden if ':note:' in k]
     self.summary.setText(
-        'bars %d-%d · %d notes in the passage · hiding %d (%s)'
+        'bars %d-%d · %d notes · hiding %d (%s) · fingerings %d'
         % (spec.bar_range[0], spec.bar_range[1], len(self._glyphs), len(hidden),
-           ', '.join(sorted(spec.rules)) or 'nothing by rule'))
-    self.export_button.setEnabled(bool(hidden) or not self._glyphs)
+           ', '.join(sorted(spec.rules)) or 'none by rule', len(self.fingering)))
+    self._pointed_changed()
+    has_work = bool(hidden) or bool(self.fingering)
+    self.export_button.setEnabled(has_work)
+    self.save_button.setEnabled(has_work)
 
   # ------------------------------------------------------------------ output
 
   def _deck_name(self) -> str:
     return self.title_edit.text().strip() or (
         'bars %d-%d' % (self.first_spin.value(), self.last_spin.value()))
+
+  def remember_fingerings(self) -> None:
+    """Keep the fingerings with the piece: enter them once, reuse on other cards."""
+    record = getattr(self.piece, 'record', None)
+    if record is None or not self.fingering:
+      return
+    merged = dict(record.fingerings or {})
+    merged.update(self.fingering)
+    record.fingerings = merged
+    self.repo.pieces.upsert(record)
+    self.piece.record = self.repo.pieces.get(record.slug) or record
 
   def export_deck(self) -> None:
     """Build the deck and offer to save the .apkg."""
@@ -269,6 +431,7 @@ class CardDialog(QDialog):
       QMessageBox.warning(self, 'Could not build the deck', str(e))
       return
     self.repo.decks.save(deck)
+    self.remember_fingerings()
     ref = self.repo.decks.save_export(deck, package.read_bytes())
     self.exported.append(pathlib.Path(ref.key))
     QMessageBox.information(

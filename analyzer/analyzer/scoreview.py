@@ -332,10 +332,16 @@ class ScoreRender:
 # ---------------------------------------------------------------------------
 
 def _score_xml(path) -> str:
-  """MusicXML text, unpacking .mxl. Separate from measures.py on purpose: this
-  module only needs the bytes to hand to Verovio."""
+  """MusicXML text, unpacking a compressed archive when there is one.
+
+  Decided by content, not by extension: a `.mxl` renamed to `.musicxml` (or the
+  reverse) used to fail with a baffling "no measures were found", because the reader
+  trusted the name.
+  """
   path = pathlib.Path(path)
-  if path.suffix.lower() in ('.mxl', '.zip'):
+  with open(path, 'rb') as handle:
+    magic = handle.read(4)
+  if magic[:2] == b'PK' or path.suffix.lower() in ('.mxl', '.zip'):
     with zipfile.ZipFile(path) as z:
       names = [n for n in z.namelist()
                if n.lower().endswith(('.xml', '.musicxml')) and 'META-INF' not in n]
@@ -490,7 +496,8 @@ def glyph_elements(svg: str, ids: Dict[str, int]) -> List[Tuple[GlyphBox, str]]:
 
 
 def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
-                     scale: float = RASTER_SCALE) -> Tuple[str, Dict[str, str]]:
+                     scale: float = RASTER_SCALE,
+                     xml_text: Optional[str] = None) -> Tuple[str, Dict[str, str]]:
   """Engrave one page again, and say which element is which glyph.
 
   Masking works on the SVG rather than on the finished pixels: an element can be
@@ -507,7 +514,9 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
   Returns:
     (svg, {glyph key: element id}) for that page.
   """
-  text = _score_xml(pathlib.Path(musicxml))
+  # `xml_text` lets a caller engrave a modified score (fingerings added) without any
+  # file existing: Verovio takes the document as a string
+  text = xml_text if xml_text is not None else _score_xml(pathlib.Path(musicxml))
   engine = verovio_module().toolkit()
   # Verovio's own `scale` must stay at the value the cached geometry was engraved
   # with: it changes the *layout* (how many bars fit on a system), so raising it to
@@ -528,6 +537,15 @@ def element_ids(svg: str, ids: Dict[str, int]) -> Dict[str, str]:
   on every engraving -- which is why masks are stored as positions, not ids.
   """
   return {glyph.key: element_id for glyph, element_id in glyph_elements(svg, ids)}
+
+
+def hide_classes(svg: str, classes) -> str:
+  """Suppress every element of a class, e.g. the engraved fingerings (`fing`)."""
+  wanted = [c for c in classes if c]
+  if not wanted:
+    return svg
+  css = ''.join('g.%s { display: none; }' % name for name in wanted)
+  return svg.replace('</style>', css + '</style>', 1)
 
 
 def hide_elements(svg: str, element_ids_to_hide) -> str:
