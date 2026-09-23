@@ -226,6 +226,9 @@ function tapBar(number) {
     state.to = number;
   }
   updateRangeUI();
+  // Without this the Play button stayed disabled for ever unless the URL already
+  // carried a range: it was only refreshed on load and on clear.
+  updatePlayButton();
   writeUrl();
 }
 
@@ -258,13 +261,33 @@ function spanFor(low, high) {
 // ------------------------------------------------------------------ playback
 
 function updatePlayButton() {
-  const ready = !!(state.detail && state.detail.map && state.detail.has_audio);
-  $('play').disabled = !ready || state.from === null;
-  $('stop').disabled = !ready;
-  if (!state.detail) return;
-  if (!state.detail.has_audio) {
+  const detail = state.detail;
+  const hasAudio = !!(detail && detail.has_audio);
+  const hasMap = !!(detail && detail.map);
+  const chosen = state.from !== null;
+  const button = $('play');
+
+  button.disabled = !(hasAudio && hasMap) || !chosen;
+  // Say *why* it is unavailable, rather than presenting a dead button.
+  if (!hasAudio) {
+    button.textContent = '▶ no recording';
+    button.title = 'fetch a recording for this piece in the desktop app';
+  } else if (!hasMap) {
+    button.textContent = '▶ no map';
+    button.title = 'align this piece in the desktop app first';
+  } else if (!chosen) {
+    button.textContent = '▶ pick bars';
+    button.title = 'tap a bar on the score to choose what to play';
+  } else {
+    button.textContent = '▶ Play';
+    button.title = 'play the passage you picked';
+  }
+
+  $('stop').disabled = !hasAudio;
+  if (!detail) return;
+  if (!hasAudio) {
     $('rangeline').textContent = 'no recording cached — fetch one in the desktop app';
-  } else if (!state.detail.map) {
+  } else if (!hasMap) {
     $('rangeline').textContent = 'no measure map yet — align it in the desktop app';
   }
 }

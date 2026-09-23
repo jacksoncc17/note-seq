@@ -16,3 +16,9 @@ def pytest_configure(config):
   """Register the marker for tests that talk to YouTube for real."""
   config.addinivalue_line(
       'markers', 'network: needs the live YouTube API (ANALYZER_NETWORK_TESTS=1)')
+
+
+def pytest_configure(config):
+  """Register the markers this suite uses, so -W error and -m work cleanly."""
+  config.addinivalue_line('markers', 'network: needs the internet (opt in)')
+  config.addinivalue_line('markers', 'slow: starts a browser or does real work')
