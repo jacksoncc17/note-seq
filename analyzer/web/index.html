@@ -47,7 +47,12 @@
 </head>
 <body>
 <header>
-  <select id="piece" aria-label="piece"></select>
+  <div class="row" style="display:flex;gap:8px">
+    <select id="piece" aria-label="piece" style="flex:1"></select>
+    <input id="search" type="search" placeholder="filter…" aria-label="filter pieces"
+           style="flex:0 0 34%;min-width:96px;font:inherit;color:var(--ink);
+                  background:#232a34;border:1px solid var(--line);border-radius:10px;padding:10px">
+  </div>
   <div class="meta" id="meta">loading…</div>
 </header>
 
@@ -105,13 +110,19 @@ function setMeta(text, warn) {
 
 // ---------------------------------------------------------------- piece list
 
-async function loadPieces() {
-  const data = await api('/pieces');
+async function loadPieces(options) {
+  const opts = options || {};
   const select = $('piece');
+  const previous = opts.keep ? select.value : null;
+  const term = $('search').value.trim();
+  const data = await api('/pieces' + (term ? '?q=' + encodeURIComponent(term) : ''));
   select.innerHTML = '';
   if (!data.pieces.length) {
-    select.innerHTML = '<option>no pieces found</option>';
-    setMeta('build one with memorization/analyze.py on the computer that runs this server', true);
+    select.innerHTML = '<option value="">' + (term ? 'nothing matches' : 'no pieces found') + '</option>';
+    setMeta(term ? 'no piece matches "' + term + '"'
+                 : 'build one with memorization/analyze.py on the computer that runs this server',
+            true);
+    $('play').disabled = true;
     return;
   }
   for (const piece of data.pieces) {
@@ -120,10 +131,21 @@ async function loadPieces() {
     option.textContent = piece.name + (piece.has_map ? '' : ' — no map');
     select.appendChild(option);
   }
-  const wanted = new URLSearchParams(location.search).get('piece');
+  const wanted = previous || new URLSearchParams(location.search).get('piece');
   if (wanted && data.pieces.some((p) => p.slug === wanted)) select.value = wanted;
   await loadPiece(select.value);
+  if (data.pieces.length > 1) {
+    setMeta($('meta').textContent + ' · ' + data.pieces.length + ' pieces', false);
+  }
 }
+
+let searchTimer = null;
+$('search').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    loadPieces({ keep: true }).catch((e) => setMeta('could not filter: ' + e.message, true));
+  }, 250);
+});
 
 async function loadPiece(slug) {
   if (!slug) return;

@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, unquote
 
 from .config import AnalyzerConfig
 from . import library, measures, scoreview, syncmap
+from .store import PieceQuery
 
 
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / 'web'
@@ -125,29 +126,33 @@ async def read_request(reader: asyncio.StreamReader,
 # the API
 # ---------------------------------------------------------------------------
 
-def piece_summary(piece: library.Piece) -> Dict[str, object]:
-  """The handful of fields a piece list needs."""
-  summary: Dict[str, object] = {
-      'slug': piece.slug,
-      'name': piece.display_name,
-      'bars': piece.bars,
-      'key': piece.key,
-      'has_audio': piece.has_audio,
-      'has_map': piece.has_map,
-      'has_score': piece.has_score,
-  }
-  if piece.audio is not None:
-    summary['duration_s'] = round(float(piece.audio.duration_s or 0.0), 2)
-  if piece.sync is not None:
-    summary['method'] = piece.sync.method
-    summary['trusted'] = piece.sync.is_trusted
-    summary['measures'] = len(piece.sync.result.measures)
-  return summary
+def query_from(request: Request) -> PieceQuery:
+  """Build a `PieceQuery` from the URL.
+
+  The same object the desktop app uses, so "list the pieces that have a recording"
+  means one thing everywhere -- and becomes one WHERE clause if the storage moves
+  to a database.
+  """
+  def flag(name: str):
+    raw = request.get(name)
+    if raw is None:
+      return None
+    return raw.lower() not in ('0', 'false', 'no', '')
+
+  limit = request.number('limit')
+  return PieceQuery(
+      text=request.get('q', '') or '',
+      has_audio=flag('has_audio'),
+      has_map=flag('has_map'),
+      tag=request.get('tag', '') or '',
+      include_hidden=bool(flag('include_hidden')),
+      order_by=request.get('order', PieceQuery.ORDER_AUDIO_FIRST),
+      limit=int(limit) if limit and limit > 0 else 0)
 
 
 def piece_detail(cfg: AnalyzerConfig, piece: library.Piece) -> Dict[str, object]:
   """Everything the practice client needs for one piece, in one response."""
-  detail = piece_summary(piece)
+  detail = piece.summary()
   detail['notes'] = list(piece.notes)
 
   if piece.sync is not None:
@@ -249,7 +254,13 @@ class AnalyzerApp:
       return json_response({'ok': True, 'pieces': len(pieces),
                             'uptime_s': round(time.time() - self.started_at, 1)})
     if path == '/pieces':
-      return json_response({'pieces': [piece_summary(p) for p in library.discover(self.cfg)]})
+      query = query_from(request)
+      pieces = library.discover(self.cfg, query=query)
+      return json_response({'pieces': [p.summary() for p in pieces],
+                            'count': len(pieces),
+                            'query': {'q': query.text, 'has_audio': query.has_audio,
+                                      'has_map': query.has_map, 'tag': query.tag,
+                                      'limit': query.limit}})
 
     match = re.fullmatch(r'/piece/([^/]+)', path)
     if match:

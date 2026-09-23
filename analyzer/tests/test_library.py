@@ -88,12 +88,34 @@ def test_legacy_single_bank_is_listed_once(cfg, tmp_path):
 
 
 def test_piece_from_a_bare_score_needs_no_bank(cfg, tmp_path):
+  """Opening a score with no question bank still gives a usable piece, and
+  registers it, so it stays in the library (and on the phone) afterwards."""
   score = tmp_path / 'sheets' / 'unbanked.mxl'
-  score.write_bytes(b'x')
+  score.write_bytes(b'a score Verovio would reject, but the catalogue only stores it')
   piece = library.piece_from_musicxml(cfg, score)
-  assert piece.slug == 'unbanked' and piece.bank is None
+  assert piece.slug == 'unbanked'
   assert piece.has_score and piece.title == ''      # display falls back to the slug
   assert piece.display_name == 'Unbanked'
+  assert piece.record is not None, 'opening a score should catalogue it'
+  assert [p.slug for p in library.discover(cfg)] == ['unbanked']
+  assert library.find(cfg, 'unbanked').musicxml.read_bytes() == score.read_bytes()
+
+
+def test_the_catalogue_outlives_a_score_that_is_moved_away(cfg, tmp_path):
+  """The filesystem adapter references the score where it lives, so moving it away
+  loses the score but not the piece: the entry stays, with an explanation attached.
+  (A database adapter would have imported the bytes and kept both.)"""
+  score = tmp_path / 'sheets' / 'movable.mxl'
+  score.write_bytes(b'score bytes')
+  library.piece_from_musicxml(cfg, score, register=True)
+  assert library.find(cfg, 'movable').has_score is True
+
+  score.unlink()
+  piece = library.find(cfg, 'movable')
+  assert piece is not None, 'a piece must not vanish because its score moved'
+  assert piece.has_score is False
+  assert any('gone' in note for note in piece.notes), piece.notes
+  assert [p.slug for p in library.discover(cfg)] == ['movable'], 'still listed'
 
 
 def test_piece_from_a_missing_score_says_so(cfg, tmp_path):

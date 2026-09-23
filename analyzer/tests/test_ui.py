@@ -369,3 +369,23 @@ def test_follow_playback_can_be_turned_off(window, cfg, tmp_path):
   window._on_position(start + 0.1)
   assert window.score_view._playhead == 6
   assert window.score_view.page_number == 1, 'with follow off, the page must not turn'
+
+
+def test_the_filter_box_narrows_the_piece_list(window, cfg):
+  """The desktop filter goes through the same repository query as the phone's."""
+  make_piece(cfg, slug='demo')
+  make_piece(cfg, slug='other')
+  window.refresh_pieces()
+  assert window.piece_combo.count() == 2
+
+  window.filter_edit.setText('other')
+  assert window.piece_combo.count() == 1
+  assert window.piece_combo.itemData(0) == 'other'
+
+  window.filter_edit.setText('zzz-nothing')
+  assert window.piece_combo.count() == 0
+  assert window.piece is None
+  assert 'no piece matches' in window.status.currentMessage()
+
+  window.filter_edit.setText('')
+  assert window.piece_combo.count() == 2

@@ -310,6 +310,30 @@ def cached_render(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE) ->
   return render
 
 
+def write_cache(cfg: AnalyzerConfig, musicxml, render: ScoreRender,
+                scale: float = RASTER_SCALE) -> pathlib.Path:
+  """Persist a render's manifest, so the next open finds it.
+
+  Kept separate from `render_score` because the cache format is a detail of *this*
+  module, and a storage adapter that wants to store a render should not have to
+  reimplement it. The page images are expected to be at the paths the render
+  already references.
+  """
+  path = pathlib.Path(musicxml)
+  out_dir = cache_dir(cfg, path)
+  out_dir.mkdir(parents=True, exist_ok=True)
+  payload = render.to_dict()
+  if path.is_file():
+    stat = path.stat()
+    payload.update({'scale': float(scale), 'source_size': stat.st_size,
+                    'source_mtime': stat.st_mtime})
+  manifest = out_dir / 'pages.json'
+  temp = manifest.with_suffix('.json.tmp')
+  temp.write_text(json.dumps(payload), encoding='utf-8')
+  temp.replace(manifest)
+  return manifest
+
+
 def render_score(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE,
                  force: bool = False, progress: Progress = None) -> ScoreRender:
   """Engrave `musicxml` into page images with measure geometry.
@@ -386,13 +410,6 @@ def render_score(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE,
 
   render = ScoreRender(slug=library.slugify(path), source=str(path), pages=pages,
                        warnings=warnings)
-  manifest = out_dir / 'pages.json'
-  payload = render.to_dict()
-  stat = path.stat()
-  payload.update({'scale': float(scale), 'source_size': stat.st_size,
-                  'source_mtime': stat.st_mtime})
-  temp = manifest.with_suffix('.json.tmp')
-  temp.write_text(json.dumps(payload), encoding='utf-8')
-  temp.replace(manifest)
+  write_cache(cfg, path, render, scale=scale)
   _report(progress, 100.0, 'engraved %d page(s)' % len(pages))
   return render

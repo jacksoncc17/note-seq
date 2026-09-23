@@ -37,13 +37,17 @@ class AnalyzerConfig:
   legacy_bank: pathlib.Path = ROOT / 'memorization' / 'output' / 'fingerprint.json'
   sheet_music_dir: pathlib.Path = _path('ANALYZER_SHEET_DIR', pathlib.Path.home() / 'sheet_music')
 
+  # Which storage adapter `store.open_repository` should build. Changing this to
+  # 'sqlite' (or anything else registered there) is the whole of a database move.
+  backend: str = os.environ.get('ANALYZER_BACKEND', 'filesystem')
+
   # Audio is cached rather than streamed: yt-dlp is slow, and both alignment and
   # playback want random access to decoded samples.
   target_sample_rate: int = 22050
   target_channels: int = 1
 
   def ensure_dirs(self) -> None:
-    for d in (self.audio_dir, self.sync_dir, self.render_dir):
+    for d in (self.audio_dir, self.sync_dir, self.render_dir, self.library_dir):
       d.mkdir(parents=True, exist_ok=True)
 
   @property
@@ -60,6 +64,16 @@ class AnalyzerConfig:
   def render_dir(self) -> pathlib.Path:
     """Score renders and other derived pictures."""
     return self.output_dir / 'render'
+
+  @property
+  def library_dir(self) -> pathlib.Path:
+    """The catalogue: curated metadata per piece (title, composer, tags, hidden).
+
+    Separate from the question banks on purpose -- the banks hold facts derived
+    from the score, this holds what a person chose. A database would keep the
+    second as columns.
+    """
+    return self.output_dir / 'library'
 
   def audio_path(self, slug: str) -> pathlib.Path:
     return self.audio_dir / ('%s.wav' % slug)

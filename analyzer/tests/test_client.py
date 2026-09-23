@@ -201,3 +201,34 @@ def test_a_piece_without_a_map_says_so_instead_of_offering_play(cfg, tmp_path, b
     assert label == '▶ no map', label
     assert browser.evaluate('document.getElementById("play").disabled') is True
     assert 'no measure map' in browser.evaluate('document.getElementById("rangeline").textContent')
+
+
+def test_typing_in_the_filter_narrows_the_piece_list(cfg, tmp_path, browser):
+  """The phone's search box queries the repository, not a widget list."""
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, title='First Piece')
+  make_piece(cfg, slug='other', bars=6, seconds=12.0, title='Second Piece')
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/' % port)
+    options = browser.evaluate(
+        'Array.from(document.getElementById("piece").options).map(o => o.textContent)')
+    assert len(options) == 2 and any('Second Piece' in o for o in options)
+
+    browser.evaluate(
+        'document.getElementById("search").value = "other";'
+        'document.getElementById("search").dispatchEvent(new Event("input"));')
+    time.sleep(1.2)                                  # the box debounces before asking
+    options = browser.evaluate(
+        'Array.from(document.getElementById("piece").options).map(o => o.value)')
+    assert options == ['other'], options
+    assert browser.evaluate('document.getElementById("piece").value') == 'other'
+    # the client switched to the piece the filter found, not merely narrowed a list
+    selected = browser.evaluate(
+        'document.getElementById("piece").selectedOptions[0].textContent')
+    assert 'Second Piece' in selected, selected
+
+    browser.evaluate(
+        'document.getElementById("search").value = "zzz-nothing";'
+        'document.getElementById("search").dispatchEvent(new Event("input"));')
+    time.sleep(1.2)
+    assert browser.evaluate('document.getElementById("piece").options.length') == 1
+    assert browser.evaluate('document.getElementById("play").disabled') is True

@@ -182,6 +182,53 @@ progress bar, so they stay in the desktop app — and the client says so plainly
 when a piece has no recording or no map yet (`intermezzo-left — no map` in the
 list) rather than appearing broken.
 
+## Storage, and the way out to a database
+
+Everything the app keeps lives behind four ports in `store.py`, so no caller knows
+whether it is on a filesystem or in SQL:
+
+| port | what it holds | the one thing to know |
+|---|---|---|
+| `PieceStore` | the catalogue: list/get/upsert/remove, with a `PieceQuery` | queries are objects, so `list()` can become a `WHERE` clause |
+| `BlobStore` | bytes under an opaque key | `local_path()` exists because soundfile, Qt and Verovio insist on a filename; a database adapter answers it by materialising into a scratch dir |
+| `MapStore` | the measure → time maps | the data that costs real time to produce |
+| `RenderStore` | engraved pages | reproducible from the score, so a cache |
+
+Two adapters ship, and both run the same contract suite in
+`tests/test_store_contract.py`:
+
+* **filesystem** (the default) reads today's layout unchanged — question banks,
+  `cache/audio/`, `output/sync/`, `output/render/`, plus a new `output/library/`
+  for curated metadata. No migration; your existing caches and maps keep working.
+* **memory** keeps everything in a dict. It exists to keep the ports honest: with
+  only a filesystem implementation, filesystem assumptions creep into the
+  interfaces unnoticed. It is not a product feature.
+
+**Switching to a database is one line.** `store.open_repository(cfg)` reads
+`cfg.backend` (or `ANALYZER_BACKEND`), so the move is: write an adapter, register
+it in that function, point the config at it. Nothing above `store` changes — the
+window, the HTTP API and the phone client all go through `library`, which goes
+through the ports. A new adapter is accepted by adding one line to the ADAPTERS
+table in the contract suite; if it passes there, callers keep working.
+
+Two behaviours worth knowing, because they differ between backends by design:
+
+* **Scores are referenced in place, not copied**, by the filesystem adapter: the
+  catalogue records where your MusicXML lives. Move it and the piece stays listed
+  with an explanation, but its score is gone. A database adapter would import the
+  bytes at `upsert` time and keep both — that choice is exactly what belongs behind
+  the port, so callers only ever ask "has a score?".
+* **The catalogue owns curation, the bank owns derivation.** Title, composer, tags
+  and *hidden* are stored as a row (a sidecar here); bar count, key and the
+  reference MIDI come from the question bank and are never overwritten by an
+  `upsert`. That is the split a database would bake into columns.
+
+With that in place, multiple pieces are ordinary: *Open score…* now registers a
+piece (so a score you have never analysed still appears in both clients), the
+desktop has a filter box, the HTTP API takes
+`/pieces?q=&has_audio=&has_map=&tag=&limit=&order=`, and the phone client has a
+search field that queries the same way.
+
 ## What the map knows about itself
 
 A map is only as good as the recording it came from, so each one stores its
@@ -242,7 +289,8 @@ analyzer/
     ytaudio.py              yt-dlp + ffmpeg -> cached WAV, with progress
     align.py                linear estimate, silence trim, chroma + DTW alignment
     syncmap.py              the sidecar JSON: save, load, staleness
-    library.py              finds pieces, their scores, PDFs, recordings, maps
+    store.py                the storage ports, and the filesystem + memory adapters
+    library.py              the domain view: a record plus paths, a map, warnings
     scoreview.py            MusicXML -> page images with a rectangle per measure
     ui/
       main_window.py        the window
@@ -253,32 +301,28 @@ analyzer/
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
-  tests/                    pytest, head-less (QT_QPA_PLATFORM=offscreen)
+  tests/                    pytest; the store contract suite runs against every adapter
 ```
 
 ## Status
 
-**M1-M5a are implemented**, with 188 tests (one opt-in network test, one skipped
+**M1-M6 are implemented**, with 242 tests (one opt-in network test, one skipped
 without an audio device).
 
-* **M1** the window: piece picker, repeat-aware measure list, range selector, transport.
-* **M2** the recording: fetched once with yt-dlp, converted with ffmpeg, cached locally.
-* **M3** the map: average-tempo estimate, chroma + DTW refinement, draggable markers, sidecar JSON.
-* **M4** the score view: engraved pages from the MusicXML, every bar clickable, following playback.
-* **M5a** the phone client: the same pieces and map over HTTP, with sample-accurate passage playback.
+* **M1** the window · **M2** the cached recording · **M3** the measure map
+* **M4** the engraved score view · **M5a** the phone client
+* **M6** several pieces, on top of storage ports a database can implement
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache on the second call); a full align run through the
-real Qt worker threads (204 markers, bars 40-83 -> 62.38-122.99 s, saved and
-reloaded); the score tab driven end to end (9 pages, 204 measures clickable); and
-the phone client's JavaScript actually executed in headless Chrome against the
-real 204-bar piece, rendering "204 bars · dtw map, 1.53 s/bar", 24 bar overlays on
-page 2 and bars 40-55 highlighted from the URL.
+real Qt worker threads (204 markers, bars 40-83 → 62.38-122.99 s); the score tab
+driven end to end (9 pages, 204 measures clickable); the phone client's JavaScript
+executed in headless Chrome, including typing in its search box; and the query
+layer against the real library, where `/pieces?q=intermezzo` and `?has_map=1`
+return exactly the right rows.
 
-**M5b**, not built yet: correcting the map from the phone. The plan is tap-a-bar
-plus nudge buttons rather than dragging markers, because a finger on a small
-screen is imprecise and nudging is exact. **M5c**: triggering fetch/align/engrave
-from the phone, which needs a job-id API.
+**M5b** is not built: correcting the map from the phone (tap-a-bar plus nudge
+buttons rather than dragging, since a finger is imprecise and nudging is exact).
 
 ## Troubleshooting
 

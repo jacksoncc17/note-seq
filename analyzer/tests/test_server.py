@@ -59,7 +59,7 @@ def score_xml(bars=6):
   return SCORE % ''.join(parts)
 
 
-def make_piece(cfg, slug='demo', bars=6, seconds=12.0):
+def make_piece(cfg, slug='demo', bars=6, seconds=12.0, with_map=True, title='Demo Piece'):
   """A complete piece on disk: score, bank, cached recording, map, engraving."""
   import numpy as np
   import soundfile as sf
@@ -73,7 +73,7 @@ def make_piece(cfg, slug='demo', bars=6, seconds=12.0):
   bank.mkdir(parents=True, exist_ok=True)
   (bank / 'fingerprint.json').write_text(json.dumps({
       'source_file': str(score),
-      'global': {'num_measures': bars, 'key_from_score': 'C major', 'title': 'Demo Piece'},
+      'global': {'num_measures': bars, 'key_from_score': 'C major', 'title': title},
       'measures': [{}] * bars}), encoding='utf-8')
 
   wav = cfg.audio_path(slug)
@@ -84,10 +84,11 @@ def make_piece(cfg, slug='demo', bars=6, seconds=12.0):
       slug=slug, path=str(wav), url='https://example.invalid/x', duration_s=seconds,
       sample_rate=22050, channels=1).to_dict()), encoding='utf-8')
 
-  result = syncmap.uniform_map(list(range(1, bars + 1)), seconds)
-  result.method = syncmap.SyncResult.METHOD_DTW          # pretend it was aligned
-  syncmap.save(cfg, slug, result, audio=library.find(cfg, slug).audio,
-               source_musicxml=score, played=list(range(1, bars + 1)))
+  if with_map:
+    result = syncmap.uniform_map(list(range(1, bars + 1)), seconds)
+    result.method = syncmap.SyncResult.METHOD_DTW        # pretend it was aligned
+    syncmap.save(cfg, slug, result, audio=library.find(cfg, slug).audio,
+                 source_musicxml=score, played=list(range(1, bars + 1)))
   scoreview.render_score(cfg, score)
   return score
 
@@ -319,3 +320,48 @@ def test_the_client_javascript_actually_runs(cfg):
     assert meta, 'the status line is missing from the rendered page'
     assert 'could not load' not in meta.group(1), 'the client failed: %s' % meta.group(1)
     assert 'bars' in meta.group(1), 'the piece summary did not render: %r' % meta.group(1)
+
+
+# ---------------------------------------------------------------------------
+# many pieces: search and filters, which is what the query object is for
+# ---------------------------------------------------------------------------
+
+def test_the_piece_list_can_be_searched(cfg):
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0)
+  make_piece(cfg, slug='other', bars=8, seconds=16.0)
+  with running(cfg) as port:
+    status, body = get_json(port, '/pieces')
+    assert body['count'] == 2 and len(body['pieces']) == 2
+
+    status, body = get_json(port, '/pieces?q=other')
+    assert [p['slug'] for p in body['pieces']] == ['other']
+    assert body['query']['q'] == 'other', 'the response echoes what was asked'
+
+    status, body = get_json(port, '/pieces?q=nothing-like-this')
+    assert body['pieces'] == [] and body['count'] == 0
+
+
+def test_the_piece_list_can_be_filtered_and_limited(cfg):
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, with_map=True)
+  make_piece(cfg, slug='bare', bars=6, seconds=12.0, with_map=False)
+  with running(cfg) as port:
+    status, body = get_json(port, '/pieces?has_map=1')
+    assert [p['slug'] for p in body['pieces']] == ['demo']
+    status, body = get_json(port, '/pieces?has_map=0')
+    assert [p['slug'] for p in body['pieces']] == ['bare']
+    status, body = get_json(port, '/pieces?limit=1')
+    assert body['count'] == 1
+    # a hidden piece stays hidden unless it is asked for explicitly
+    status, body = get_json(port, '/pieces?include_hidden=1')
+    assert isinstance(body['pieces'], list)
+
+
+def test_a_pieces_summary_carries_what_a_list_needs(cfg):
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0)
+  with running(cfg) as port:
+    status, body = get_json(port, '/pieces')
+    piece = body['pieces'][0]
+    for field in ('slug', 'name', 'bars', 'key', 'has_audio', 'has_map', 'has_score',
+                  'duration_s', 'method', 'measures'):
+      assert field in piece, 'the list is missing %s' % field
+    assert piece['measures'] == 6

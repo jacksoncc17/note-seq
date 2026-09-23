@@ -104,6 +104,13 @@ class MainWindow(QMainWindow):
     row.addWidget(QLabel('piece'))
     row.addWidget(self.piece_combo, 1)
 
+    self.filter_edit = QLineEdit()
+    self.filter_edit.setPlaceholderText('filter by title, composer or tag')
+    self.filter_edit.setClearButtonEnabled(True)
+    self.filter_edit.setMaximumWidth(240)
+    self.filter_edit.textChanged.connect(self._on_filter_changed)
+    row.addWidget(self.filter_edit)
+
     reload_btn = QPushButton('Reload list')
     reload_btn.clicked.connect(lambda: self.refresh_pieces(self.piece.slug if self.piece else ''))
     row.addWidget(reload_btn)
@@ -338,9 +345,16 @@ class MainWindow(QMainWindow):
 
   # ------------------------------------------------------------------ pieces
 
+  def _on_filter_changed(self, _text: str) -> None:
+    """Filtering is a query on the repository, not a filter on a widget list:
+    the same call the phone client makes."""
+    self.refresh_pieces(self.piece.slug if self.piece else '')
+
   def refresh_pieces(self, select: str = '') -> None:
     """Reload the piece list and select `select` (or the first piece)."""
-    pieces = library.discover(self.cfg)
+    from ..store import PieceQuery
+    text = self.filter_edit.text().strip() if hasattr(self, 'filter_edit') else ''
+    pieces = library.discover(self.cfg, query=PieceQuery(text=text) if text else None)
     self.piece_combo.blockSignals(True)
     self.piece_combo.clear()
     for piece in pieces:
@@ -349,8 +363,11 @@ class MainWindow(QMainWindow):
 
     if not pieces:
       self._set_piece(None)
-      self.status.showMessage('no pieces found: build one with '
-                              '.venv/bin/python memorization/analyze.py <score.musicxml>')
+      if self.filter_edit.text().strip():
+        self.status.showMessage('no piece matches "%s"' % self.filter_edit.text().strip())
+      else:
+        self.status.showMessage('no pieces found: build one with '
+                                '.venv/bin/python memorization/analyze.py <score.musicxml>')
       return
     index = 0
     if select:
@@ -365,10 +382,9 @@ class MainWindow(QMainWindow):
     if index < 0:
       return
     slug = self.piece_combo.itemData(index)
-    for piece in library.discover(self.cfg):
-      if piece.slug == slug:
-        self._set_piece(piece)
-        return
+    piece = library.find(self.cfg, slug)
+    if piece is not None:
+      self._set_piece(piece)
 
   def open_score_dialog(self) -> None:
     start = str(self.cfg.sheet_music_dir if self.cfg.sheet_music_dir.is_dir() else pathlib.Path.home())
