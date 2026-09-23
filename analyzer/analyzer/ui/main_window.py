@@ -953,7 +953,15 @@ class MainWindow(QMainWindow):
       if answer == QMessageBox.Yes:
         self.save_map()
     self.player.stop()
-    for worker in (self._download, self._align, self._render):
-      if worker is not None and worker.isRunning():
-        worker.wait(2000)
+    # Ask running workers to stop and wait for them: Qt aborts the process if a
+    # QThread is destroyed while still running, so a close during a long engraving
+    # used to end in a core dump rather than a clean exit.
+    running = [w for w in (self._download, self._align, self._render)
+               if w is not None and w.isRunning()]
+    for worker in running:
+      worker.cancel()
+    for worker in running:
+      if not worker.wait(15000):
+        self.status.showMessage('still finishing %s in the background…'
+                                % type(worker).__name__)
     super().closeEvent(event)

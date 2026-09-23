@@ -167,3 +167,39 @@ def test_an_unexpected_slot_error_is_reported_not_fatal(qapp, monkeypatch):
     import sys as _sys
     _sys.excepthook = before
   assert 'NoError' in shown.get('msg', ''), 'the user should be told what broke'
+
+
+# ---------------------------------------------------------------------------
+# workers: cancellation (an uncancelled thread aborts the process on close)
+# ---------------------------------------------------------------------------
+
+def test_a_worker_reports_progress_until_it_is_cancelled(qapp):
+  from analyzer.ui.workers import CancelableWorker, WorkerCancelled
+
+  seen = []
+  worker = CancelableWorker()
+  report = worker.reporter(lambda pct, msg: seen.append(pct))
+  report(10.0, 'starting')
+  assert seen == [10.0]
+
+  worker.cancel()
+  assert worker.cancelled is True
+  with pytest.raises(WorkerCancelled):
+    report(20.0, 'too late')
+
+
+def test_cancellation_is_not_swallowed_by_the_progress_helpers():
+  """The sentinel must survive `_report`, which swallows Exception on purpose."""
+  import numpy as np
+  from analyzer.ui.workers import WorkerCancelled
+  from analyzer import align, scoreview
+
+  for helper in (align._report, scoreview._report):
+    def angry(percent, message):
+      raise WorkerCancelled()
+    with pytest.raises(WorkerCancelled):
+      helper(angry, 50.0, 'cancelled')
+    # but an ordinary broken callback is still ignored, as documented
+    def broken(percent, message):
+      raise RuntimeError('the window went away')
+    helper(broken, 50.0, 'ignored')

@@ -389,3 +389,75 @@ def test_the_filter_box_narrows_the_piece_list(window, cfg):
 
   window.filter_edit.setText('')
   assert window.piece_combo.count() == 2
+
+
+def test_closing_the_window_mid_engraving_exits_cleanly(tmp_path):
+  """Qt aborts the process when a QThread is destroyed while it is still running,
+  so closing during a long engraving used to end in a core dump. Run it in a
+  subprocess, because the failure mode is the process dying.
+
+  The engraving is replaced by a slow stand-in that reports progress. A real
+  eight-bar score finishes before the window can be closed, which made an earlier
+  version of this test pass even with the fix removed -- so the stand-in asserts
+  that it really is still running before the close.
+  """
+  import subprocess
+  import sys
+
+  script = """
+import os, pathlib, sys, time
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+sys.path.insert(0, {package!r})
+sys.path.insert(0, {tests!r})
+from PyQt5.QtWidgets import QApplication
+from analyzer.config import AnalyzerConfig
+from analyzer.ui.main_window import MainWindow
+import analyzer.scoreview as scoreview
+from test_server import make_piece
+
+def slow_render(cfg, musicxml, scale=1.5, force=False, progress=None):
+    for step in range(40):
+        if progress:
+            progress(step * 2.0, "engraving step %d" % step)
+        time.sleep(0.25)
+    raise RuntimeError("the window should have been closed long before this")
+
+scoreview = None                              # filled in below, after the fixture
+root = pathlib.Path({root!r})
+cfg = AnalyzerConfig(cache_dir=root / "cache", output_dir=root / "out",
+                     bank_dir=root / "banks", legacy_bank=root / "banks" / "fingerprint.json",
+                     sheet_music_dir=root / "sheets")
+(root / "sheets").mkdir(parents=True, exist_ok=True)
+cfg.ensure_dirs()
+make_piece(cfg, slug="demo", bars=8, seconds=16.0)   # engraves for real, so first
+
+import analyzer.scoreview                           # noqa: E402 - patch after the fixture
+analyzer.scoreview.render_score = slow_render       # the worker resolves it by name
+
+app = QApplication([])
+window = MainWindow(cfg, piece_slug="demo")
+window.show()
+window.render_score(force=True)
+worker = window._render
+time.sleep(0.6)
+print("running before close:", worker.isRunning())
+assert worker.isRunning(), "the stand-in finished too fast to test anything"
+window.close()
+print("running after close:", worker.isRunning())
+assert not worker.isRunning(), "close should have stopped the worker"
+del window
+print("exited cleanly")
+""".format(package=str(pathlib.Path(__file__).resolve().parents[1].resolve()),
+           tests=str(pathlib.Path(__file__).resolve().parent.resolve()),
+           root=str(tmp_path))
+
+  result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                          text=True, timeout=180)
+  assert result.returncode == 0, (
+      'the process died (rc=%s) instead of closing cleanly:\n%s'
+      % (result.returncode, result.stderr[-800:]))
+  assert 'running before close: True' in result.stdout, result.stdout[-300:]
+  assert 'running after close: False' in result.stdout, result.stdout[-300:]
+  assert 'exited cleanly' in result.stdout, result.stdout + result.stderr[-400:]
+  assert 'QThread: Destroyed while thread is still running' not in result.stderr, \
+      result.stderr[-500:]
