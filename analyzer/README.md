@@ -55,16 +55,36 @@ that an existing map was fitted to the old recording).
   added back; a transposed recording is detected and corrected; and the result is
   clamped so no bar is given an impossible length.
 
-  What to expect: on controlled material with rubato this recovers bar onsets to
-  about **±0.1 s** (one analysis frame), and aligning a rendered score to itself
-  is exact. On a *real* recording it is rougher, and the numbers from a real
-  309.7 s YouTube performance of this very Chopin waltz are worth knowing: the fit
-  landed a median 3.15 s away from the even division and **20 of 204 bars had to
-  be clamped** (raw bar lengths ran 0.09–7.24 s). So an automatic map on real
-  audio is a **starting point at the region level**, not a bar-accurate result.
-  The app says so rather than pretending: bars the machinery had to overrule get
-  low confidence, the waveform greys them, and the warning text reports how many
-  there were.
+  **How accurate is it?** Measured against performances whose truth is known
+  exactly — a 32-bar score, rendered, with the note times rewritten through a
+  known tempo curve, then aligned back to the untouched score:
+
+  | performance | median error | p90 | worst bar | within 0.10 s | estimate, for comparison |
+  |---|---|---|---|---|---|
+  | dead straight | 0.024 s | 0.048 s | 0.058 s | 100% | 0.055 s |
+  | 5% rubato | 0.031 s | 0.082 s | 0.100 s | 100% | 0.285 s |
+  | 10% rubato | 0.028 s | 0.084 s | 0.096 s | 100% | 0.279 s |
+  | 10% rubato, 5% slower | 0.036 s | 0.063 s | 0.097 s | 100% | 0.291 s |
+  | 18% rubato, 8% slower | 0.042 s | 0.080 s | 0.118 s | 97% | 0.381 s |
+  | +2 semitones, corrected | 0.045 s | 0.090 s | 0.138 s | 94% | (shift found exactly) |
+
+  So on material that matches the score structurally: **tens of milliseconds,
+  worst bars around a tenth of a second** — and about **ten times better than
+  spreading the recording evenly**. At roughly 1.5 s per bar, 0.1 s is under a
+  tenth of a bar: close enough to start playing on the beat, though a pianist
+  will still hear it on a slow passage.
+
+  Three caveats worth as much as the numbers. Those figures are *rendered* piano;
+  a real recording adds pedal, room, dynamics and wrong notes, so expect worse.
+  On the real 309.7 s YouTube performance of the Chopin waltz there is no ground
+  truth to score against, and the honest report is plausibility instead: 20 of 204
+  bars had to be clamped (raw bar lengths ran 0.09-7.24 s) and the fit sat a median
+  3.15 s from the even division, which for a *Lento rubato* waltz is musically
+  plausible (2.3% cumulative) but not verified. And an earlier version of these
+  numbers was wrong: a first attempt warped the *waveform*, which shifts pitch as
+  well as time, and a second compared against notated time when the renderer
+  itself lags its own notation by 0.3 s when there is a lead-in. Both produced
+  confident, incorrect figures until the fixture was checked.
 
   One thing that looks like a quality measure but is not: the DTW match cost.
   Calibrated here, an identical render scores 0.00, the same music with rubato
