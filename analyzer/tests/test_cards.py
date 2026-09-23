@@ -430,3 +430,34 @@ def test_both_sides_of_a_card_show_the_same_region(real, tmp_path):
   a = np.asarray(front.convert('L')).astype(int)
   b = np.asarray(back.convert('L')).astype(int)
   assert (a != b).any(), 'the back should differ from the front (it shows the notes)'
+
+
+@needs_real
+def test_the_back_does_not_repeat_the_front(real, tmp_path):
+  """`{{FrontSide}}` on the answer side renders the question again, so a card showed
+  the masked passage above the answer as well as the full one."""
+  import json
+  import sqlite3
+  import zipfile
+  cfg, piece, render = real
+  deck = cards.DeckSpec(slug=SLUG, name='probe', cards=[
+      cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'])])
+  package = cards.build_deck(cfg, piece, deck, workspace=tmp_path)
+
+  with zipfile.ZipFile(package) as z:
+    db_path = tmp_path / 'probe.anki2'
+    db_path.write_bytes(z.read('collection.anki2'))
+  db = sqlite3.connect(str(db_path))
+  models = json.loads(db.execute('select models from col').fetchone()[0])
+  template = list(models.values())[0]['tmpls'][0]
+  assert '{{FrontSide}}' not in template['afmt'], \
+      'the answer side must not re-render the question'
+  assert '{{Back}}' in template['afmt']
+  assert '{{Front}}' in template['qfmt']
+
+  fields = db.execute('select flds from notes').fetchone()[0]
+  front_field, back_field = fields.split('\x1f')
+  assert 'front-' in front_field and 'back-' not in front_field
+  assert 'back-' in back_field and 'front-' not in back_field, \
+      'each side carries its own image'
+  db.close()

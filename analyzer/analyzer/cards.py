@@ -770,9 +770,11 @@ def _model():
       fields=[{'name': 'Front'}, {'name': 'Back'}],
       templates=[{
           'name': 'Score passage',
+          # No `{{FrontSide}}` on the answer side: that is Anki's usual default and
+          # it renders the question again above the answer, which on a score card
+          # means showing the masked passage a second time for no benefit.
           'qfmt': '<div class="prompt">{{Front}}</div>',
-          'afmt': '<div class="prompt">{{FrontSide}}</div><hr id=answer>'
-                  '<div class="answer">{{Back}}</div>',
+          'afmt': '<div class="answer">{{Back}}</div>',
       }],
       css='''
       .card { font-family: system-ui, sans-serif; background: #fbfbf8; color: #111;
