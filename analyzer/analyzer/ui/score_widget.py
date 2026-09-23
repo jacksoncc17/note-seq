@@ -33,6 +33,7 @@ class ScoreView(QWidget):
   measureClicked = pyqtSignal(int)
   measureActivated = pyqtSignal(int)
   pageChanged = pyqtSignal(int)
+  glyphClicked = pyqtSignal(str)          # a note was tapped in mask mode
 
   def __init__(self, parent=None):
     super().__init__(parent)
@@ -49,6 +50,9 @@ class ScoreView(QWidget):
     self._selection = (None, None)
     self._playhead: Optional[int] = None
     self._hover: Optional[int] = None
+    self._mask_mode = False
+    self._masked: set = set()
+    self._hover_glyph: Optional[str] = None
 
   # ------------------------------------------------------------------ content
 
@@ -151,6 +155,17 @@ class ScoreView(QWidget):
 
   # ------------------------------------------------------------------ state
 
+  def set_mask_mode(self, on: bool) -> None:
+    """In mask mode a click picks the nearest *note* instead of a bar."""
+    self._mask_mode = bool(on)
+    self.setCursor(Qt.CrossCursor if self._mask_mode else Qt.ArrowCursor)
+    self.update()
+
+  def set_masked(self, keys) -> None:
+    """Which notes the dialog currently has masked, so they can be shown."""
+    self._masked = set(keys or ())
+    self.update()
+
   def set_selection(self, first: Optional[int], last: Optional[int]) -> None:
     self._selection = (first, last)
     self.update()
@@ -236,11 +251,51 @@ class ScoreView(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(rect_of(box).adjusted(0, 0, -1, -1))
 
+    # masked notes, and the one the cursor would mask: drawn from the hit rectangles,
+    # because those are where the glyphs actually are
+    for glyph in page.glyphs:
+      if glyph.kind != 'note' or not glyph.has_hit:
+        continue
+      masked = glyph.key in self._masked
+      hovered = glyph.key == self._hover_glyph
+      if not (masked or hovered):
+        continue
+      rect = QRect(int(target.left() + glyph.hit_x0 * scale),
+                   int(target.top() + glyph.hit_y0 * scale),
+                   max(2, int((glyph.hit_x1 - glyph.hit_x0) * scale)),
+                   max(2, int((glyph.hit_y1 - glyph.hit_y0) * scale)))
+      if masked:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 235))
+        painter.drawRect(rect)
+        painter.setPen(QPen(QColor('#b03030'), 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
+      else:
+        painter.setPen(QPen(QColor('#b03030'), 1, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
+
   # ------------------------------------------------------------------ input
+
+  def glyph_at_point(self, point) -> Optional[str]:
+    """The key of the note nearest a point, judged by where notes are drawn."""
+    page = self.page()
+    if page is None or self.render is None:
+      return None
+    glyph = self.render.nearest_glyph(page.number, point.x() / self._zoom,
+                                      point.y() / self._zoom)
+    return glyph.key if glyph else None
 
   def mousePressEvent(self, event):
     if event.button() != Qt.LeftButton:
       return super().mousePressEvent(event)
+    if self._mask_mode:
+      key = self.glyph_at_point(event.pos())
+      if key is not None:
+        self.setFocus(Qt.MouseFocusReason)
+        self.glyphClicked.emit(key)
+      return
     measure = self.measure_at(event.pos())
     if measure is not None:
       self.setFocus(Qt.MouseFocusReason)
@@ -252,6 +307,12 @@ class ScoreView(QWidget):
       self.measureActivated.emit(measure)
 
   def mouseMoveEvent(self, event):
+    if self._mask_mode:
+      key = self.glyph_at_point(event.pos())
+      if key != self._hover_glyph:
+        self._hover_glyph = key
+        self.update()
+      return
     measure = self.measure_at(event.pos())
     if measure != self._hover:
       self._hover = measure

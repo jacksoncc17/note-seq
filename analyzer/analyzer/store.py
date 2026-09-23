@@ -300,6 +300,34 @@ class MapStore(abc.ABC):
   def delete(self, slug: str) -> bool: ...
 
 
+class DeckStore(abc.ABC):
+  """Anki decks: the specs that can be rebuilt, and the packages already built.
+
+  The spec is a record (a bar range, masks, rules, fields) and the `.apkg` is a
+  blob, which is why exports go through `BlobStore` rather than a path: a server
+  route can then read the bytes without knowing where they live.
+  """
+
+  @abc.abstractmethod
+  def list(self, slug: str = '') -> List['DeckSpec']: ...
+
+  @abc.abstractmethod
+  def get(self, slug: str, name: str = '') -> Optional['DeckSpec']: ...
+
+  @abc.abstractmethod
+  def save(self, deck: 'DeckSpec') -> 'DeckSpec': ...
+
+  @abc.abstractmethod
+  def delete(self, slug: str, name: str = '') -> bool: ...
+
+  @abc.abstractmethod
+  def save_export(self, deck: 'DeckSpec', data: bytes) -> BlobRef:
+    """Store a built package, replacing any previous one for that deck."""
+
+  @abc.abstractmethod
+  def latest_export(self, slug: str, name: str = '') -> Optional[BlobRef]: ...
+
+
 class RenderStore(abc.ABC):
   """Engraved pages. Reproducible from the score, so a cache rather than a truth."""
 
@@ -325,11 +353,14 @@ class Repository:
   blobs: BlobStore
   maps: MapStore
   renders: RenderStore
+  decks: Optional[DeckStore] = None
   backend: str = 'filesystem'
 
   def close(self) -> None:
     """Release anything the backend holds open (a database connection, say)."""
-    for store in (self.pieces, self.blobs, self.maps, self.renders):
+    for store in (self.pieces, self.blobs, self.maps, self.renders, self.decks):
+      if store is None:
+        continue
       closer = getattr(store, 'close', None)
       if callable(closer):
         closer()
@@ -713,6 +744,73 @@ class _FilesystemPieces(PieceStore):
     return True
 
 
+class _FilesystemDecks(DeckStore):
+  """Deck specs as JSON under `output/decks/`, packages as blobs beside them."""
+
+  def __init__(self, cfg: AnalyzerConfig, blobs: BlobStore):
+    self.cfg = cfg
+    self.blobs = blobs
+
+  def _path(self, slug: str, name: str) -> pathlib.Path:
+    safe = re.sub(r'[^a-zA-Z0-9._-]+', '-', name or 'deck').strip('-') or 'deck'
+    return self.cfg.decks_dir / slug / ('%s.json' % safe)
+
+  def list(self, slug: str = '') -> List['DeckSpec']:
+    from .cards import DeckSpec
+    found: List[DeckSpec] = []
+    roots = [self.cfg.decks_dir / slug] if slug else \
+        [path for path in sorted(self.cfg.decks_dir.glob('*')) if path.is_dir()]
+    for root in roots:
+      for path in sorted(root.glob('*.json')) if root.is_dir() else []:
+        try:
+          found.append(DeckSpec.from_dict(json.loads(path.read_text(encoding='utf-8'))))
+        except (OSError, ValueError):
+          continue
+    return found
+
+  def get(self, slug: str, name: str = '') -> Optional['DeckSpec']:
+    for deck in self.list(slug):
+      if not name or deck.name == name:
+        return deck
+    return None
+
+  def save(self, deck) -> 'DeckSpec':
+    deck.updated_at = _now()
+    path = self._path(deck.slug, deck.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix('.json.tmp')
+    temp.write_text(json.dumps(deck.to_dict(), indent=2), encoding='utf-8')
+    os.replace(temp, path)
+    return deck
+
+  def delete(self, slug: str, name: str = '') -> bool:
+    path = self._path(slug, name)
+    removed = False
+    if path.is_file():
+      path.unlink()
+      removed = True
+    existing = self.latest_export(slug, name)
+    if existing is not None:
+      removed = self.blobs.delete(existing) or removed
+    return removed
+
+  def save_export(self, deck, data: bytes) -> BlobRef:
+    safe = re.sub(r'[^a-zA-Z0-9._-]+', '-', deck.name or 'deck').strip('-') or 'deck'
+    path = self.cfg.decks_dir / deck.slug / ('%s.apkg' % safe)
+    return self.blobs.write(str(path), data, 'application/octet-stream')
+
+  def latest_export(self, slug: str, name: str = '') -> Optional[BlobRef]:
+    directory = self.cfg.decks_dir / slug
+    if not directory.is_dir():
+      return None
+    candidates = sorted(directory.glob('*.apkg'), key=lambda p: p.stat().st_mtime,
+                        reverse=True)
+    if name:
+      safe = re.sub(r'[^a-zA-Z0-9._-]+', '-', name).strip('-') or 'deck'
+      candidates = [p for p in candidates if p.stem == safe]
+    return _blob(candidates[0]) if candidates else None
+
+
 class FilesystemRepository(Repository):
   """The shipping backend: today's files, today's layout, no migration."""
 
@@ -720,8 +818,10 @@ class FilesystemRepository(Repository):
     self.cfg = cfg
     maps = _FilesystemMaps(cfg)
     pieces = _FilesystemPieces(cfg, maps)
-    super().__init__(pieces=pieces, blobs=_FilesystemBlobs(), maps=maps,
-                     renders=_FilesystemRenders(cfg, pieces), backend='filesystem')
+    blobs = _FilesystemBlobs()
+    super().__init__(pieces=pieces, blobs=blobs, maps=maps,
+                     renders=_FilesystemRenders(cfg, pieces),
+                     decks=_FilesystemDecks(cfg, blobs), backend='filesystem')
 
 
 def filesystem_repository(cfg: Optional[AnalyzerConfig] = None) -> Repository:
@@ -860,6 +960,46 @@ class _MemoryRenders(RenderStore):
     return self._renders.pop(slug, None) is not None
 
 
+class _MemoryDecks(DeckStore):
+
+  def __init__(self, blobs: BlobStore):
+    self.blobs = blobs
+    self._decks: Dict[tuple, object] = {}
+    self._exports: Dict[tuple, BlobRef] = {}
+
+  def list(self, slug: str = ''):
+    return [deck for (deck_slug, _name), deck in sorted(self._decks.items())
+            if not slug or deck_slug == slug]
+
+  def get(self, slug: str, name: str = ''):
+    for (deck_slug, deck_name), deck in self._decks.items():
+      if deck_slug == slug and (not name or deck_name == name):
+        return deck
+    return None
+
+  def save(self, deck):
+    deck.updated_at = _now()
+    self._decks[(deck.slug, deck.name)] = deck
+    return deck
+
+  def delete(self, slug: str, name: str = '') -> bool:
+    key = (slug, name)
+    removed = self._decks.pop(key, None) is not None
+    ref = self._exports.pop(key, None)
+    if ref is not None:
+      removed = self.blobs.delete(ref) or removed
+    return removed
+
+  def save_export(self, deck, data: bytes) -> BlobRef:
+    ref = self.blobs.write('decks/%s/%s.apkg' % (deck.slug, deck.name or 'deck'), data,
+                           'application/octet-stream')
+    self._exports[(deck.slug, deck.name)] = ref
+    return ref
+
+  def latest_export(self, slug: str, name: str = '') -> Optional[BlobRef]:
+    return self._exports.get((slug, name))
+
+
 def memory_repository(scratch=None) -> Repository:
   """An in-memory library, for tests and for proving the ports are not paths.
 
@@ -869,5 +1009,6 @@ def memory_repository(scratch=None) -> Repository:
   import tempfile
   where = pathlib.Path(scratch) if scratch else pathlib.Path(tempfile.mkdtemp(prefix='analyzer-blobs-'))
   maps = _MemoryMaps()
-  return Repository(pieces=_MemoryPieces(maps), blobs=_MemoryBlobs(where),
-                    maps=maps, renders=_MemoryRenders(), backend='memory')
+  blobs = _MemoryBlobs(where)
+  return Repository(pieces=_MemoryPieces(maps), blobs=blobs, maps=maps,
+                    renders=_MemoryRenders(), decks=_MemoryDecks(blobs), backend='memory')

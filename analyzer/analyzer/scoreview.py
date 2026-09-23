@@ -98,6 +98,15 @@ class GlyphBox:
   y0: float
   x1: float
   y1: float
+  # Where the glyph is *drawn*, for hit-testing. Verovio's `note bounding-box` is a
+  # staff-position box rather than a glyph box -- measured on this score, its median
+  # ink coverage is 1.4% and 109 of 221 boxes are empty -- so tapping against it
+  # misses the note. These come from the notehead's own transform, which is where
+  # the glyph really is (median ink 10.4%).
+  hit_x0: Optional[float] = None
+  hit_y0: Optional[float] = None
+  hit_x1: Optional[float] = None
+  hit_y1: Optional[float] = None
 
   @property
   def key(self) -> str:
@@ -115,16 +124,39 @@ class GlyphBox:
   def contains(self, x: float, y: float, pad: float = 0.0) -> bool:
     return (self.x0 - pad) <= x <= (self.x1 + pad) and (self.y0 - pad) <= y <= (self.y1 + pad)
 
+  @property
+  def has_hit(self) -> bool:
+    return None not in (self.hit_x0, self.hit_y0, self.hit_x1, self.hit_y1)
+
+  @property
+  def hit_centre(self) -> Tuple[float, float]:
+    """The point a tap should be judged against: the drawn glyph if known."""
+    if self.has_hit:
+      return ((self.hit_x0 + self.hit_x1) / 2.0, (self.hit_y0 + self.hit_y1) / 2.0)
+    return self.centre
+
   def to_dict(self) -> Dict[str, object]:
-    return {'m': self.measure, 's': self.staff, 'i': self.index, 'k': self.kind,
-            'x0': round(self.x0, 1), 'y0': round(self.y0, 1),
-            'x1': round(self.x1, 1), 'y1': round(self.y1, 1)}
+    out: Dict[str, object] = {'m': self.measure, 's': self.staff, 'i': self.index,
+                              'k': self.kind, 'x0': round(self.x0, 1),
+                              'y0': round(self.y0, 1), 'x1': round(self.x1, 1),
+                              'y1': round(self.y1, 1)}
+    if self.has_hit:
+      out['hx0'] = round(self.hit_x0, 1)
+      out['hy0'] = round(self.hit_y0, 1)
+      out['hx1'] = round(self.hit_x1, 1)
+      out['hy1'] = round(self.hit_y1, 1)
+    return out
 
   @classmethod
   def from_dict(cls, data: Dict[str, object]) -> 'GlyphBox':
+    def optional(key):
+      value = data.get(key)
+      return float(value) if value is not None else None
     return cls(measure=int(data['m']), staff=int(data['s']), index=int(data['i']),
                kind=str(data.get('k', 'note')), x0=float(data['x0']), y0=float(data['y0']),
-               x1=float(data['x1']), y1=float(data['y1']))
+               x1=float(data['x1']), y1=float(data['y1']),
+               hit_x0=optional('hx0'), hit_y0=optional('hy0'),
+               hit_x1=optional('hx1'), hit_y1=optional('hy1'))
 
 
 @dataclass
@@ -185,6 +217,26 @@ class ScoreRender:
         if glyph.key == key:
           return glyph
     return None
+
+  def nearest_glyph(self, page_number: int, x: float, y: float, kinds=('note',),
+                    staff: Optional[int] = None, measure: Optional[int] = None
+                    ) -> Optional[GlyphBox]:
+    """The glyph a tap was closest to, judged by where glyphs are *drawn*.
+
+    Nearest-by-centre rather than containment, because containment depends on the
+    box being right and these boxes are only approximate: every tap then picks
+    something sensible instead of nothing.
+    """
+    page = next((p for p in self.pages if p.number == page_number), None)
+    if page is None:
+      return None
+    found = [g for g in page.glyphs
+             if g.kind in kinds
+             and (staff is None or g.staff == staff)
+             and (measure is None or g.measure == measure)]
+    if not found:
+      return None
+    return min(found, key=lambda g: (g.hit_centre[0] - x) ** 2 + (g.hit_centre[1] - y) ** 2)
 
   def glyph_at(self, page_number: int, x: float, y: float, pad: float = 0.0) -> Optional[GlyphBox]:
     """The smallest glyph under a point, so a tap on a notehead picks the note
@@ -305,6 +357,25 @@ def _measure_geometry(svg: str, ids: Dict[str, int]) -> Tuple[List[MeasureBox], 
   return boxes, warnings
 
 
+NOTEHEAD_WINDOW = (-120.0, -220.0, 320.0, 160.0)   # around the glyph's origin, in SVG units
+
+
+def _glyph_hit(element: str) -> Optional[Tuple[float, float, float, float]]:
+  """The drawn extent of a notehead, from its own `<use>` transform.
+
+  The window is asymmetric because the glyph is drawn from its origin outwards; the
+  numbers were chosen by measuring ink coverage for 221 noteheads on a real page and
+  keeping the best of five candidates (72% of them contain ink, against 51% for the
+  naive window and 1.4% median for Verovio's own box).
+  """
+  use = re.search(r'<use[^>]*transform="translate\(([-\d.]+),\s*([-\d.]+)\)', element)
+  if use is None:
+    return None
+  x, y = float(use.group(1)), float(use.group(2))
+  dx0, dy0, dx1, dy1 = NOTEHEAD_WINDOW
+  return (x + dx0, y + dy0, x + dx1, y + dy1)
+
+
 def glyph_elements(svg: str, ids: Dict[str, int]) -> List[Tuple[GlyphBox, str]]:
   """The drawable elements of a page, in stable coordinates.
 
@@ -328,6 +399,7 @@ def glyph_elements(svg: str, ids: Dict[str, int]) -> List[Tuple[GlyphBox, str]]:
         for element_id, element in re.findall(
             r'<g id="(\w+)" class="%s">(.*?)(?=<g id="\w+" class="[a-zA-Z]+">|$)' % kind,
             staff_body, re.S):
+          hit = _glyph_hit(element) if kind == 'note' else None
           rect = re.search(r'<rect\s([^>]*)>', element)
           if rect is None:
             continue
@@ -339,7 +411,10 @@ def glyph_elements(svg: str, ids: Dict[str, int]) -> List[Tuple[GlyphBox, str]]:
               measure=number, staff=staff_index, index=counters[kind] - 1, kind=kind,
               x0=float(values['x']), y0=float(values['y']),
               x1=float(values['x']) + float(values['width']),
-              y1=float(values['y']) + float(values['height'])), element_id))
+              y1=float(values['y']) + float(values['height']),
+              hit_x0=hit[0] if hit else None, hit_y0=hit[1] if hit else None,
+              hit_x1=hit[2] if hit else None, hit_y1=hit[3] if hit else None),
+              element_id))
   return glyphs
 
 
@@ -406,8 +481,13 @@ def verovio_module():
 
 
 def _scale_glyphs(glyphs: List[GlyphBox], factor: float) -> List[GlyphBox]:
+  def scaled(value):
+    return value * factor if value is not None else None
   return [dataclasses.replace(g, x0=g.x0 * factor, y0=g.y0 * factor,
-                              x1=g.x1 * factor, y1=g.y1 * factor) for g in glyphs]
+                              x1=g.x1 * factor, y1=g.y1 * factor,
+                              hit_x0=scaled(g.hit_x0), hit_y0=scaled(g.hit_y0),
+                              hit_x1=scaled(g.hit_x1), hit_y1=scaled(g.hit_y1))
+          for g in glyphs]
 
 
 def _scale_boxes(boxes: List[MeasureBox], factor: float) -> List[MeasureBox]:

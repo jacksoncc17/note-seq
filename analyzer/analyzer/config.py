@@ -47,7 +47,8 @@ class AnalyzerConfig:
   target_channels: int = 1
 
   def ensure_dirs(self) -> None:
-    for d in (self.audio_dir, self.sync_dir, self.render_dir, self.library_dir):
+    for d in (self.audio_dir, self.sync_dir, self.render_dir, self.library_dir,
+              self.decks_dir):
       d.mkdir(parents=True, exist_ok=True)
 
   @property
@@ -64,6 +65,11 @@ class AnalyzerConfig:
   def render_dir(self) -> pathlib.Path:
     """Score renders and other derived pictures."""
     return self.output_dir / 'render'
+
+  @property
+  def decks_dir(self) -> pathlib.Path:
+    """Anki decks: the specs, and the .apkg packages built from them."""
+    return self.output_dir / 'decks'
 
   @property
   def library_dir(self) -> pathlib.Path:

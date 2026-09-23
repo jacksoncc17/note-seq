@@ -171,6 +171,17 @@ async function loadPiece(slug) {
   if (detail.notes) warnings.push(...detail.notes);
   $('hint').textContent = warnings.slice(0, 2).join(' ');
 
+  try {
+    const decks = await api('/decks/' + encodeURIComponent(slug));
+    if (decks.decks && decks.decks.length) {
+      const links = decks.decks.filter((d) => d.url).map((d) =>
+        '<a href="' + d.url + '" style="color:var(--accent)">' + d.name + '</a>' +
+        ' (' + Math.round(d.bytes / 1024) + ' KB)').join(' · ');
+      $('hint').innerHTML = 'Anki: ' + (links || 'saved, not built yet') +
+        '<br><span style="color:var(--dim)">open it in AnkiDroid to study and schedule</span>';
+    }
+  } catch (e) { /* a piece with no decks is the normal case */ }
+
   const pages = detail.score ? detail.score.pages : [];
   state.page = pages.length ? pages[0].number : 1;
   // A bookmark like ?piece=…&from=40&to=83 should open on the bar it names, not

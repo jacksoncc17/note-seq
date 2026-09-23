@@ -365,3 +365,50 @@ def test_a_pieces_summary_carries_what_a_list_needs(cfg):
                   'duration_s', 'method', 'measures'):
       assert field in piece, 'the list is missing %s' % field
     assert piece['measures'] == 6
+
+
+# ---------------------------------------------------------------------------
+# Anki decks: built by the desktop, downloaded by the phone
+# ---------------------------------------------------------------------------
+
+def test_decks_are_listed_and_downloadable(cfg):
+  from analyzer import cards, store
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0)
+  repo = store.open_repository(cfg)
+  deck = repo.decks.save(cards.DeckSpec(slug='demo', name='bars 1-4', cards=[
+      cards.CardSpec(slug='demo', first_bar=1, last_bar=4, rules=['melody'])]))
+  payload = b'PK\x03\x04not really an apkg but a package'
+  repo.decks.save_export(deck, payload)
+
+  with running(cfg) as port:
+    status, body = get_json(port, '/decks/demo')
+    assert status == 200
+    assert len(body['decks']) == 1
+    entry = body['decks'][0]
+    assert entry['name'] == 'bars 1-4' and entry['cards'] == 1 and entry['rules'] == ['melody']
+    assert entry['bytes'] == len(payload) and entry['url'].endswith('/download')
+
+    status, data = get(port, entry['url'])
+    assert status == 200 and data == payload
+
+    status, body = get_json(port, '/decks/nothing-here')
+    assert status == 200 and body['decks'] == []
+    status, body = get_json(port, '/decks/demo/not-a-deck/download')
+    assert status == 404 and 'no built deck' in body['error']
+
+
+def test_a_deck_whose_package_is_gone_is_reported(cfg):
+  from analyzer import cards, store
+  make_piece(cfg, slug='demo')
+  repo = store.open_repository(cfg)
+  deck = repo.decks.save(cards.DeckSpec(slug='demo', name='x', cards=[
+      cards.CardSpec(slug='demo', first_bar=1, last_bar=2)]))
+  ref = repo.decks.save_export(deck, b'PK\x03\x04data')
+  repo.blobs.delete(ref)                      # the file vanished underneath us
+  with running(cfg) as port:
+    status, body = get_json(port, '/decks/demo/x/download')
+    # The filesystem adapter notices the package is gone and says there is no deck;
+    # an adapter that tracks the blob directly says the blob is missing. Both are
+    # honest 404s, so either message passes.
+    assert status == 404
+    assert 'missing' in body['error'] or 'no built deck' in body['error'], body['error']

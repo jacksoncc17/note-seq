@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (QAction, QCheckBox, QComboBox, QFileDialog, QFormLa
 from .. import library, measures, scoreview, syncmap
 from ..config import AnalyzerConfig
 from ..schema import MeasureTime, SyncResult
+from .card_dialog import CardDialog
 from .player import RangePlayer
 from .score_widget import ScoreView
 from .waveform import WaveformView
@@ -253,6 +254,11 @@ class MainWindow(QMainWindow):
     bar.addWidget(self.follow_check)
 
     bar.addSpacing(12)
+    self.cards_btn = QPushButton('Anki cards…')
+    self.cards_btn.setToolTip('Hide notes in these bars and export an Anki deck')
+    self.cards_btn.clicked.connect(self.open_card_dialog)
+    bar.addWidget(self.cards_btn)
+
     self.rerender_btn = QPushButton('Engrave again')
     self.rerender_btn.setToolTip('Ignore the cached rendering and engrave the MusicXML afresh')
     self.rerender_btn.clicked.connect(lambda: self.render_score(force=True))
@@ -266,6 +272,7 @@ class MainWindow(QMainWindow):
     self.score_view.measureClicked.connect(self._on_score_measure_clicked)
     self.score_view.measureActivated.connect(self._on_score_measure_activated)
     self.score_view.pageChanged.connect(self._on_score_page_changed)
+    self.score_view.glyphClicked.connect(self._on_glyph_clicked)
 
     self.score_scroll = QScrollArea()
     self.score_scroll.setWidget(self.score_view)
@@ -843,6 +850,39 @@ class MainWindow(QMainWindow):
 
   # ------------------------------------------------------------------ score
 
+  def open_card_dialog(self) -> None:
+    """Author Anki cards for the current range.
+
+    Only here, in the desktop app: deciding which notes to hide wants a big screen,
+    and the cards are studied on the phone in AnkiDroid, which does the scheduling.
+    """
+    if self.piece is None or self.score_view.render is None:
+      QMessageBox.information(self, 'No score yet',
+                              'Engrave the score first, then pick a range of bars.')
+      return
+    first, last = self.first_spin.value(), self.last_spin.value()
+    dialog = CardDialog(self.cfg, self.piece, self.score_view.render, self,
+                        first_bar=first, last_bar=last)
+    self._card_dialog = dialog
+    self.score_view.set_mask_mode(True)
+    self.score_view.set_masked(dialog.masked_keys())
+    dialog.finished.connect(lambda _code: self._close_card_dialog())
+    dialog.show()
+
+  def _close_card_dialog(self) -> None:
+    self._card_dialog = None
+    self.score_view.set_mask_mode(False)
+    self.score_view.set_masked([])
+
+  def _on_glyph_clicked(self, key: str) -> None:
+    """A note was tapped while the card dialog is open."""
+    dialog = getattr(self, '_card_dialog', None)
+    if dialog is None:
+      return
+    dialog.toggle_note(key)
+    self.score_view.set_masked(dialog.masked_keys())
+    self.status.showMessage('masked: %s' % (key,))
+
   def render_score(self, force: bool = False) -> None:
     """Engrave the score into page images, off the UI thread.
 
@@ -928,7 +968,7 @@ class MainWindow(QMainWindow):
     self.align_btn.setEnabled(has_score and has_audio)
     self.play_btn.setEnabled(bool(self.result and self.result.measures))
     for widget in (self.rerender_btn, self.page_prev, self.page_next,
-                   self.zoom_in_btn, self.zoom_out_btn, self.fit_btn):
+                   self.zoom_in_btn, self.zoom_out_btn, self.fit_btn, self.cards_btn):
       widget.setEnabled(has_score)
 
   def open_pdf(self) -> None:

@@ -461,3 +461,46 @@ print("exited cleanly")
   assert 'exited cleanly' in result.stdout, result.stdout + result.stderr[-400:]
   assert 'QThread: Destroyed while thread is still running' not in result.stderr, \
       result.stderr[-500:]
+
+
+def test_the_anki_button_opens_the_dialog_and_turns_on_mask_mode(window, cfg, tmp_path, monkeypatch):
+  """The wiring, with the dialog itself stubbed: the button needs an engraving, the
+  score view has to switch into mask mode, and a tapped note has to reach the dialog.
+  """
+  from analyzer.ui import main_window as mw
+
+  opened = {}
+
+  class StubDialog:
+    def __init__(self, cfg_, piece, render, parent=None, first_bar=1, last_bar=1):
+      opened['bars'] = (first_bar, last_bar)
+      self.masked = []
+      self.finished = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+
+    def masked_keys(self):
+      return list(self.masked)
+
+    def show(self):
+      pass
+
+    def toggle_note(self, key):
+      self.masked.append(key)
+
+  monkeypatch.setattr(mw, 'CardDialog', StubDialog)
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._on_rendered(synthetic_render(tmp_path))
+
+  window.first_spin.setValue(2)
+  window.last_spin.setValue(4)
+  window.open_card_dialog()
+  assert opened['bars'] == (2, 4), 'the dialog should open on the selected range'
+  assert window.score_view._mask_mode is True, 'tapping notes needs mask mode'
+
+  window._on_glyph_clicked('2:1:note:0')
+  assert window._card_dialog.masked == ['2:1:note:0']
+  assert window.score_view._masked == {'2:1:note:0'}
+
+  window._close_card_dialog()
+  assert window.score_view._mask_mode is False
+  assert window.score_view._masked == set()

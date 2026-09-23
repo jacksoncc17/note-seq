@@ -229,6 +229,58 @@ desktop has a filter box, the HTTP API takes
 `/pieces?q=&has_audio=&has_map=&tag=&limit=&order=`, and the phone client has a
 search field that queries the same way.
 
+## Anki cards for a passage (M7)
+
+In the desktop app, the **Score** tab has an **Anki cards…** button. It opens on the
+bars you have selected and builds a card for them:
+
+```
+front   the passage with chosen notes hidden
+back    the same passage, plus what the bank already knows:
+        chords  C → E7 → Am → E      rhythm  Q E E E E, Q Q Q
+        contour down, up             section B      bars 40-43
+        and the recording of exactly those bars
+```
+
+Hiding works two ways, and you can combine them:
+
+* **rules** — `everything` (pitches go, rhythm stays), `staves_only` (a bar left to
+  fill in), `right_hand`, `left_hand`, `melody` (the top note of each onset),
+  `inner_voices`, `first_onset`, `accidentals`;
+* **tapping** — switch on *tap notes on the score to hide them* and click the notes
+  you want gone.
+
+Then **Export .apkg…** writes a deck you import into AnkiDroid, or **Save to the
+phone library**, which keeps it and offers it for download in the practice client:
+`/decks/<slug>` lists them and `/decks/<slug>/<name>/download` hands over the
+package, so AnkiDroid can open it straight from the phone.
+
+**Anki does the scheduling, and there is no server to run for it.** The intervals
+and the review history live in Anki's collection, on your devices; we only author.
+Multi-device sync is AnkiWeb, or Anki's own self-hosted sync server if you would
+rather not use it.
+
+Two things worth knowing about how the hiding actually works, because the obvious
+approach is wrong:
+
+* **Masking hides the element in the SVG, it does not paint over the note.** The
+  first implementation drew a white rectangle over each note's bounding box, and it
+  did not work: Verovio's per-note box is a *staff-position* box, not a glyph box —
+  measured on this score its median ink coverage is 1.4% and 109 of 221 boxes are
+  empty — so the patch landed beside the note. Suppressing the element
+  (`display: none`, which the rasteriser honours) is exact: hiding one note changes
+  480 pixels in a local area, hiding all seven noteheads of bar 53 drops the ink
+  from 10.3% to 8.7%.
+* **A hidden notehead leaves its stem**, because stems and beams are separate
+  engraved elements. That is usually what you want — the rhythm stays readable and
+  the pitches are what has to be recalled — and `staves_only` clears those too.
+
+Masks are stored as positions ("bar 53, left hand, 5th notehead"), never as Verovio
+element ids, because those are regenerated on every engraving; verified that all 15
+glyphs of bar 53 land on the same pixels after a fresh engraving. Card ids are
+stable too, so **re-exporting a deck updates your cards rather than duplicating
+them**.
+
 ## What the map knows about itself
 
 A map is only as good as the recording it came from, so each one stores its
@@ -295,9 +347,11 @@ analyzer/
     ui/
       main_window.py        the window
       waveform.py           envelope + draggable measure markers
-      score_widget.py       the engraved score: click a bar, highlight a range
+      score_widget.py       the engraved score: click a bar, mask a note
+      card_dialog.py        author cards: rules, taps, preview, export
       player.py             sample-accurate playback of a bar range
       workers.py            download, alignment and engraving on background threads
+    cards.py                Anki cards: masks, crops, audio, decks
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -306,23 +360,22 @@ analyzer/
 
 ## Status
 
-**M1-M6 are implemented**, with 242 tests (one opt-in network test, one skipped
+**M1-M7 are implemented**, with 282 tests (one opt-in network test, one skipped
 without an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
 * **M4** the engraved score view · **M5a** the phone client
-* **M6** several pieces, on top of storage ports a database can implement
+* **M6** storage behind ports a database can implement
+* **M7** Anki cards for a selected passage, exported as `.apkg`
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
-recording, served from cache on the second call); a full align run through the
-real Qt worker threads (204 markers, bars 40-83 → 62.38-122.99 s); the score tab
-driven end to end (9 pages, 204 measures clickable); the phone client's JavaScript
-executed in headless Chrome, including typing in its search box; and the query
-layer against the real library, where `/pieces?q=intermezzo` and `?has_map=1`
-return exactly the right rows.
-
-**M5b** is not built: correcting the map from the phone (tap-a-bar plus nudge
-buttons rather than dragging, since a finger is imprecise and nudging is exact).
+recording, served from cache); a full align run through the real Qt worker threads
+(204 markers, bars 40-83 → 62.38-122.99 s); the score tab driven end to end (9
+pages, 204 measures clickable); the phone client's JavaScript executed in headless
+Chrome; and, for the cards, the whole flow on the real Chopin — the dialog opening
+on bars 40-43, the left-hand rule hiding 22 notes, a tapped note making it 23, a
+169 KB `.apkg` saved, and that package downloaded over HTTP with its images, audio
+and text intact.
 
 ## Troubleshooting
 

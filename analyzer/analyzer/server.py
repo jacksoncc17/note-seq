@@ -30,10 +30,10 @@ import pathlib
 import re
 import time
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, quote, unquote
 
 from .config import AnalyzerConfig
-from . import library, measures, scoreview, syncmap
+from . import library, measures, scoreview, store, syncmap
 from .store import PieceQuery
 
 
@@ -273,6 +273,14 @@ class AnalyzerApp:
     if match:
       return self._audio(request, match.group(1))
 
+    match = re.fullmatch(r'/decks/([^/]+)', path)
+    if match:
+      return self._decks(match.group(1))
+
+    match = re.fullmatch(r'/decks/([^/]+)/([^/]+)/download', path)
+    if match:
+      return self._deck_package(match.group(1), match.group(2))
+
     match = re.fullmatch(r'/score/([^/]+)/pages\.json', path)
     if match:
       return self._score_geometry(match.group(1))
@@ -336,6 +344,43 @@ class AnalyzerApp:
       return json_response({'error': message}, status)
     return _response(200, 'audio/wav', wav,
                      extra={'Content-Disposition': 'inline; filename="%s.wav"' % slug})
+
+  # ------------------------------------------------------------------ decks
+
+  def _decks(self, slug: str) -> bytes:
+    """The Anki decks saved for a piece, ready for AnkiDroid to download.
+
+    Scheduling is Anki's job, so all this does is hand over a package: the phone
+    opens it in AnkiDroid, which owns the intervals from then on. No Anki server is
+    involved, on either side.
+    """
+    repo = store.open_repository(self.cfg)
+    out = []
+    for deck in repo.decks.list(slug) or []:
+      ref = repo.decks.latest_export(slug, deck.name)
+      out.append({
+          'name': deck.name,
+          'cards': len(deck.cards),
+          'bars': [list(card.bar_range) for card in deck.cards],
+          'rules': sorted({rule for card in deck.cards for rule in card.rules}),
+          'updated_at': deck.updated_at,
+          'bytes': ref.size if ref else 0,
+          'url': ('/decks/%s/%s/download' % (slug, quote(deck.name))) if ref else '',
+      })
+    return json_response({'slug': slug, 'decks': out})
+
+  def _deck_package(self, slug: str, name: str) -> bytes:
+    repo = store.open_repository(self.cfg)
+    ref = repo.decks.latest_export(slug, unquote(name))
+    if ref is None:
+      return error_response('no built deck called %r for %s' % (unquote(name), slug), 404)
+    try:
+      data = repo.blobs.read(ref)
+    except KeyError:
+      return error_response('that deck package has gone missing', 404)
+    filename = '%s-%s.apkg' % (slug, re.sub(r'[^a-zA-Z0-9._-]+', '-', unquote(name)))
+    return _response(200, 'application/vnd.anki.apkg', data,
+                     extra={'Content-Disposition': 'attachment; filename="%s"' % filename})
 
   # ------------------------------------------------------------------ score
 
