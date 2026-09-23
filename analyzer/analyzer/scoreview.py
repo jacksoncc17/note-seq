@@ -41,7 +41,7 @@ from . import library
 
 Progress = Optional[Callable[[float, str], None]]
 
-CACHE_VERSION = 1
+CACHE_VERSION = 3      # 3 adds per-glyph geometry, including dots, for masking
 RASTER_SCALE = 1.5          # PNG pixels per SVG pixel; ~1260 px wide pages
 MEI_NS = '{http://www.musicxml.org/ns/musicxml}'
 
@@ -81,19 +81,67 @@ class MeasureBox:
             'x1': round(self.x1, 1), 'y1': round(self.y1, 1)}
 
 
+@dataclass(frozen=True)
+class GlyphBox:
+  """One drawable element: a notehead, a rest, an accidental.
+
+  Notes are identified by where they sit in the score -- measure, staff, and
+  ordinal within that staff -- rather than by Verovio's element id, because those
+  ids are regenerated on every engraving and a saved mask has to survive one.
+  """
+
+  measure: int
+  staff: int
+  index: int
+  kind: str                      # 'note' | 'rest' | 'accid'
+  x0: float
+  y0: float
+  x1: float
+  y1: float
+
+  @property
+  def key(self) -> str:
+    """A stable handle: `53:2:note:4` is the 5th notehead of the left hand in bar 53.
+
+    The kind is part of the key because ordinals are counted per kind -- without
+    it a note and the stem beside it would share a key.
+    """
+    return '%d:%d:%s:%d' % (self.measure, self.staff, self.kind, self.index)
+
+  @property
+  def centre(self):
+    return ((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0)
+
+  def contains(self, x: float, y: float, pad: float = 0.0) -> bool:
+    return (self.x0 - pad) <= x <= (self.x1 + pad) and (self.y0 - pad) <= y <= (self.y1 + pad)
+
+  def to_dict(self) -> Dict[str, object]:
+    return {'m': self.measure, 's': self.staff, 'i': self.index, 'k': self.kind,
+            'x0': round(self.x0, 1), 'y0': round(self.y0, 1),
+            'x1': round(self.x1, 1), 'y1': round(self.y1, 1)}
+
+  @classmethod
+  def from_dict(cls, data: Dict[str, object]) -> 'GlyphBox':
+    return cls(measure=int(data['m']), staff=int(data['s']), index=int(data['i']),
+               kind=str(data.get('k', 'note')), x0=float(data['x0']), y0=float(data['y0']),
+               x1=float(data['x1']), y1=float(data['y1']))
+
+
 @dataclass
 class ScorePage:
-  """One engraved page: its image, and the measures on it."""
+  """One engraved page: its image, and the measures and glyphs on it."""
 
   number: int
   image: str                     # path to the PNG
   width: int
   height: int
   measures: List[MeasureBox] = field(default_factory=list)
+  glyphs: List[GlyphBox] = field(default_factory=list)
 
   def to_dict(self) -> Dict[str, object]:
     return {'number': self.number, 'image': self.image, 'width': self.width,
-            'height': self.height, 'measures': [m.to_dict() for m in self.measures]}
+            'height': self.height, 'measures': [m.to_dict() for m in self.measures],
+            'glyphs': [g.to_dict() for g in self.glyphs]}
 
 
 @dataclass
@@ -126,6 +174,29 @@ class ScoreRender:
   def box_of(self, measure: int) -> Optional[Tuple[ScorePage, MeasureBox]]:
     return self._index().get(measure)
 
+  def glyphs_in_measures(self, first: int, last: int) -> List[GlyphBox]:
+    """Every glyph between two printed bar numbers, inclusive."""
+    low, high = min(first, last), max(first, last)
+    return [g for page in self.pages for g in page.glyphs if low <= g.measure <= high]
+
+  def glyph_by_key(self, key: str) -> Optional[GlyphBox]:
+    for page in self.pages:
+      for glyph in page.glyphs:
+        if glyph.key == key:
+          return glyph
+    return None
+
+  def glyph_at(self, page_number: int, x: float, y: float, pad: float = 0.0) -> Optional[GlyphBox]:
+    """The smallest glyph under a point, so a tap on a notehead picks the note
+    rather than the measure behind it."""
+    page = next((p for p in self.pages if p.number == page_number), None)
+    if page is None:
+      return None
+    found = [g for g in page.glyphs if g.contains(x, y, pad)]
+    if not found:
+      return None
+    return min(found, key=lambda g: (g.x1 - g.x0) * (g.y1 - g.y0))
+
   def measure_at(self, page_number: int, x: float, y: float) -> Optional[int]:
     """Which measure a click at (x, y) on a page belongs to.
 
@@ -156,9 +227,10 @@ class ScoreRender:
       boxes = [MeasureBox(number=int(m['number']), x0=float(m['x0']), y0=float(m['y0']),
                           x1=float(m['x1']), y1=float(m['y1']))
                for m in (raw.get('measures') or [])]
+      glyphs = [GlyphBox.from_dict(g) for g in (raw.get('glyphs') or [])]
       pages.append(ScorePage(number=int(raw['number']), image=str(raw['image']),
                              width=int(raw['width']), height=int(raw['height']),
-                             measures=boxes))
+                             measures=boxes, glyphs=glyphs))
     return cls(slug=str(data.get('slug', '')), source=str(data.get('source', '')),
                pages=pages, warnings=list(data.get('warnings') or []))
 
@@ -231,6 +303,111 @@ def _measure_geometry(svg: str, ids: Dict[str, int]) -> Tuple[List[MeasureBox], 
     y1 = max(r[1] + r[3] for r in rects)
     boxes.append(MeasureBox(number=number, x0=x0, y0=y0, x1=x1, y1=y1))
   return boxes, warnings
+
+
+def glyph_elements(svg: str, ids: Dict[str, int]) -> List[Tuple[GlyphBox, str]]:
+  """The drawable elements of a page, in stable coordinates.
+
+  Ordinals are assigned per (measure, staff) in document order, which is musical
+  order, so `53:2:4` means the same note after a re-engraving -- the thing that
+  lets a saved mask keep pointing at the note the user tapped.
+  """
+  glyphs: List[Tuple[GlyphBox, str]] = []
+  measure_pattern = re.compile(
+      r'<g id="(\w+)" class="measure">(.*?)(?=<g id="\w+" class="measure">|</svg>)', re.S)
+  for match in measure_pattern.finditer(svg):
+    number = ids.get(match.group(1))
+    if number is None:
+      continue
+    body = match.group(2)
+    staves = re.findall(r'<g id="\w+" class="staff">(.*?)(?=<g id="\w+" class="staff">|$)',
+                        body, re.S)
+    for staff_index, staff_body in enumerate(staves, start=1):
+      counters: Dict[str, int] = {}
+      for kind in ('note', 'rest', 'accid', 'stem', 'beam', 'dots'):
+        for element_id, element in re.findall(
+            r'<g id="(\w+)" class="%s">(.*?)(?=<g id="\w+" class="[a-zA-Z]+">|$)' % kind,
+            staff_body, re.S):
+          rect = re.search(r'<rect\s([^>]*)>', element)
+          if rect is None:
+            continue
+          values = {k: _attr(rect.group(1), k) for k in ('x', 'y', 'width', 'height')}
+          if any(v is None for v in values.values()):
+            continue
+          counters[kind] = counters.get(kind, 0) + 1
+          glyphs.append((GlyphBox(
+              measure=number, staff=staff_index, index=counters[kind] - 1, kind=kind,
+              x0=float(values['x']), y0=float(values['y']),
+              x1=float(values['x']) + float(values['width']),
+              y1=float(values['y']) + float(values['height'])), element_id))
+  return glyphs
+
+
+def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
+                     scale: float = RASTER_SCALE) -> Tuple[str, Dict[str, str]]:
+  """Engrave one page again, and say which element is which glyph.
+
+  Masking works on the SVG rather than on the finished pixels: an element can be
+  hidden with `display: none`, which the rasteriser honours, so a masked notehead
+  simply is not drawn. The alternative -- painting a rectangle over the note's
+  bounding box -- does not work, because Verovio's note box is tighter than the
+  drawn glyph (77 of 221 note boxes on one page contain no ink at all), so the patch
+  lands beside the note and the note stays visible.
+
+  The SVG and the element ids must come from the *same* engraving: Verovio
+  regenerates ids every time, so asking a second instance for the MEI produces ids
+  that match nothing and the mask silently does nothing at all.
+
+  Returns:
+    (svg, {glyph key: element id}) for that page.
+  """
+  text = _score_xml(pathlib.Path(musicxml))
+  engine = verovio_module().toolkit()
+  # Verovio's own `scale` must stay at the value the cached geometry was engraved
+  # with: it changes the *layout* (how many bars fit on a system), so raising it to
+  # get a bigger image would put every measure somewhere else and the crop
+  # rectangles would no longer line up. Bigger pixels come from the rasteriser.
+  engine.setOptions({'pageWidth': 2100, 'scale': 40,
+                     'adjustPageHeight': True, 'svgBoundingBoxes': True,
+                     'header': 'none', 'footer': 'none'})
+  engine.loadData(text)
+  svg = engine.renderToSVG(page_number)
+  return svg, element_ids(svg, measure_ids(engine.getMEI()))
+
+
+def element_ids(svg: str, ids: Dict[str, int]) -> Dict[str, str]:
+  """glyph key -> element id, for the glyphs in this SVG.
+
+  Only meaningful for the SVG it was computed from, since Verovio regenerates ids
+  on every engraving -- which is why masks are stored as positions, not ids.
+  """
+  return {glyph.key: element_id for glyph, element_id in glyph_elements(svg, ids)}
+
+
+def hide_elements(svg: str, element_ids_to_hide) -> str:
+  """Return the SVG with those elements suppressed.
+
+  The stylesheet is appended to Verovio's own `<style>` block so it wins on order.
+  """
+  wanted = [e for e in element_ids_to_hide if e]
+  if not wanted:
+    return svg
+  css = ''.join('#%s { display: none; }' % element for element in wanted)
+  return svg.replace('</style>', css + '</style>', 1)
+
+
+def verovio_module():
+  """The verovio module, with the install hint if it is missing."""
+  try:
+    import verovio
+  except ImportError as e:
+    raise ScoreRenderError('the score view needs verovio: .venv/bin/pip install verovio (%s)' % e)
+  return verovio
+
+
+def _scale_glyphs(glyphs: List[GlyphBox], factor: float) -> List[GlyphBox]:
+  return [dataclasses.replace(g, x0=g.x0 * factor, y0=g.y0 * factor,
+                              x1=g.x1 * factor, y1=g.y1 * factor) for g in glyphs]
 
 
 def _scale_boxes(boxes: List[MeasureBox], factor: float) -> List[MeasureBox]:
@@ -392,6 +569,7 @@ def render_score(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE,
             'engraving page %d of %d' % (number, total))
     svg = toolkit.renderToSVG(number)
     boxes, box_warnings = _measure_geometry(svg, ids)
+    glyphs = [glyph for glyph, _element_id in glyph_elements(svg, ids)]
     warnings.extend(box_warnings)
     image_path = out_dir / ('page-%02d.png' % number)
     try:
@@ -406,7 +584,8 @@ def render_score(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE,
       width, height = image.size
     factor = _viewbox_scale(svg, width)
     pages.append(ScorePage(number=number, image=str(image_path), width=width,
-                           height=height, measures=_scale_boxes(boxes, factor)))
+                           height=height, measures=_scale_boxes(boxes, factor),
+                           glyphs=_scale_glyphs(glyphs, factor)))
 
   render = ScoreRender(slug=library.slugify(path), source=str(path), pages=pages,
                        warnings=warnings)
