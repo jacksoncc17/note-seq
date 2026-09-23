@@ -357,20 +357,21 @@ def test_the_staves_only_rule_leaves_an_empty_bar(real):
   assert ink(front) > 0.04, 'but the staves must remain, or the card is unreadable'
 
 
-def _glyph_rect(render, image, glyph, bar: int):
+def _glyph_rect(render, image, glyph, bar: int, cfg=None, piece=None, spec=None):
   """A glyph's rectangle in the pixels of a passage image.
 
-  Two things move the coordinates: the card is rendered at `CARDS_SCALE` while the
-  cached geometry is at `RASTER_SCALE`, and the passage is then cropped. Dividing
-  by the image's own width instead of the page's is how the first version of this
-  helper ended up checking the wrong part of the picture.
+  The crop is measured from the ink (`passage_regions`), so the test has to ask for
+  the same region the card used -- otherwise it checks the wrong part of the picture.
   """
+  regions = cards.passage_regions(cfg, piece, render, spec) if cfg is not None else None
   strips = cards.passage_strips(render, bar, bar)
-  page = next(p for p in render.pages if p.number == strips[0][0])
+  page_number = strips[0][0]
+  page = next(p for p in render.pages if p.number == page_number)
   ratio = cards.CARDS_SCALE / scoreview.RASTER_SCALE
   page_size = (page.width * ratio, page.height * ratio)
-  placed = cards.strip_offsets(
-      [(number, tuple(v * ratio for v in rect)) for number, rect in strips], page_size)
+  rect = regions[page_number] if regions and page_number in regions else \
+      tuple(v * ratio for v in strips[0][1])
+  placed = cards.strip_offsets([(page_number, rect)], page_size)
   home = placed[0]
   top = int(glyph.y0 * ratio - home['source_top'] + home['paste_y'])
   bottom = int(glyph.y1 * ratio - home['source_top'] + home['paste_y'])
@@ -379,3 +380,53 @@ def _glyph_rect(render, image, glyph, bar: int):
   return top, bottom, left, right
 
 
+
+
+@needs_real
+def test_a_crop_includes_the_music_outside_the_staves(real):
+  """The bug this pins: cropping from the staff boxes cut through the music, so the
+  back of the card showed bars with their top and bottom sliced off. Measured on
+  every passage tried, ink ran off the top or bottom edge."""
+  import numpy as np
+  cfg, piece, render = real
+  for low, high in ((53, 53), (1, 4), (100, 103), (200, 204)):
+    spec = cards.CardSpec(slug=SLUG, first_bar=low, last_bar=high)
+    regions = cards.passage_regions(cfg, piece, render, spec)
+    image = cards.passage_image(cfg, piece, render, spec, [], hide=False, regions=regions)
+    grey = np.asarray(image.convert('L'))
+    dark = grey < 128
+
+    # taller than the staves, because leger lines, dynamics and tempo text live
+    # outside them
+    ratio = cards.CARDS_SCALE / scoreview.RASTER_SCALE
+    staff_height = sum((r[1][3] - r[1][1]) for r in cards.passage_strips(render, low, high)) * ratio
+    assert image.height > staff_height * 1.3, \
+        'bars %d-%d: the crop is no taller than the staves, so it clips' % (low, high)
+    assert image.height < staff_height * 3.0, \
+        'bars %d-%d: the crop swallowed the neighbouring system' % (low, high)
+
+    # Clipping through a staff or a system shows up as a dense band along an edge,
+    # because a staff line is as wide as the crop. A barline at the left or right
+    # edge is normal -- that is where a measure ends -- so only the horizontal
+    # edges are judged, and by density rather than a raw count.
+    for edge, name in ((dark[:2, :], 'top'), (dark[-2:, :], 'bottom')):
+      density = float(edge.mean())
+      assert density < 0.3, \
+          'bars %d-%d: %.0f%% of the %s edge is ink -- the crop cuts through music' % (
+              low, high, 100 * density, name)
+
+
+@needs_real
+def test_both_sides_of_a_card_show_the_same_region(real, tmp_path):
+  """The front and the back must line up, so the crop is measured once."""
+  import numpy as np
+  cfg, piece, render = real
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['staves_only'])
+  built = cards.build_card(cfg, piece, render, spec, tmp_path)
+  import PIL.Image
+  front = PIL.Image.open(str(built.front_png))
+  back = PIL.Image.open(str(built.back_png))
+  assert front.size == back.size, 'the two sides differ: %s vs %s' % (front.size, back.size)
+  a = np.asarray(front.convert('L')).astype(int)
+  b = np.asarray(back.convert('L')).astype(int)
+  assert (a != b).any(), 'the back should differ from the front (it shows the notes)'

@@ -41,7 +41,7 @@ from . import library
 
 Progress = Optional[Callable[[float, str], None]]
 
-CACHE_VERSION = 3      # 3 adds per-glyph geometry, including dots, for masking
+CACHE_VERSION = 4      # 4 adds each bar's full ink extent, for cropping cards
 RASTER_SCALE = 1.5          # PNG pixels per SVG pixel; ~1260 px wide pages
 MEI_NS = '{http://www.musicxml.org/ns/musicxml}'
 
@@ -65,20 +65,47 @@ def _report(progress: Progress, percent: float, message: str) -> None:
 
 @dataclass(frozen=True)
 class MeasureBox:
-  """Where one measure sits, in PNG pixels on its page."""
+  """Where one measure sits, in PNG pixels on its page.
+
+  Two rectangles, because they answer different questions. `x0..y1` is the staff:
+  what to highlight for a bar, and what a click is tested against. `full_*` is the
+  union of *everything* drawn in the bar -- leger-line notes above the staves,
+  dynamics below them, slurs, tempo text -- which is what a crop must cover. Using
+  the staff box for a crop clips the music: measured on this score, every passage
+  cropped that way had ink running off its top and bottom edges.
+  """
 
   number: int
   x0: float
   y0: float
   x1: float
   y1: float
+  full_x0: float = 0.0
+  full_y0: float = 0.0
+  full_x1: float = 0.0
+  full_y1: float = 0.0
+
+  @property
+  def has_full(self) -> bool:
+    return self.full_x1 > self.full_x0 and self.full_y1 > self.full_y0
+
+  @property
+  def extent(self):
+    """Everything drawn in the bar: the staff box if the full one is unknown."""
+    if self.has_full:
+      return (self.full_x0, self.full_y0, self.full_x1, self.full_y1)
+    return (self.x0, self.y0, self.x1, self.y1)
 
   def contains(self, x: float, y: float, pad: float = 0.0) -> bool:
     return (self.x0 - pad) <= x <= (self.x1 + pad) and (self.y0 - pad) <= y <= (self.y1 + pad)
 
   def to_dict(self) -> Dict[str, float]:
-    return {'number': self.number, 'x0': round(self.x0, 1), 'y0': round(self.y0, 1),
-            'x1': round(self.x1, 1), 'y1': round(self.y1, 1)}
+    out = {'number': self.number, 'x0': round(self.x0, 1), 'y0': round(self.y0, 1),
+           'x1': round(self.x1, 1), 'y1': round(self.y1, 1)}
+    if self.has_full:
+      out.update({'fx0': round(self.full_x0, 1), 'fy0': round(self.full_y0, 1),
+                  'fx1': round(self.full_x1, 1), 'fy1': round(self.full_y1, 1)})
+    return out
 
 
 @dataclass(frozen=True)
@@ -120,6 +147,17 @@ class GlyphBox:
   @property
   def centre(self):
     return ((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0)
+
+  @property
+  def has_full(self) -> bool:
+    return self.full_x1 > self.full_x0 and self.full_y1 > self.full_y0
+
+  @property
+  def extent(self):
+    """Everything drawn in the bar: the staff box if the full one is unknown."""
+    if self.has_full:
+      return (self.full_x0, self.full_y0, self.full_x1, self.full_y1)
+    return (self.x0, self.y0, self.x1, self.y1)
 
   def contains(self, x: float, y: float, pad: float = 0.0) -> bool:
     return (self.x0 - pad) <= x <= (self.x1 + pad) and (self.y0 - pad) <= y <= (self.y1 + pad)
@@ -277,7 +315,9 @@ class ScoreRender:
     pages = []
     for raw in data.get('pages') or []:
       boxes = [MeasureBox(number=int(m['number']), x0=float(m['x0']), y0=float(m['y0']),
-                          x1=float(m['x1']), y1=float(m['y1']))
+                          x1=float(m['x1']), y1=float(m['y1']),
+                          full_x0=float(m.get('fx0') or 0.0), full_y0=float(m.get('fy0') or 0.0),
+                          full_x1=float(m.get('fx1') or 0.0), full_y1=float(m.get('fy1') or 0.0))
                for m in (raw.get('measures') or [])]
       glyphs = [GlyphBox.from_dict(g) for g in (raw.get('glyphs') or [])]
       pages.append(ScorePage(number=int(raw['number']), image=str(raw['image']),
@@ -329,6 +369,13 @@ def measure_ids(mei: str) -> Dict[str, int]:
   return out
 
 
+# Elements Verovio actually draws, for working out how far a bar's ink reaches.
+# Deliberately excludes containers such as layer/staff/measure/system.
+DRAWN_KINDS = ('note', 'rest', 'accid', 'stem', 'beam', 'dots', 'slur', 'tie', 'dynam',
+               'hairpin', 'tempo', 'text', 'tuplet', 'tupletNum', 'mordent', 'trill',
+               'grpSym', 'keySig', 'meterSig', 'clef')
+
+
 def _measure_geometry(svg: str, ids: Dict[str, int]) -> Tuple[List[MeasureBox], List[str]]:
   """Measure boxes from a rendered page, in SVG user units."""
   warnings: List[str] = []
@@ -353,7 +400,31 @@ def _measure_geometry(svg: str, ids: Dict[str, int]) -> Tuple[List[MeasureBox], 
     y0 = min(r[1] for r in rects)
     x1 = max(r[0] + r[2] for r in rects)
     y1 = max(r[1] + r[3] for r in rects)
-    boxes.append(MeasureBox(number=number, x0=x0, y0=y0, x1=x1, y1=y1))
+    # The extent is the union of the elements that are *drawn*, an allow-list on
+    # purpose: Verovio also emits boxes for containers (layer, staff, measure), and
+    # unioning those swept in whole systems -- one bar came out ten times too tall.
+    drawn = list(rects)
+    for kind in DRAWN_KINDS:
+      for element in re.findall(
+          r'<g id="\w+" class="%s">(.*?)(?=<g id="\w+" class="[a-zA-Z]+">|$)' % kind,
+          body, re.S):
+        rect = re.search(r'<rect\s([^>]*)>', element)
+        if rect is None:
+          continue
+        values = {k: _attr(rect.group(1), k) for k in ('x', 'y', 'width', 'height')}
+        if any(v is None for v in values.values()):
+          continue
+        drawn.append((float(values['x']), float(values['y']),
+                      float(values['width']), float(values['height'])))
+    full = None
+    if drawn:
+      full = (min(r[0] for r in drawn), min(r[1] for r in drawn),
+              max(r[0] + r[2] for r in drawn), max(r[1] + r[3] for r in drawn))
+    boxes.append(MeasureBox(number=number, x0=x0, y0=y0, x1=x1, y1=y1,
+                            full_x0=full[0] if full else 0.0,
+                            full_y0=full[1] if full else 0.0,
+                            full_x1=full[2] if full else 0.0,
+                            full_y1=full[3] if full else 0.0))
   return boxes, warnings
 
 
@@ -491,8 +562,11 @@ def _scale_glyphs(glyphs: List[GlyphBox], factor: float) -> List[GlyphBox]:
 
 
 def _scale_boxes(boxes: List[MeasureBox], factor: float) -> List[MeasureBox]:
-  return [MeasureBox(number=b.number, x0=b.x0 * factor, y0=b.y0 * factor,
-                     x1=b.x1 * factor, y1=b.y1 * factor) for b in boxes]
+  return [dataclasses.replace(b, x0=b.x0 * factor, y0=b.y0 * factor,
+                              x1=b.x1 * factor, y1=b.y1 * factor,
+                              full_x0=b.full_x0 * factor, full_y0=b.full_y0 * factor,
+                              full_x1=b.full_x1 * factor, full_y1=b.full_y1 * factor)
+          for b in boxes]
 
 
 def _require_engines():

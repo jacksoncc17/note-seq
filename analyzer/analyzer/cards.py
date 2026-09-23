@@ -235,18 +235,22 @@ def passage_strips(render: ScoreRender, first: int, last: int
     if not selected:
       continue
     for box in sorted(selected, key=lambda b: (b.y0, b.x0)):
-      # same system as the previous box if their vertical spans overlap
+      # the staff box, deliberately: the geometry says where the *system* is, and
+      # `expand_to_ink` grows it to the drawn music within a cap. Vertovio's other
+      # boxes cannot be trusted per bar -- unioning every drawn element in one bar
+      # produced a box ten times too tall -- so the extension is measured, not looked
+      # up.
+      x0, y0, x1, y1 = box.x0, box.y0, box.x1, box.y1
       placed = False
       for index, row in enumerate(rows):
-        page_number, _n, _x0, y0, _x1, y1 = row
-        if page_number == page.number and not (box.y1 < y0 or box.y0 > y1):
-          rows[index] = (page_number, row[1],
-                         min(row[2], box.x0), min(row[3], box.y0),
-                         max(row[4], box.x1), max(row[5], box.y1))
+        page_number, _n, _x0, ry0, _x1, ry1 = row
+        if page_number == page.number and not (y1 < ry0 or y0 > ry1):
+          rows[index] = (page_number, row[1], min(row[2], x0), min(row[3], y0),
+                         max(row[4], x1), max(row[5], y1))
           placed = True
           break
       if not placed:
-        rows.append((page.number, box.number, box.x0, box.y0, box.x1, box.y1))
+        rows.append((page.number, box.number, x0, y0, x1, y1))
   ordered = sorted(rows, key=lambda r: (r[0], r[3]))
   return [(page, (x0, y0, x1, y1)) for page, _n, x0, y0, x1, y1 in ordered]
 
@@ -322,8 +326,116 @@ def crop_passage(image_path, strips: Sequence[Tuple[int, Tuple[float, float, flo
   return out
 
 
+def expand_to_ink(image, strip, budget: float = 120.0, bridge: float = 34.0,
+                  threshold: int = 200, margin: float = 8.0, cap: float = 0.45):
+  """Grow a system's rectangle outwards until the ink stops.
+
+  The staff box alone is too tight -- leger-line notes, dynamics and tempo text sit
+  outside it -- but a fixed generous band is too loose, because it reaches the next
+  system and the crop swallows two systems' worth of music. So walk outwards row by
+  row, keeping track of the last row that had ink and allowing a small gap (a space
+  between leger lines is ink, a gap between systems is not), and stop at the first
+  long blank run.
+
+  Args:
+    image: the page image.
+    strip: (x0, y0, x1, y1) of the system, from the measure geometry.
+    budget: how far to look, in pixels.
+    bridge: the largest blank run still considered part of the same system.
+    threshold: how dark a pixel counts as ink.
+    margin: pixels of margin kept around the result.
+    cap: the most the walk may extend beyond the staves, as a fraction of the
+      system's height. Without it a system whose neighbours are close enough gets
+      bridged to them and the crop grows to a whole page -- which is worse than
+      clipping a leger line.
+
+  Returns:
+    A (x0, y0, x1, y1) rectangle clipped to the image.
+  """
+  import numpy as np
+  x0, y0, x1, y1 = [int(v) for v in strip]
+  x0, x1 = max(0, x0), min(image.width, x1)
+  band_top = max(0, int(y0 - budget))
+  band_bottom = min(image.height, int(y1 + budget))
+  if x1 <= x0 or band_bottom <= band_top:
+    return (x0, max(0, y0), x1, min(image.height, y1))
+  grey = np.asarray(image.convert('L').crop((x0, band_top, x1, band_bottom)))
+  rows = (grey < threshold).any(axis=1)
+  start = max(0, min(len(rows) - 1, int(y0 - band_top)))
+  stop = max(0, min(len(rows) - 1, int(y1 - band_top)))
+  if not rows.any():
+    return (x0, max(0, y0), x1, min(image.height, y1))
+
+  top, gap = start, 0
+  for row in range(start, -1, -1):
+    if rows[row]:
+      top, gap = row, 0
+    else:
+      gap += 1
+      if gap > bridge:
+        break
+  bottom, gap = stop, 0
+  for row in range(stop, len(rows)):
+    if rows[row]:
+      bottom, gap = row, 0
+    else:
+      gap += 1
+      if gap > bridge:
+        break
+  limit = max(2.0, cap * (y1 - y0))
+  top = max(top, start - int(limit))
+  bottom = min(bottom, stop + int(limit))
+  return (x0, max(0, int(band_top + top - margin)), x1,
+          min(image.height, int(band_top + bottom + 1 + margin)))
+
+
+def passage_regions(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
+                    scale: float = CARDS_SCALE) -> Dict[int, Tuple[float, float, float, float]]:
+  """The rectangle each page's passage occupies, measured from the ink.
+
+  Computed once and used for both sides of the card, so the front and the back show
+  exactly the same region -- measuring again after hiding notes would give the front
+  a different crop, and the two images would not line up.
+  """
+  import io
+
+  import cairosvg
+  from PIL import Image
+
+  low, high = spec.bar_range
+  strips = passage_strips(render, low, high)
+  if not strips:
+    raise CardError('bars %d-%d are not in the engraving' % (low, high))
+  by_page: Dict[int, List[Tuple[int, Tuple[float, float, float, float]]]] = {}
+  for page_number, rect in strips:
+    by_page.setdefault(page_number, []).append((page_number, rect))
+
+  regions: Dict[int, Tuple[float, float, float, float]] = {}
+  for page_number in sorted(by_page):
+    page = next((p for p in render.pages if p.number == page_number), None)
+    if page is None:
+      continue
+    try:
+      svg, _ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale)
+      png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
+    except Exception as e:
+      raise CardError('could not engrave page %d for the card: %s' % (page_number, e))
+    with Image.open(io.BytesIO(png)) as drawn:
+      image = flatten(drawn)
+    ratio = image.width / float(page.width)
+    boxes = []
+    for _number, (x0, y0, x1, y1) in by_page[page_number]:
+      height = max(1.0, y1 - y0)
+      boxes.append(expand_to_ink(image, (x0 * ratio, y0 * ratio, x1 * ratio, y1 * ratio),
+                                 budget=0.7 * height * ratio, bridge=0.12 * height * ratio))
+    regions[page_number] = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                            max(b[2] for b in boxes), max(b[3] for b in boxes))
+  return regions
+
+
 def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
-                  hidden: Sequence[str], scale: float = CARDS_SCALE, hide: bool = True):
+                  hidden: Sequence[str], scale: float = CARDS_SCALE, hide: bool = True,
+                  regions: Optional[Dict[int, Tuple[float, float, float, float]]] = None):
   """One image of the passage, optionally with the chosen glyphs suppressed.
 
   Usage:
@@ -373,9 +485,14 @@ def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpe
     with Image.open(io.BytesIO(png)) as drawn:
       image = flatten(drawn)
     ratio = image.width / float(page.width)
-    scaled = [(number, (x0 * ratio, y0 * ratio, x1 * ratio, y1 * ratio))
-              for number, (x0, y0, x1, y1) in by_page[page_number]]
-    pieces.append(crop_passage(image, scaled, image.size))
+    if regions is not None and page_number in regions:
+      tight = tuple(v for v in regions[page_number])
+    else:
+      tight = expand_to_ink(image, (by_page[page_number][0][1][0] * ratio,
+                                    by_page[page_number][0][1][1] * ratio,
+                                    by_page[page_number][0][1][2] * ratio,
+                                    by_page[page_number][0][1][3] * ratio))
+    pieces.append(crop_passage(image, [(page_number, tight)], image.size))
   return _stack(pieces, low, high)
 
 
@@ -589,9 +706,11 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
   glyphs = render.glyphs_in_measures(low, high)
   hidden = masked_keys(spec, glyphs)
 
-  back_image = passage_image(cfg, piece, render, spec, hidden, hide=False)
-  front_image = (passage_image(cfg, piece, render, spec, hidden, hide=True)
+  regions = passage_regions(cfg, piece, render, spec)
+  back_image = passage_image(cfg, piece, render, spec, hidden, hide=False, regions=regions)
+  front_image = (passage_image(cfg, piece, render, spec, hidden, hide=True, regions=regions)
                  if hidden else back_image.copy())
+  assert front_image.size == back_image.size, 'the two sides must line up' 
 
   front_path = workspace / ('front-%s.png' % spec.signature())
   back_path = workspace / ('back-%s.png' % spec.signature())
