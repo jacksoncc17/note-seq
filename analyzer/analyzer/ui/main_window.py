@@ -896,16 +896,27 @@ class MainWindow(QMainWindow):
     dialog.show()
 
   def _close_card_dialog(self) -> None:
+    """End note mode.
+
+    Wrapped because this runs from the dialog's `destroyed` signal too, which fires
+    while the window itself is being torn down -- at that point the score view is
+    already a deleted C++ object, and touching it aborts the process on exit.
+    """
     self._card_dialog = None
-    self.score_view.set_mask_mode(False)
-    self.score_view.set_masked([])
+    try:
+      self.score_view.set_mask_mode(False)
+      self.score_view.set_masked([])
+    except RuntimeError:
+      return
     self._set_mask_indicator(False)
 
   def _set_mask_indicator(self, on: bool) -> None:
     """Say which mode the score is in, because it changes what a click does."""
-    self.mask_label.setText('masking notes — close the card dialog to select bars'
-                            if on else '')
-    self.mask_label.setVisible(bool(on))
+    try:
+      self.mask_label.setText('notes: close the card dialog to select bars' if on else '')
+      self.mask_label.setVisible(bool(on))
+    except RuntimeError:
+      pass                                        # the window is going away
 
   def _on_glyph_clicked(self, key: str) -> None:
     """A note was tapped on the score.

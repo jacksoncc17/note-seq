@@ -534,7 +534,7 @@ def test_mask_mode_cannot_strand_the_score_view(window, cfg, tmp_path, monkeypat
   window._on_rendered(synthetic_render(tmp_path))
   window.open_card_dialog()
   assert window.score_view._mask_mode is True
-  assert 'masking notes' in window.mask_label.text(), 'the mode should be shown, not implicit'
+  assert 'notes' in window.mask_label.text(), 'the mode should be shown, not implicit'
 
   # the dialog disappears without `finished` ever firing
   window._card_dialog = None
@@ -617,3 +617,49 @@ def test_clicking_two_bars_on_the_score_selects_the_range(window, cfg, tmp_path)
   window.score_play_btn.click()
   assert 'playing bars 1-3' in window.status.currentMessage()
   window.player.stop()
+
+
+def test_closing_the_window_with_a_card_dialog_open_exits_cleanly(tmp_path):
+  """The dialog's `destroyed` signal fires while the window is being torn down, when
+  the score view is already a deleted C++ object; touching it aborted the process."""
+  import subprocess
+  import sys
+
+  script = """
+import os, pathlib, sys
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+sys.path.insert(0, {package!r})
+sys.path.insert(0, {tests!r})
+from PyQt5.QtWidgets import QApplication, QMessageBox
+QMessageBox.information = staticmethod(lambda *a, **k: None)
+from analyzer.config import AnalyzerConfig
+from analyzer.ui.main_window import MainWindow
+from test_server import make_piece
+
+root = pathlib.Path({root!r})
+cfg = AnalyzerConfig(cache_dir=root / "cache", output_dir=root / "out",
+                     bank_dir=root / "banks", legacy_bank=root / "banks" / "fingerprint.json",
+                     sheet_music_dir=root / "sheets")
+(root / "sheets").mkdir(parents=True, exist_ok=True)
+cfg.ensure_dirs()
+make_piece(cfg, slug="demo", bars=6, seconds=12.0)
+
+app = QApplication([])
+window = MainWindow(cfg, piece_slug="demo")
+if window._render is not None and window._render.isRunning():
+    window._render.wait(60000)
+from analyzer import library, scoreview
+window._on_rendered(scoreview.cached_render(cfg, library.find(cfg, "demo").musicxml))
+window.open_card_dialog()
+print("dialog open:", window._card_dialog is not None)
+del window
+print("exited cleanly")
+""".format(package=str(pathlib.Path(__file__).resolve().parents[1].resolve()),
+           tests=str(pathlib.Path(__file__).resolve().parent.resolve()),
+           root=str(tmp_path))
+
+  result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                          text=True, timeout=300)
+  assert result.returncode == 0, (
+      'the process died (rc=%s):\n%s' % (result.returncode, result.stderr[-600:]))
+  assert 'exited cleanly' in result.stdout, result.stdout + result.stderr[-300:]
