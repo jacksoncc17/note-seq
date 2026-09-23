@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12141a">
+<title>Analyzer — practise</title>
+<style>
+  :root { color-scheme: dark; --bg:#12141a; --panel:#1b1f27; --line:#2c333d;
+          --ink:#e8eef4; --dim:#93a1ae; --accent:#4da3ff; --sel:rgba(77,163,255,.28);
+          --play:#e0a020; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+               font:16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+               -webkit-text-size-adjust:100%; }
+  body { display:flex; flex-direction:column; }
+  header, footer { background:var(--panel); border-color:var(--line); }
+  header { border-bottom:1px solid var(--line); padding:8px 10px; }
+  footer { border-top:1px solid var(--line); padding:8px 10px calc(8px + env(safe-area-inset-bottom)); }
+  select, button { font:inherit; color:var(--ink); background:#232a34;
+                   border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  button:active { background:#2e3742; }
+  button[disabled] { opacity:.45; }
+  #piece { width:100%; }
+  .meta { color:var(--dim); font-size:13px; margin-top:6px; min-height:1.2em; }
+  .warn { color:#ffcf7a; }
+  main { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; padding:8px 10px 4px; }
+  .pagebar { display:flex; align-items:center; gap:10px; margin-bottom:6px; color:var(--dim);
+             font-size:14px; }
+  .pagebar button { padding:6px 14px; }
+  #scorewrap { position:relative; width:100%; margin:0 auto; }
+  #page { display:block; width:100%; height:auto; background:#fff; border-radius:6px; }
+  #overlay { position:absolute; inset:0; }
+  .bar { position:absolute; border:1px solid transparent; border-radius:4px;
+         touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  .bar.sel { background:var(--sel); border-color:var(--accent); }
+  .bar.playing { border:2px solid var(--play); }
+  .bar.pending { border:2px dashed var(--accent); }
+  footer .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  #rangeline { flex:1; min-width:150px; font-variant-numeric:tabular-nums; }
+  #rangeline b { color:var(--accent); }
+  #play { background:#1d4e2a; border-color:#2f7a45; font-weight:600; }
+  #play.on { background:#2f7a45; }
+  .hint { color:var(--dim); font-size:12px; margin-top:6px; }
+  .big { font-size:17px; }
+</style>
+</head>
+<body>
+<header>
+  <select id="piece" aria-label="piece"></select>
+  <div class="meta" id="meta">loading…</div>
+</header>
+
+<main>
+  <div class="pagebar">
+    <button id="prev" aria-label="previous page">‹</button>
+    <span id="pagelabel">—</span>
+    <button id="next" aria-label="next page">›</button>
+    <span id="mode" style="margin-left:auto"></span>
+  </div>
+  <div id="scorewrap">
+    <img id="page" alt="score page">
+    <div id="overlay"></div>
+  </div>
+  <div class="hint" id="hint"></div>
+</main>
+
+<footer>
+  <div class="row">
+    <span id="rangeline" class="big">tap a bar to set the start</span>
+    <button id="clear">clear</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="play">▶ Play</button>
+    <button id="stop">■ Stop</button>
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="loop"> loop</label>
+    <span id="clock" style="color:var(--dim);font-variant-numeric:tabular-nums"></span>
+  </div>
+  <audio id="player" preload="none"></audio>
+</footer>
+
+<script>
+'use strict';
+
+// Pre-roll and post-roll, matching the desktop app: starting exactly on the
+// downbeat clips the piano's attack, stopping exactly on the barline cuts the
+// final resonance.
+const PRE_ROLL = 0.12, POST_ROLL = 0.25;
+
+const $ = (id) => document.getElementById(id);
+const state = { piece: null, detail: null, page: 1, from: null, to: null, playing: -1 };
+
+async function api(path) {
+  const response = await fetch(path, { cache: 'no-store' });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
+  return body;
+}
+
+function setMeta(text, warn) {
+  const el = $('meta');
+  el.textContent = text;
+  el.className = warn ? 'meta warn' : 'meta';
+}
+
+// ---------------------------------------------------------------- piece list
+
+async function loadPieces() {
+  const data = await api('/pieces');
+  const select = $('piece');
+  select.innerHTML = '';
+  if (!data.pieces.length) {
+    select.innerHTML = '<option>no pieces found</option>';
+    setMeta('build one with memorization/analyze.py on the computer that runs this server', true);
+    return;
+  }
+  for (const piece of data.pieces) {
+    const option = document.createElement('option');
+    option.value = piece.slug;
+    option.textContent = piece.name + (piece.has_map ? '' : ' — no map');
+    select.appendChild(option);
+  }
+  const wanted = new URLSearchParams(location.search).get('piece');
+  if (wanted && data.pieces.some((p) => p.slug === wanted)) select.value = wanted;
+  await loadPiece(select.value);
+}
+
+async function loadPiece(slug) {
+  if (!slug) return;
+  state.piece = slug;
+  stop();
+  const detail = await api('/piece/' + encodeURIComponent(slug));
+  state.detail = detail;
+
+  const bits = [];
+  if (detail.bars) bits.push(detail.bars + ' bars');
+  if (detail.key) bits.push(detail.key);
+  if (detail.map) {
+    bits.push(detail.map.method + ' map, ' + detail.map.seconds_per_measure.toFixed(2) + ' s/bar');
+  } else {
+    bits.push('no measure map yet');
+  }
+  if (detail.duration_s) bits.push(Math.round(detail.duration_s) + ' s recording');
+  setMeta(bits.join(' · ') + (detail.stale ? ' · ' + detail.stale : ''), !!detail.stale);
+
+  const warnings = [];
+  if (detail.map && detail.map.warnings) warnings.push(...detail.map.warnings);
+  if (detail.score && detail.score.warnings) warnings.push(...detail.score.warnings);
+  if (detail.notes) warnings.push(...detail.notes);
+  $('hint').textContent = warnings.slice(0, 2).join(' ');
+
+  const pages = detail.score ? detail.score.pages : [];
+  state.page = pages.length ? pages[0].number : 1;
+  // A bookmark like ?piece=…&from=40&to=83 should open on the bar it names, not
+  // on page one.
+  if (state.from !== null) {
+    const target = pages.find((p) => p.measures.some((b) => b.number === state.from));
+    if (target) state.page = target.number;
+  }
+  showPage(state.page);
+  updateRangeUI(pages);
+  updatePlayButton();
+}
+
+// ------------------------------------------------------------------ drawing
+
+function currentPage() {
+  const pages = state.detail && state.detail.score ? state.detail.score.pages : [];
+  return pages.find((p) => p.number === state.page) || null;
+}
+
+function showPage(number) {
+  const pages = state.detail && state.detail.score ? state.detail.score.pages : [];
+  if (!pages.length) {
+    $('pagelabel').textContent = 'no engraved score';
+    $('page').removeAttribute('src');
+    $('overlay').innerHTML = '';
+    return;
+  }
+  const page = pages.find((p) => p.number === number) || pages[0];
+  state.page = page.number;
+  $('page').src = '/score/' + encodeURIComponent(state.piece) + '/page-' + page.number + '.png';
+  $('pagelabel').textContent = 'page ' + page.number + ' / ' + pages.length;
+
+  // bars are positioned in percentages, so they stay correct at any screen width
+  const overlay = $('overlay');
+  overlay.innerHTML = '';
+  for (const box of page.measures) {
+    const div = document.createElement('div');
+    div.className = 'bar';
+    div.dataset.n = String(box.number);
+    div.style.left = (100 * box.x0 / page.width) + '%';
+    div.style.top = (100 * box.y0 / page.height) + '%';
+    div.style.width = (100 * (box.x1 - box.x0) / page.width) + '%';
+    div.style.height = (100 * (box.y1 - box.y0) / page.height) + '%';
+    div.addEventListener('click', () => tapBar(box.number));
+    overlay.appendChild(div);
+  }
+  paintHighlights();
+}
+
+function paintHighlights() {
+  const page = currentPage();
+  const overlay = $('overlay');
+  if (!page) return;
+  const low = state.from, high = state.to === null ? state.from : state.to;
+  for (const div of overlay.children) {
+    const n = Number(div.dataset.n);
+    div.classList.toggle('sel', low !== null && n >= Math.min(low, high) && n <= Math.max(low, high));
+    div.classList.toggle('playing', n === state.playing);
+    div.classList.toggle('pending', state.to === null && n === state.from);
+  }
+  $('mode').textContent = (state.from === null) ? 'tap a bar to set the start'
+                        : (state.to === null ? 'tap another bar to set the end'
+                                             : 'tap a bar to start again');
+}
+
+// ------------------------------------------------------------------ selection
+
+function tapBar(number) {
+  if (state.from === null || (state.from !== null && state.to !== null)) {
+    state.from = number; state.to = null;
+  } else if (number === state.from) {
+    state.to = number;                       // single-bar passage
+  } else {
+    state.to = number;
+  }
+  updateRangeUI();
+  writeUrl();
+}
+
+function updateRangeUI() {
+  const line = $('rangeline');
+  if (state.from === null) {
+    line.textContent = 'tap a bar to set the start';
+  } else if (state.to === null) {
+    line.innerHTML = 'from bar <b>' + state.from + '</b> — tap the last bar';
+  } else {
+    const low = Math.min(state.from, state.to), high = Math.max(state.from, state.to);
+    const span = spanFor(low, high);
+    line.innerHTML = 'bars <b>' + low + '</b>–<b>' + high + '</b>' +
+      (span ? ' · ' + span[0].toFixed(1) + '–' + span[1].toFixed(1) + ' s' : '');
+  }
+  paintHighlights();
+}
+
+function spanFor(low, high) {
+  if (!state.detail || !state.detail.map) return null;
+  const times = state.detail.map.measures;
+  const find = (n) => times.find((m) => m.measure === n);
+  const a = find(low), b = find(high);
+  if (!a && !b) return null;
+  const start = Math.min((a || b).start_s, (b || a).start_s);
+  const end = Math.max((a || b).end_s, (b || a).end_s);
+  return [start, end];
+}
+
+// ------------------------------------------------------------------ playback
+
+function updatePlayButton() {
+  const ready = !!(state.detail && state.detail.map && state.detail.has_audio);
+  $('play').disabled = !ready || state.from === null;
+  $('stop').disabled = !ready;
+  if (!state.detail) return;
+  if (!state.detail.has_audio) {
+    $('rangeline').textContent = 'no recording cached — fetch one in the desktop app';
+  } else if (!state.detail.map) {
+    $('rangeline').textContent = 'no measure map yet — align it in the desktop app';
+  }
+}
+
+function play() {
+  const low = Math.min(state.from, state.to === null ? state.from : state.to);
+  const high = Math.max(state.from, state.to === null ? state.from : state.to);
+  const span = spanFor(low, high);
+  if (!span) return;
+  const player = $('player');
+  const start = Math.max(0, span[0] - PRE_ROLL);
+  const end = span[1] + POST_ROLL;
+  player.src = '/audio/' + encodeURIComponent(state.piece) +
+               '?from=' + start.toFixed(3) + '&to=' + end.toFixed(3);
+  player.loop = $('loop').checked;
+  state.range = [start, end];
+  player.play().then(() => {
+    $('play').classList.add('on');
+    setMeta($('meta').textContent, false);
+  }).catch((e) => setMeta('could not play: ' + e.message, true));
+}
+
+function stop() {
+  const player = $('player');
+  player.pause();
+  player.removeAttribute('src');
+  player.load();
+  $('play').classList.remove('on');
+  state.playing = -1;
+  paintHighlights();
+  $('clock').textContent = '';
+}
+
+function measureAtTime(seconds) {
+  if (!state.detail || !state.detail.map) return -1;
+  for (const m of state.detail.map.measures) {
+    if (seconds >= m.start_s && seconds < m.end_s) return m.measure;
+  }
+  return -1;
+}
+
+$('player').addEventListener('timeupdate', () => {
+  const player = $('player');
+  if (!state.range) return;
+  const absolute = state.range[0] + player.currentTime;
+  const found = measureAtTime(absolute);
+  if (found !== state.playing) {
+    state.playing = found;
+    const page = currentPage();
+    const onThisPage = page && page.measures.some((b) => b.number === found);
+    if (found > 0 && !onThisPage) {
+      const pages = state.detail.score.pages;
+      const target = pages.find((p) => p.measures.some((b) => b.number === found));
+      if (target) showPage(target.number);
+    }
+    paintHighlights();
+  }
+  $('clock').textContent = player.currentTime.toFixed(1) + ' / ' +
+                           Math.max(0, (state.range[1] - state.range[0])).toFixed(1) + ' s';
+});
+
+$('player').addEventListener('ended', () => {
+  if (!$('loop').checked) {
+    $('play').classList.remove('on');
+    state.playing = -1;
+    paintHighlights();
+  }
+});
+
+// ------------------------------------------------------------------ URL state
+
+function writeUrl() {
+  const params = new URLSearchParams();
+  params.set('piece', state.piece);
+  if (state.from !== null) params.set('from', state.from);
+  if (state.to !== null) params.set('to', state.to);
+  history.replaceState(null, '', '?' + params.toString());
+}
+
+function readUrl() {
+  const params = new URLSearchParams(location.search);
+  const from = parseInt(params.get('from'), 10);
+  const to = parseInt(params.get('to'), 10);
+  if (!Number.isNaN(from)) state.from = from;
+  if (!Number.isNaN(to)) state.to = to;
+}
+
+// ------------------------------------------------------------------ wiring
+
+$('piece').addEventListener('change', (e) => loadPiece(e.target.value));
+$('prev').addEventListener('click', () => showPage(state.page - 1));
+$('next').addEventListener('click', () => showPage(state.page + 1));
+$('play').addEventListener('click', play);
+$('stop').addEventListener('click', stop);
+$('clear').addEventListener('click', () => {
+  state.from = null; state.to = null; stop(); updateRangeUI(); writeUrl(); updatePlayButton();
+});
+$('loop').addEventListener('change', () => { $('player').loop = $('loop').checked; });
+
+readUrl();
+loadPieces().catch((e) => setMeta('could not load: ' + e.message, true));
+</script>
+</body>
+</html>

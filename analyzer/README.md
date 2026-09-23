@@ -142,6 +142,46 @@ forces a fresh one. It needs `verovio` and `cairosvg`:
 ../.venv/bin/pip install verovio cairosvg
 ```
 
+## On your phone (M5a)
+
+```bash
+cd analyzer
+./run.sh serve                 # prints the URL to open
+```
+
+Then open `http://192.168.0.128:8090` on the phone (change the address to whatever
+the machine prints). You get the same piece list, the same engraved score, and the
+same measure map as the desktop — pick a bar, tap the last bar of the passage,
+press **Play**, loop it if you like. `?piece=…&from=40&to=83` is kept in the URL,
+so a bookmark or a home-screen icon reopens that exact passage, on the page that
+contains it. The bar being played is outlined and the page turns with it.
+
+**The audio comes from this machine, not from YouTube.** yt-dlp fetched the
+recording once, on the desktop, and the map's timestamps are offsets into that
+cached file — which is why `syncmap` fingerprints it. So `/audio/<slug>?from=&to=`
+decodes the cache and returns *exactly* that passage as a standalone WAV: bars
+40-83 of the Chopin comes back as 2.67 MB decoding to 60.608 s against the map's
+60.610 s. Sample-accurate, no client-side seeking, and no media-fragment quirks on
+iOS. The phone needs no internet and no yt-dlp.
+
+| endpoint | what it returns |
+|---|---|
+| `GET /` | the client page (self-contained; no external assets) |
+| `GET /pieces`, `GET /piece/<slug>` | piece list, and one piece with its map, played order and page geometry |
+| `GET /audio/<slug>?from=&to=` or `?from_bar=&to_bar=` | that passage as a WAV. Bars are answered from the map. |
+| `GET /audio/<slug>` | the whole cached recording |
+| `GET /score/<slug>/pages.json` | page sizes and a rectangle per measure, in image pixels |
+| `GET /score/<slug>/page-N.png` | one engraved page |
+
+No TLS is needed here, unlike the tutor: browsers only insist on a secure origin
+for the **microphone**, and this feature has none.
+
+What the phone deliberately does *not* do is fetch a recording, align it, or
+engrave a score. Those are one-time setup steps that want a keyboard and a
+progress bar, so they stay in the desktop app — and the client says so plainly
+when a piece has no recording or no map yet (`intermezzo-left — no map` in the
+list) rather than appearing broken.
+
 ## What the map knows about itself
 
 A map is only as good as the recording it came from, so each one stores its
@@ -210,23 +250,35 @@ analyzer/
       score_widget.py       the engraved score: click a bar, highlight a range
       player.py             sample-accurate playback of a bar range
       workers.py            download, alignment and engraving on background threads
+    server.py               the HTTP API for the phone client
+  web/
+    index.html              the phone client: one self-contained page
   tests/                    pytest, head-less (QT_QPA_PLATFORM=offscreen)
 ```
 
 ## Status
 
-**M1-M4 are implemented**, with 175 tests (one opt-in network test).
+**M1-M5a are implemented**, with 188 tests (one opt-in network test, one skipped
+without an audio device).
 
 * **M1** the window: piece picker, repeat-aware measure list, range selector, transport.
 * **M2** the recording: fetched once with yt-dlp, converted with ffmpeg, cached locally.
 * **M3** the map: average-tempo estimate, chroma + DTW refinement, draggable markers, sidecar JSON.
 * **M4** the score view: engraved pages from the MusicXML, every bar clickable, following playback.
+* **M5a** the phone client: the same pieces and map over HTTP, with sample-accurate passage playback.
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
-recording, served from cache on the second call); a full align run through the real
-Qt worker threads (204 markers, bars 40-83 -> 62.38-122.99 s, saved and reloaded);
-and the score tab driven end to end (9 pages, 204 measures clickable, clicking bar
-10 selecting and playing it, follow playback turning to page 6 for bar 150).
+recording, served from cache on the second call); a full align run through the
+real Qt worker threads (204 markers, bars 40-83 -> 62.38-122.99 s, saved and
+reloaded); the score tab driven end to end (9 pages, 204 measures clickable); and
+the phone client's JavaScript actually executed in headless Chrome against the
+real 204-bar piece, rendering "204 bars · dtw map, 1.53 s/bar", 24 bar overlays on
+page 2 and bars 40-55 highlighted from the URL.
+
+**M5b**, not built yet: correcting the map from the phone. The plan is tap-a-bar
+plus nudge buttons rather than dragging markers, because a finger on a small
+screen is imprecise and nudging is exact. **M5c**: triggering fetch/align/engrave
+from the phone, which needs a job-id API.
 
 ## Troubleshooting
 

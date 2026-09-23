@@ -6,11 +6,14 @@
 #   ./run.sh run            open the window (default)
 #   ./run.sh run --piece chopin-waltz-in-a-minor-op-34-no-2
 #   ./run.sh score FILE     open a specific MusicXML/MXL (no question bank needed)
+#   ./run.sh serve          the practice client for a phone/tablet browser
+#                           (audio comes from the local cache, never from YouTube)
 #   ./run.sh test           run the analyzer's test suite
 #
 # Environment overrides:
 #   ANALYZER_CACHE=/tmp/a   where recordings are cached
 #   ANALYZER_OUTPUT=/tmp/o  where measure maps are written
+#   ANALYZER_PORT=8090      port for ./run.sh serve
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,11 +41,15 @@ case "$mode" in
     fi
     exec "$PY" -m analyzer.app --score "$1" "${@:2}"
     ;;
+  serve)
+    exec "$PY" -u -m analyzer.app --serve --host "${ANALYZER_HOST:-0.0.0.0}" \
+         --port "${ANALYZER_PORT:-8090}" "$@"
+    ;;
   test)
     exec "$PY" -m pytest tests -q "$@"
     ;;
   *)
-    echo "usage: run.sh [check|run|score FILE|test] [args...]" >&2
+    echo "usage: run.sh [check|run|score FILE|serve|test] [args...]" >&2
     exit 2
     ;;
 esac

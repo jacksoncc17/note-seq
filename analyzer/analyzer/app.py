@@ -20,6 +20,10 @@ def build_parser() -> argparse.ArgumentParser:
   ap.add_argument('--piece', default='', help='slug of the piece to open')
   ap.add_argument('--score', default='', help='open this MusicXML/MXL file directly')
   ap.add_argument('--url', default='', help='pre-fill the recording link')
+  ap.add_argument('--serve', action='store_true',
+                  help='serve the practice client for a phone or tablet browser')
+  ap.add_argument('--host', default='0.0.0.0', help='address for --serve')
+  ap.add_argument('--port', type=int, default=8090, help='port for --serve')
   ap.add_argument('--check', action='store_true',
                   help='report what is installed and what pieces were found, then exit')
   ap.add_argument('--list-pieces', action='store_true', help='list pieces and exit')
@@ -107,6 +111,11 @@ def main(argv: Optional[List[str]] = None) -> int:
   args = build_parser().parse_args(argv)
   cfg = AnalyzerConfig()
 
+  if args.serve:
+    # No Qt needed: the server is a second front-end on the same core.
+    from . import server
+    server.serve(cfg, host=args.host, port=args.port)
+    return 0
   if args.check:
     return _report(cfg)
   if args.list_pieces:
