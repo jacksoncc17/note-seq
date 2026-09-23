@@ -67,10 +67,11 @@ def test_loading_a_render_shows_the_first_page(view):
 
 def test_clicking_a_bar_reports_it(view):
   seen = []
-  view.measureClicked.connect(seen.append)
+  view.rangeSelected.connect(lambda a, b: seen.append(b))
   press(view, QPoint(60, 90))          # inside bar 1
+  view.set_selection(*view._selection, external=True)
   press(view, QPoint(300, 90))         # inside bar 2
-  assert seen == [1, 2]
+  assert seen == [1, 2], seen
 
 
 def test_double_click_asks_for_playback(view):
@@ -82,7 +83,7 @@ def test_double_click_asks_for_playback(view):
 
 def test_clicking_outside_the_staves_still_picks_the_nearest_bar(view):
   seen = []
-  view.measureClicked.connect(seen.append)
+  view.rangeSelected.connect(lambda a, b: seen.append(b))
   press(view, QPoint(380, 5))          # above the system, far right
   assert seen == [2]
 
@@ -108,7 +109,7 @@ def test_show_measure_turns_to_the_right_page(view):
 
 def test_arrow_keys_step_bar_by_bar(view):
   seen = []
-  view.measureClicked.connect(seen.append)
+  view.rangeSelected.connect(lambda a, b: seen.append(b))
   view.setFocus()
   view.keyPressEvent(_key(Qt.Key_Right))
   assert seen == [2], 'from no playhead, Right goes to the second bar'
@@ -173,3 +174,50 @@ def test_a_pixmap_that_is_gone_is_reported_not_crashed(view, tmp_path):
   view._pixmaps.clear()
   assert view._pixmap() is None
   assert not view.grab().isNull(), 'a missing page image must not break painting'
+
+
+# ---------------------------------------------------------------------------
+# selecting a range by clicking bars (the Score tab's own selection)
+# ---------------------------------------------------------------------------
+
+def test_a_second_click_extends_the_range(view):
+  seen = []
+  view.rangeSelected.connect(lambda a, b: seen.append((a, b)))
+  view.set_selection(1, 1, external=True)          # as the window would
+  press(view, QPoint(60, 90))                      # bar 1: starts again
+  assert seen == [(1, 1)]
+  view.set_selection(*seen[-1], external=False)    # the window echoes it back
+  press(view, QPoint(300, 90))                     # bar 2 extends to it
+  assert seen[-1] == (1, 2), seen
+  view.set_selection(*seen[-1], external=False)
+  press(view, QPoint(60, 90))                      # a third click starts over
+  assert seen[-1] == (1, 1), seen
+
+
+def test_shift_click_extends_from_the_current_start(view):
+  seen = []
+  view.rangeSelected.connect(lambda a, b: seen.append((a, b)))
+  view.set_selection(2, 2, external=True)
+  shift_press(view, QPoint(300, 90))               # bar 2, shift from bar 2
+  assert seen[-1] == (2, 2)
+  view.set_selection(1, 1, external=True)
+  shift_press(view, QPoint(300, 90))
+  assert seen[-1] == (1, 2)
+
+
+def test_an_external_selection_closes_the_open_range(view):
+  """Setting the range from the spin boxes must not be extended by the next click."""
+  seen = []
+  view.rangeSelected.connect(lambda a, b: seen.append((a, b)))
+  view.set_selection(1, 1, external=False)         # mid-selection
+  view.set_selection(2, 2, external=True)          # the user typed a range instead
+  press(view, QPoint(300, 90))
+  assert seen[-1] == (2, 2), 'the click should start a new selection'
+
+
+def shift_press(widget, point):
+  from PyQt5.QtCore import QEvent, QPointF
+  from PyQt5.QtGui import QMouseEvent
+  event = QMouseEvent(QEvent.MouseButtonPress, QPointF(point), Qt.LeftButton,
+                      Qt.LeftButton, Qt.ShiftModifier)
+  widget.mousePressEvent(event)

@@ -592,3 +592,28 @@ def test_the_score_tab_has_its_own_transport(window, cfg, tmp_path):
   window.score_play_btn.click()
   assert 'playing bars 2-4' in window.status.currentMessage()
   window.score_stop_btn.click()
+
+
+def test_clicking_two_bars_on_the_score_selects_the_range(window, cfg, tmp_path):
+  """The Score tab's own range selection: first click picks a bar, the second
+  extends to it, and the transport then plays the whole passage."""
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+
+  window.score_view.set_selection(1, 1, external=True)
+  window.score_view.rangeSelected.emit(1, 1)          # first click on bar 1
+  assert (window.first_spin.value(), window.last_spin.value()) == (1, 1)
+  # the click mechanics (including the open-range flag) are covered in
+  # test_score_widget.py with real mouse events; this tests the window's response
+
+  window.score_view.rangeSelected.emit(1, 3)          # second click extends it
+  assert (window.first_spin.value(), window.last_spin.value()) == (1, 3)
+  assert window.score_view._selection == (1, 3)
+  assert 'bars 1-3 selected' in window.status.currentMessage()
+  assert window.play_btn.isEnabled() and window.score_play_btn.isEnabled()
+
+  window.score_play_btn.click()
+  assert 'playing bars 1-3' in window.status.currentMessage()
+  window.player.stop()

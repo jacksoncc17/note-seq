@@ -30,10 +30,10 @@ class ScoreView(QWidget):
     pageChanged: (page number) after the shown page changes.
   """
 
-  measureClicked = pyqtSignal(int)
   measureActivated = pyqtSignal(int)
   pageChanged = pyqtSignal(int)
   glyphClicked = pyqtSignal(str)          # a note was tapped in mask mode
+  rangeSelected = pyqtSignal(int, int)    # first and last bar of a range
 
   def __init__(self, parent=None):
     super().__init__(parent)
@@ -52,6 +52,7 @@ class ScoreView(QWidget):
     self._hover: Optional[int] = None
     self._mask_mode = False
     self._masked: set = set()
+    self._range_open = False            # a click has started a range, not finished it
     self._hover_glyph: Optional[str] = None
 
   # ------------------------------------------------------------------ content
@@ -166,9 +167,37 @@ class ScoreView(QWidget):
     self._masked = set(keys or ())
     self.update()
 
-  def set_selection(self, first: Optional[int], last: Optional[int]) -> None:
+  def set_selection(self, first: Optional[int], last: Optional[int],
+                    external: bool = False) -> None:
+    """Show a selection.
+
+    `external=True` means the user set the range somewhere else (the measure list, a
+    new piece) and any range being built by clicking is finished. It defaults to
+    False on purpose: showing a selection is not the same as ending one, and while
+    the default was True a routine re-sync during a click silently closed the range,
+    so a second click started over instead of extending.
+    """
     self._selection = (first, last)
+    if external:
+      self._range_open = False
     self.update()
+
+  def range_from_click(self, measure: int, extend: bool = False):
+    """The range a click on `measure` should select.
+
+    Clicking a bar picks it; clicking a second one extends to it, which is how the
+    phone client works and what a pianist expects; a third click starts again.
+    Shift extends from the existing start whatever the state.
+    """
+    first, _last = self._selection
+    if extend and first is not None:
+      self._range_open = False
+      return (min(first, measure), max(first, measure))
+    if self._range_open and first is not None:
+      self._range_open = False
+      return (min(first, measure), max(first, measure))
+    self._range_open = True
+    return (measure, measure)
 
   def set_playhead_measure(self, measure: Optional[int]) -> None:
     self._playhead = measure
@@ -299,7 +328,9 @@ class ScoreView(QWidget):
     measure = self.measure_at(event.pos())
     if measure is not None:
       self.setFocus(Qt.MouseFocusReason)
-      self.measureClicked.emit(measure)
+      first, last = self.range_from_click(
+          measure, extend=bool(event.modifiers() & Qt.ShiftModifier))
+      self.rangeSelected.emit(first, last)
 
   def mouseDoubleClickEvent(self, event):
     measure = self.measure_at(event.pos())
@@ -342,9 +373,10 @@ class ScoreView(QWidget):
         # Move the marker as well as reporting it: without this, holding an arrow
         # key would keep re-emitting the same bar instead of walking the piece.
         self._playhead = numbers[index]
+        self._range_open = False
         self.show_measure(self._playhead)
         self.update()
-        self.measureClicked.emit(self._playhead)
+        self.rangeSelected.emit(self._playhead, self._playhead)
         return
     if event.key() in (Qt.Key_PageDown, Qt.Key_PageUp):
       self.next_page() if event.key() == Qt.Key_PageDown else self.previous_page()

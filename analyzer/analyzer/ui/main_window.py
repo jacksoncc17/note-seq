@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
     return box
 
   def _score_panel(self) -> QWidget:
-    """The engraved score: click a bar to select it, double-click to hear it."""
+    """The engraved score: click two bars to select the range between them."""
     box = QWidget()
     layout = QVBoxLayout(box)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -284,7 +284,7 @@ class MainWindow(QMainWindow):
     layout.addLayout(bar)
 
     self.score_view = ScoreView()
-    self.score_view.measureClicked.connect(self._on_score_measure_clicked)
+    self.score_view.rangeSelected.connect(self._on_score_range_selected)
     self.score_view.measureActivated.connect(self._on_score_measure_activated)
     self.score_view.pageChanged.connect(self._on_score_page_changed)
     self.score_view.glyphClicked.connect(self._on_glyph_clicked)
@@ -295,7 +295,8 @@ class MainWindow(QMainWindow):
     self.score_scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
     layout.addWidget(self.score_scroll, 1)
 
-    hint = QLabel('click a bar to select it · double-click to play it · '
+    hint = QLabel('click a bar, then another to select the range between them · '
+                  'double-click to play one · '
                   'Ctrl+wheel or +/− to zoom · ← / → step bar by bar')
     hint.setStyleSheet('color: #7f8c93;')
     layout.addWidget(hint)
@@ -790,8 +791,11 @@ class MainWindow(QMainWindow):
 
   # ------------------------------------------------------------------ transport
 
-  def _on_range_changed(self) -> None:
-    self._sync_score_selection()
+  def _on_range_changed(self, echo_to_score: bool = True) -> None:
+    # False when the range came *from* the score view: echoing it back would close
+    # the range being built and the second click would start over
+    if echo_to_score:
+      self._sync_score_selection()
     if self.result is not None and self.result.measures:
       span = self.result.range_for_measures(self.first_spin.value(), self.last_spin.value())
       if span:
@@ -807,6 +811,7 @@ class MainWindow(QMainWindow):
       return
     numbers = [it.data(Qt.UserRole + 1) for it in items]
     index = items[0].data(Qt.UserRole)
+    self.score_view.set_selection(None, None, external=True)
     self.first_spin.setValue(min(numbers))
     self.wrong = None
     self.last_spin.setValue(max(numbers))
@@ -976,20 +981,44 @@ class MainWindow(QMainWindow):
     self.zoom_label.setText('%d%%' % round(100 * self.score_view.zoom()))
 
   def _on_score_measure_clicked(self, measure: int) -> None:
-    self.first_spin.setValue(measure)
-    self.last_spin.setValue(measure)
+    """A single bar was asked for: the measure list, or a clipped click."""
+    self._set_range(measure, measure)
     self.status.showMessage('bar %d selected — press Play range to hear it' % measure)
+
+  def _on_score_range_selected(self, first: int, last: int) -> None:
+    """Bars were clicked on the score: a second click extends the range to it."""
+    self._set_range(first, last)
+    low, high = min(first, last), max(first, last)
+    if low == high:
+      self.status.showMessage('bar %d selected — click another bar to extend'
+                              % low)
+    else:
+      self.status.showMessage('bars %d-%d selected' % (low, high))
+
+  def _set_range(self, first: int, last: int) -> None:
+    """Move the spin boxes without letting each one re-drive the score view."""
+    for spin, value in ((self.first_spin, first), (self.last_spin, last)):
+      spin.blockSignals(True)
+      spin.setValue(value)
+      spin.blockSignals(False)
+    self._on_range_changed(echo_to_score=False)
+    self.score_view.set_selection(first, last, external=False)
 
   def _on_score_measure_activated(self, measure: int) -> None:
     self._on_score_measure_clicked(measure)
     self.play_range()
 
-  def _sync_score_selection(self) -> None:
-    """Mirror the current range onto the score page."""
+  def _sync_score_selection(self, external: bool = False) -> None:
+    """Mirror the current range onto the score page.
+
+    `external=True` when the range came from somewhere other than clicking the score
+    (the measure list, a newly loaded piece), which also ends a range mid-selection.
+    """
     if self.result is None or not self.result.measures:
-      self.score_view.set_selection(None, None)
+      self.score_view.set_selection(None, None, external=external)
       return
-    self.score_view.set_selection(self.first_spin.value(), self.last_spin.value())
+    self.score_view.set_selection(self.first_spin.value(), self.last_spin.value(),
+                                  external=external)
 
   def show_measure_in_score(self, measure: int) -> None:
     if self.score_view.render is not None:

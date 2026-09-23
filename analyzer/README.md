@@ -106,8 +106,11 @@ Aligning again asks first, since it replaces those corrections.
 ## The score view (M4)
 
 The **Score** tab shows the engraved score, and **every bar is clickable**: click a
-bar to select it, double-click to hear it, `←`/`→` to step bar by bar, Ctrl+wheel or
-`+`/`−` to zoom, and *follow playback* to keep the page under the music as it plays.
+bar, then click another to select everything between them (a third click starts
+again, Shift+click always extends); double-click plays one bar, `←`/`→` step bar by
+bar, Ctrl+wheel or `+`/`−` zoom, and *follow playback* keeps the page under the music
+as it plays. The tab has its own **▶ Play range** and **■**, so selecting bars and
+hearing them does not need a tab change.
 
 The bars come from the **authoritative MusicXML**, not from your PDF:
 
