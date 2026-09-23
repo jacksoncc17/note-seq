@@ -264,6 +264,21 @@ class MainWindow(QMainWindow):
     self.rerender_btn.clicked.connect(lambda: self.render_score(force=True))
     bar.addWidget(self.rerender_btn)
 
+    self.mask_label = QLabel('')
+    self.mask_label.setStyleSheet('color: #e0a020;')
+    self.mask_label.setVisible(False)
+    bar.addWidget(self.mask_label)
+
+    bar.addSpacing(12)
+    self.score_play_btn = QPushButton('▶ Play range')
+    self.score_play_btn.clicked.connect(self.play_range)
+    bar.addWidget(self.score_play_btn)
+
+    self.score_stop_btn = QPushButton('■')
+    self.score_stop_btn.setFixedWidth(40)
+    self.score_stop_btn.clicked.connect(lambda: self.player.stop())
+    bar.addWidget(self.score_stop_btn)
+
     self.score_status = QLabel('')
     bar.addWidget(self.score_status, 1)
     layout.addLayout(bar)
@@ -420,6 +435,10 @@ class MainWindow(QMainWindow):
     self.waveform.set_ticks([], [])
     self.waveform.set_selection(None, None)
     self.score_view.set_render(None)
+    self.score_view.set_mask_mode(False)
+    self.score_view.set_masked([])
+    self._card_dialog = None
+    self._set_mask_indicator(False)
     self.score_status.setText('')
     self.map_label.setText('no map yet')
     self.save_btn.setEnabled(False)
@@ -867,17 +886,41 @@ class MainWindow(QMainWindow):
     self.score_view.set_mask_mode(True)
     self.score_view.set_masked(dialog.masked_keys())
     dialog.finished.connect(lambda _code: self._close_card_dialog())
+    dialog.destroyed.connect(lambda *_a: self._close_card_dialog())
+    self._set_mask_indicator(True)
     dialog.show()
 
   def _close_card_dialog(self) -> None:
     self._card_dialog = None
     self.score_view.set_mask_mode(False)
     self.score_view.set_masked([])
+    self._set_mask_indicator(False)
+
+  def _set_mask_indicator(self, on: bool) -> None:
+    """Say which mode the score is in, because it changes what a click does."""
+    self.mask_label.setText('masking notes — close the card dialog to select bars'
+                            if on else '')
+    self.mask_label.setVisible(bool(on))
 
   def _on_glyph_clicked(self, key: str) -> None:
-    """A note was tapped while the card dialog is open."""
+    """A note was tapped on the score.
+
+    If there is no card dialog open, the click was not meant as a tap: mask mode is
+    left over from one that has gone, and swallowing clicks silently would make bar
+    selection -- and playing that range -- look broken. Falling back to selecting the
+    bar is what a click would have done anyway.
+    """
     dialog = getattr(self, '_card_dialog', None)
     if dialog is None:
+      self.score_view.set_mask_mode(False)
+      self.score_view.set_masked([])
+      self._set_mask_indicator(False)
+      try:
+        self._on_score_measure_clicked(int(str(key).split(':')[0]))
+      except (TypeError, ValueError):
+        pass
+      self.status.showMessage('masking was still on from a closed dialog; '
+                              'bar selection is back')
       return
     dialog.toggle_note(key)
     self.score_view.set_masked(dialog.masked_keys())
@@ -970,6 +1013,8 @@ class MainWindow(QMainWindow):
     for widget in (self.rerender_btn, self.page_prev, self.page_next,
                    self.zoom_in_btn, self.zoom_out_btn, self.fit_btn, self.cards_btn):
       widget.setEnabled(has_score)
+    self.score_play_btn.setEnabled(bool(self.result and self.result.measures))
+    self.score_stop_btn.setEnabled(bool(self.result and self.result.measures))
 
   def open_pdf(self) -> None:
     if self.piece and self.piece.pdf:

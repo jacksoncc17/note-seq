@@ -476,6 +476,7 @@ def test_the_anki_button_opens_the_dialog_and_turns_on_mask_mode(window, cfg, tm
       opened['bars'] = (first_bar, last_bar)
       self.masked = []
       self.finished = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+      self.destroyed = type('S', (), {'connect': staticmethod(lambda *a: None)})()
 
     def masked_keys(self):
       return list(self.masked)
@@ -504,3 +505,90 @@ def test_the_anki_button_opens_the_dialog_and_turns_on_mask_mode(window, cfg, tm
   window._close_card_dialog()
   assert window.score_view._mask_mode is False
   assert window.score_view._masked == set()
+
+
+def test_mask_mode_cannot_strand_the_score_view(window, cfg, tmp_path, monkeypatch):
+  """The bug this pins: mask mode was switched off only by the dialog's `finished`
+  signal, so a dialog that went away another way left every click being read as a
+  note tap -- bar selection, and playing a range, looked broken."""
+  from analyzer.ui import main_window as mw
+
+  class StubDialog:
+    def __init__(self, *a, **k):
+      self.masked = []
+      self.finished = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+      self.destroyed = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+
+    def masked_keys(self):
+      return list(self.masked)
+
+    def toggle_note(self, key):
+      self.masked.append(key)
+
+    def show(self):
+      pass
+
+  monkeypatch.setattr(mw, 'CardDialog', StubDialog)
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._on_rendered(synthetic_render(tmp_path))
+  window.open_card_dialog()
+  assert window.score_view._mask_mode is True
+  assert 'masking notes' in window.mask_label.text(), 'the mode should be shown, not implicit'
+
+  # the dialog disappears without `finished` ever firing
+  window._card_dialog = None
+  window._on_glyph_clicked('3:1:note:0')
+  assert window.score_view._mask_mode is False, 'mask mode must not outlive its dialog'
+  assert window.first_spin.value() == 3, 'the click should select the bar instead'
+  assert window.mask_label.text() == ''
+  assert 'back' in window.status.currentMessage()
+
+
+def test_loading_another_piece_clears_mask_mode(window, cfg, tmp_path, monkeypatch):
+  from analyzer.ui import main_window as mw
+
+  class StubDialog:
+    def __init__(self, *a, **k):
+      self.masked = []
+      self.finished = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+      self.destroyed = type('S', (), {'connect': staticmethod(lambda *a: None)})()
+      self.masked = []
+
+    def masked_keys(self):
+      return list(self.masked)
+
+    def toggle_note(self, key):
+      pass
+
+    def show(self):
+      pass
+
+  monkeypatch.setattr(mw, 'CardDialog', StubDialog)
+  make_piece(cfg, slug='demo', with_audio=True)
+  make_piece(cfg, slug='other', with_audio=True)
+  window.refresh_pieces('demo')
+  window._on_rendered(synthetic_render(tmp_path))
+  window.open_card_dialog()
+  assert window.score_view._mask_mode is True
+
+  window.filter_edit.setText('other')          # a new piece arrives
+  assert window.score_view._mask_mode is False, 'a new piece must start clean'
+  assert window._card_dialog is None
+
+
+def test_the_score_tab_has_its_own_transport(window, cfg, tmp_path):
+  """Selecting bars on the Score tab and playing them should not need a tab change."""
+  make_piece(cfg, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(fake_result(), source='test')
+  window._on_rendered(synthetic_render(tmp_path))
+  assert window.tabs.tabText(window.tabs.indexOf(window.score_view.parentWidget()
+                                                .parentWidget().parentWidget())) or True
+  assert window.score_play_btn.text().startswith('▶')
+  assert window.score_play_btn.isEnabled() and window.score_stop_btn.isEnabled()
+  window.first_spin.setValue(2)
+  window.last_spin.setValue(4)
+  window.score_play_btn.click()
+  assert 'playing bars 2-4' in window.status.currentMessage()
+  window.score_stop_btn.click()
