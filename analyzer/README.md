@@ -238,12 +238,38 @@ In the desktop app, the **Score** tab has an **Anki cards…** button. It opens 
 bars you have selected and builds a card for them:
 
 ```
-front   the passage with chosen notes hidden
+front   the passage with chosen notes hidden,
+        then the question — written, and spoken
 back    the same passage, plus what the bank already knows:
         chords  C → E7 → Am → E      rhythm  Q E E E E, Q Q Q
         contour down, up             section B      bars 40-43
         and the recording of exactly those bars
 ```
+
+**A question can be asked on the front, out loud.** The *Question* field is prefilled
+with whatever the question bank already asks about those bars — "What is the chord in
+measure 53?" comes from the bank's own 1080 questions, so the wording is already
+written to be read aloud — and *suggest* re-asks for the current bars if you change
+the range. Tick **speak it** and a clip of the question is attached to the front, so
+the card can be answered with your eyes on the keys rather than the screen. The
+question is on **both sides**: on the back it sits under the picture (the score stays
+where it was on the front, so nothing jumps on reveal), which matters when the card is
+used with the sound off.
+
+A prefilled suggestion only has to *name every bar of the passage*. The bank's
+questions are all about a single bar, so for bars 40-43 a single-bar question is
+refused rather than silently asking about bar 40 and ignoring the rest — bar 53 alone
+gets its chord question, and the 53-68 passage gets the bank's section question, which
+does cover all of it. Otherwise the field falls back to "Play bars 40 to 43 from
+memory."
+
+Speech goes to a **Kokoro server on the LAN** (the one the tutor already uses,
+`ANALYZER_TTS_BASE_URL`, default `http://192.168.2.174:8880/v1`, voice
+`ANALYZER_TTS_VOICE`, default `af_heart`). **If it is not running the card is still
+built**, without the clip and with a warning in the export result — losing a card
+because a speech server is down would be the wrong trade. The clip is requested with
+`stream: false` on purpose: Kokoro's streamed WAV header claims 2147483647 frames,
+which some players cannot get past.
 
 **Fingering** can be added too, in the same dialog: tick *tap notes to set the
 fingering*, choose a digit (1-5) and tap the notes, or step through them with `◀ ▶`
@@ -302,7 +328,9 @@ Masks are stored as positions ("bar 53, left hand, 5th notehead"), never as Vero
 element ids, because those are regenerated on every engraving; verified that all 15
 glyphs of bar 53 land on the same pixels after a fresh engraving. Card ids are
 stable too, so **re-exporting a deck updates your cards rather than duplicating
-them**.
+them**. A card's identity is its passage and its masks — *not* its question — so
+rewording a question updates the card you already have, with its review history,
+instead of leaving a second copy behind in Anki.
 
 ## What the map knows about itself
 
@@ -374,7 +402,8 @@ analyzer/
       card_dialog.py        author cards: rules, taps, preview, export
       player.py             sample-accurate playback of a bar range
       workers.py            download, alignment and engraving on background threads
-    cards.py                Anki cards: masks, crops, audio, decks
+    cards.py                Anki cards: masks, crops, audio, questions, decks
+    speech.py               Kokoro text-to-speech for a card's question
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -383,8 +412,8 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 282 tests (one opt-in network test, one skipped
-without an audio device).
+**M1-M7 are implemented**, with 316 tests, 314 of which run by default (two are
+opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
 * **M4** the engraved score view · **M5a** the phone client
@@ -398,7 +427,9 @@ pages, 204 measures clickable); the phone client's JavaScript executed in headle
 Chrome; and, for the cards, the whole flow on the real Chopin — the dialog opening
 on bars 40-43, the left-hand rule hiding 22 notes, a tapped note making it 23, a
 169 KB `.apkg` saved, and that package downloaded over HTTP with its images, audio
-and text intact.
+and text intact. The spoken question was built against the running Kokoro server and
+then read back out of the package: a 19,821-byte MP3 (`ID3` header) in `media`,
+`[sound:question-…]` on the front after the picture.
 
 ## Troubleshooting
 

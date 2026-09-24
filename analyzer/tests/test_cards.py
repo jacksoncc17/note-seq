@@ -530,3 +530,86 @@ def test_a_card_with_fingering_is_self_describing(real):
   other = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53)
   assert cards.fingerings_in(other, piece) == {}, 'nothing invented for a card without'
   assert spec.signature() != other.signature(), 'fingering is part of the card identity'
+
+
+# ---------------------------------------------------------------------------
+# the question, written and spoken
+# ---------------------------------------------------------------------------
+
+@needs_real
+def test_a_suggested_question_comes_from_the_bank(real):
+  cfg, piece, render = real
+  question = cards.suggest_question(piece, 53, 53)
+  assert question and question.endswith('?')
+  assert '53' in question, question
+  # the bank only asks about one bar at a time, so a range must not borrow a
+  # single-bar question: that would ask about bar 40 and ignore bars 41 to 43
+  ranged = cards.suggest_question(piece, 40, 43)
+  assert ranged == 'Play bars 40 to 43 from memory.', ranged
+  assert cards.suggest_question(piece, 41, 41).endswith('measure 41?'), 'single bars still do'
+
+
+@needs_real
+def test_the_question_and_its_clip_go_on_the_front(real, tmp_path, monkeypatch):
+  """With speech stubbed out, so the test says what the card contains rather than
+  whether a server happens to be running."""
+  import sqlite3
+  import zipfile
+  from analyzer import speech
+  cfg, piece, render = real
+
+  def fake_speak(text, path, **kw):
+    path = pathlib.Path(str(path) + '.mp3')
+    path.write_bytes(b'ID3' + text.encode('utf-8'))
+    return path, ''
+
+  monkeypatch.setattr(speech, 'speak_to_file', fake_speak)
+
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                        question='What is the chord in bar 53?')
+  deck = cards.DeckSpec(slug=SLUG, name='spoken', cards=[spec])
+  package = cards.build_deck(cfg, piece, deck, workspace=tmp_path)
+
+  with zipfile.ZipFile(package) as z:
+    db_path = tmp_path / 'spoken.anki2'
+    db_path.write_bytes(z.read('collection.anki2'))
+    media = json.loads(z.read('media'))
+  db = sqlite3.connect(str(db_path))
+  front, back = db.execute('select flds from notes').fetchone()[0].split('\x1f')
+  db.close()
+
+  assert 'What is the chord in bar 53?' in front, 'the question belongs on the front'
+  assert '[sound:question-' in front, 'and the clip with it'
+  assert front.index('<img') < front.index('question">'), 'picture first, then the question'
+  assert 'What is the chord in bar 53?' in back, 'the wording comes back with the answer'
+  assert back.index('<img') < back.index('question">'), \
+      'and the score stays where it was on the front, so it does not jump on reveal'
+  assert any(name.startswith('question-') for name in media.values())
+
+
+@needs_real
+def test_a_speech_failure_leaves_a_usable_card(real, tmp_path, monkeypatch):
+  cfg, piece, render = real
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                        question='Say this out loud?')
+  monkeypatch.setattr('analyzer.speech.speak_to_file',
+                      lambda text, path, **kw: (None, 'no speech server at http://x'))
+  built = cards.build_card(cfg, piece, render, spec, tmp_path)
+  assert built.question_audio is None
+  assert built.warnings and 'could not speak the question' in built.warnings[0]
+  assert built.fields, 'the rest of the card is still built'
+
+
+@needs_real
+def test_rewording_a_question_updates_the_card_rather_than_adding_one(real):
+  """The question is not part of a card's identity: editing the wording should update
+  the card you have, not leave a second one behind in Anki."""
+  a = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                     question='What is the chord here?')
+  b = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                     question='Name the chord in this bar.')
+  assert a.signature() == b.signature()
+  assert cards._guid_for(a) == cards._guid_for(b)
+  c = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['left_hand'],
+                     question='What is the chord here?')
+  assert c.signature() != a.signature(), 'the masks still identify it'

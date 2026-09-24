@@ -268,3 +268,50 @@ def test_fingerings_are_kept_with_the_piece(qapp, real, silent, tmp_path):
   second = CardDialog(cfg, again, render, None, first_bar=53, last_bar=53)
   assert cards.fingerings_in(second.spec(), again), \
       'a new card for the same bars should find the fingerings already there'
+
+
+@needs_real
+def test_the_question_is_prefilled_from_the_bank_and_travels_with_the_card(qapp, real):
+  """The bank already asks about bar 53, so the field starts filled in -- and the
+  card carries the wording, plus whether to speak it."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  assert dialog.question_edit.text() == cards.suggest_question(piece, 53, 53)
+  assert 'measure 53' in dialog.question_edit.text()
+  assert dialog.speak_check.isChecked(), 'speaking is the point of the field'
+
+  spec = dialog.spec()
+  assert spec.question == dialog.question_edit.text().strip()
+  assert spec.speak_question is True and spec.voice
+
+  dialog.speak_check.setChecked(False)
+  assert dialog.spec().speak_question is False
+  assert dialog.spec().question, 'the wording stays on the card either way'
+
+  dialog.question_edit.setText('Name the chord in bar 53.')
+  assert dialog.spec().question == 'Name the chord in bar 53.'
+
+
+@needs_real
+def test_a_written_question_alone_is_enough_to_export(qapp, real):
+  """A card with nothing hidden but a question of your own is still a card -- while
+  the suggested question on its own is not work, so the button stays off."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  assert not dialog.export_button.isEnabled(), 'no work, nothing to export'
+  dialog.suggest_question()
+  assert not dialog.export_button.isEnabled(), 'the default is not the user\'s own work'
+  dialog.question_edit.setText('Name the chord you hear in bar 53.')
+  assert dialog.export_button.isEnabled(), 'a text-only question card is still a card'
+  dialog.question_edit.clear()
+  assert not dialog.export_button.isEnabled(), 'cleared again means nothing to make'
+
+
+@needs_real
+def test_the_summary_says_the_question_will_be_spoken(qapp, real):
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.rule_boxes['everything'].setChecked(True)
+  assert 'spoken with' in dialog.summary.text()
+  dialog.speak_check.setChecked(False)
+  assert 'spoken with' not in dialog.summary.text()

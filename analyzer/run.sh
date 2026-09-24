@@ -14,6 +14,9 @@
 #   ANALYZER_CACHE=/tmp/a   where recordings are cached
 #   ANALYZER_OUTPUT=/tmp/o  where measure maps are written
 #   ANALYZER_PORT=8090      port for ./run.sh serve
+#   ANALYZER_BACKEND=filesystem  which store implementation to use
+#   ANALYZER_TTS_BASE_URL=http://192.168.2.174:8880/v1   speech for card questions
+#   ANALYZER_TTS_VOICE=af_heart                          voice for those questions
 set -euo pipefail
 cd "$(dirname "$0")"
 

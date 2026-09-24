@@ -52,6 +52,7 @@ class CardDialog(QDialog):
     layout = QHBoxLayout(self)
     layout.addWidget(self._left_column(first_bar, last_bar), 0)
     layout.addWidget(self._right_column(), 1)
+    self.question_edit.setText(self._suggested_question())
     self._preview()
 
   # ------------------------------------------------------------------ widgets
@@ -98,6 +99,30 @@ class CardDialog(QDialog):
     clear.clicked.connect(self._clear_tapped)
     tapped_layout.addWidget(clear)
     box.addWidget(tapped)
+
+    question = QGroupBox('Question')
+    question_layout = QVBoxLayout(question)
+    self.question_edit = QLineEdit()
+    self.question_edit.setPlaceholderText('asked on the front, e.g. what is the chord in bar 53?')
+    self.question_edit.textChanged.connect(self._preview)
+    question_layout.addWidget(self.question_edit)
+
+    spoken = QHBoxLayout()
+    self.speak_check = QCheckBox('speak it')
+    self.speak_check.setChecked(True)
+    self.speak_check.stateChanged.connect(self._preview)
+    spoken.addWidget(self.speak_check)
+    spoken.addWidget(QLabel('voice'))
+    self.voice_edit = QLineEdit(getattr(self.cfg, 'tts_voice', '') or 'af_heart')
+    self.voice_edit.setMaximumWidth(120)
+    spoken.addWidget(self.voice_edit)
+    suggest = QPushButton('suggest')
+    suggest.setToolTip('take a question about these bars from the question bank')
+    suggest.clicked.connect(self.suggest_question)
+    spoken.addWidget(suggest)
+    spoken.addStretch(1)
+    question_layout.addLayout(spoken)
+    box.addWidget(question)
 
     fingering = QGroupBox('Fingering')
     fingering_layout = QVBoxLayout(fingering)
@@ -216,6 +241,9 @@ class CardDialog(QDialog):
         last_bar=self.last_spin.value(), title=self.title_edit.text().strip(),
         masks=list(self.masked), rules=rules, tags=tags,
         fingering={k: v for k, v in self.fingering.items() if v},
+        question=self.question_edit.text().strip(),
+        speak_question=self.speak_check.isChecked(),
+        voice=self.voice_edit.text().strip(),
         audio_side=self.audio_side.text().strip() if self.audio_check.isChecked() else 'none')
 
   def _range_changed(self) -> None:
@@ -229,6 +257,23 @@ class CardDialog(QDialog):
     if self.fingering_check.isChecked() and self.tap_check.isChecked():
       self.tap_check.setChecked(False)
     self._pointed_changed()
+
+  def _suggested_question(self) -> str:
+    """What the question field starts as, and what "unchanged" means."""
+    return cards.suggest_question(self.piece, self.first_spin.value(), self.last_spin.value())
+
+  def question_changed(self) -> bool:
+    """Whether the question is the user's own, rather than the offered default.
+
+    A card whose only content is the suggested question is the card the passage
+    would make anyway, so it does not by itself count as work; an empty field is
+    no question at all.
+    """
+    text = self.question_edit.text().strip()
+    return bool(text) and text != self._suggested_question().strip()
+
+  def suggest_question(self) -> None:
+    self.question_edit.setText(self._suggested_question())
 
   def _digit_chosen(self, digit: str) -> None:
     self.digit = digit
@@ -370,12 +415,15 @@ class CardDialog(QDialog):
     self.fields_label.setText('back of the card: ' + ' · '.join(
         '%s: %s' % (key, value) for key, value in fields.items() if value))
     hidden_notes = [k for k in hidden if ':note:' in k]
+    spoken = ''
+    if spec.question.strip() and spec.speak_question:
+      spoken = ' · spoken with %s' % (spec.voice or getattr(self.cfg, 'tts_voice', 'the default voice'))
     self.summary.setText(
-        'bars %d-%d · %d notes · hiding %d (%s) · fingerings %d'
+        'bars %d-%d · %d notes · hiding %d (%s) · fingerings %d%s'
         % (spec.bar_range[0], spec.bar_range[1], len(self._glyphs), len(hidden),
-           ', '.join(sorted(spec.rules)) or 'none by rule', len(self.fingering)))
+           ', '.join(sorted(spec.rules)) or 'none by rule', len(self.fingering), spoken))
     self._pointed_changed()
-    has_work = bool(hidden) or bool(self.fingering)
+    has_work = bool(hidden) or bool(self.fingering) or self.question_changed()
     self.export_button.setEnabled(has_work)
     self.save_button.setEnabled(has_work)
 
@@ -414,6 +462,9 @@ class CardDialog(QDialog):
       return
     pathlib.Path(target).write_bytes(package.read_bytes())
     self.exported.append(pathlib.Path(target))
+    for note in package.parent.glob('*.warnings.txt'):
+      QMessageBox.information(self, 'Deck exported with warnings',
+                              note.read_text(encoding='utf-8')[:600])
     QMessageBox.information(
         self, 'Deck exported',
         'Wrote %s.\n\nImport it into AnkiDroid (or Anki desktop): Anki schedules\n'

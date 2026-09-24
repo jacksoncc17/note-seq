@@ -46,6 +46,11 @@ class AnalyzerConfig:
   target_sample_rate: int = 22050
   target_channels: int = 1
 
+  # The speech server that reads a card's question aloud. The same self-hosted
+  # OpenAI-compatible endpoint the tutor uses; a card is still built when it is down.
+  tts_base_url: str = os.environ.get('ANALYZER_TTS_BASE_URL', 'http://192.168.2.174:8880/v1')
+  tts_voice: str = os.environ.get('ANALYZER_TTS_VOICE', 'af_heart')
+
   def ensure_dirs(self) -> None:
     for d in (self.audio_dir, self.sync_dir, self.render_dir, self.library_dir,
               self.decks_dir):

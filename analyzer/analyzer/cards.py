@@ -79,6 +79,9 @@ class CardSpec:
   masks: List[str] = field(default_factory=list)          # explicit glyph keys
   rules: List[str] = field(default_factory=list)          # rule names
   fingering: Dict[str, str] = field(default_factory=dict)  # glyph key -> digit
+  question: str = ''                        # shown, and optionally spoken, on the front
+  speak_question: bool = True               # attach a clip of it to the front
+  voice: str = ''                           # empty means the configured default
   fields: Dict[str, str] = field(default_factory=dict)     # curated back text
   tags: List[str] = field(default_factory=list)
   audio_side: str = 'back'                                 # back | front | both | none
@@ -93,7 +96,13 @@ class CardSpec:
 
   def signature(self) -> str:
     """A stable identity for the card: the same choices give the same signature,
-    so re-exporting updates cards instead of duplicating them."""
+    so re-exporting updates cards instead of duplicating them.
+
+    The question text is deliberately *not* part of it. Rewording a question should
+    update the card you already have, not add a second one with the new wording; the
+    things that change what is asked and answered -- the bars, the masks, the rules,
+    the fingering -- are what identify it.
+    """
     payload = json.dumps({
         'slug': self.slug, 'range': self.bar_range,
         'masks': sorted(self.masks), 'rules': sorted(self.rules),
@@ -756,6 +765,50 @@ def memorisation_fields(piece, first: int, last: int) -> Dict[str, str]:
   return fields
 
 
+def suggest_question(piece, first: int, last: int) -> str:
+  """A starting question for a passage, preferring the bank's own wording.
+
+  The bank already holds prompts written to be asked and to be spoken ("What is the
+  chord in measure 53?"), so one that describes the passage is a better default than
+  anything composed here. A prompt only qualifies if it names *every* bar of the
+  passage: the bank's questions are all about one bar, so borrowing one for a
+  four-bar passage would ask about bar 40 and silently ignore bars 41 to 43. It
+  falls back to a plain instruction when nothing matches.
+  """
+  low, high = min(first, last), max(first, last)
+  path = _bank_path(piece) if piece is not None else None
+  if path is not None:
+    try:
+      data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+      data = {}
+    for entry in data.get('questions') or []:
+      prompt = str(entry.get('prompt') or '').strip()
+      if prompt and _names_bars(prompt, low, high):
+        return prompt
+  if low == high:
+    return 'Play bar %d from memory.' % low
+  return 'Play bars %d to %d from memory.' % (low, high)
+
+
+def _names_bars(prompt: str, low: int, high: int) -> bool:
+  """Whether a prompt is about exactly the passage's bars, no more and no less.
+
+  Both ends of a written range count, so "measures 53-68" names 53 *and* 68 and is
+  therefore not a question about bar 53 alone.
+  """
+  named = set()
+  for start, end in re.findall(
+      r'\b(?:measures?|bars?)\s+(\d+)(?:\s*(?:-|--|–|—|to|through|and)\s*(\d+))?',
+      prompt, re.I):
+    named.add(int(start))
+    if end:
+      named.add(int(end))
+  if low == high:
+    return named == {low}
+  return low in named and high in named
+
+
 def _bank_measures(piece, low: int, high: int) -> List[Dict[str, object]]:
   """Per-bar facts for a range, from whichever bank the piece came from."""
   path = _bank_path(piece)
@@ -830,6 +883,8 @@ class BuiltCard:
   audio: Optional[pathlib.Path]
   fields: Dict[str, str]
   guid: str
+  question_audio: Optional[pathlib.Path] = None
+  warnings: List[str] = field(default_factory=list)
 
   def answer_html(self) -> str:
     rows = ''.join('<div><b>%s</b>: %s</div>' % (key.replace('_', ' '), value)
@@ -888,6 +943,19 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
       audio_path = workspace / ('passage-%s%s' % (spec.signature(), suffix))
       audio_path.write_bytes(data)
 
+  question_audio = None
+  warnings: List[str] = []
+  if spec.question.strip() and spec.speak_question:
+    from . import speech
+    question_audio, reason = speech.speak_to_file(
+        spec.question.strip(),
+        workspace / ('question-%s' % spec.signature()),
+        base_url=getattr(cfg, 'tts_base_url', None),
+        voice=spec.voice or getattr(cfg, 'tts_voice', None))
+    if question_audio is None:
+      # a card without its clip is still worth having, so this is a warning
+      warnings.append('could not speak the question: %s' % reason)
+
   fields = dict(memorisation_fields(piece, low, high))
   fields.update({k: v for k, v in (spec.fields or {}).items() if v})
   if spec.title:
@@ -903,7 +971,8 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
 
   guid = _guid_for(spec)
   return BuiltCard(spec=spec, front_png=front_path, back_png=back_path,
-                   audio=audio_path, fields=fields, guid=guid)
+                   audio=audio_path, fields=fields, guid=guid,
+                   question_audio=question_audio, warnings=warnings)
 
 
 def _stored_map(cfg: AnalyzerConfig, piece):
@@ -949,6 +1018,11 @@ def _guid_for(spec: CardSpec) -> str:
 # building the deck
 # ---------------------------------------------------------------------------
 
+def _escape(text: str) -> str:
+  """Escape the little HTML a question might contain, so Anki renders it literally."""
+  return (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+
+
 def _model():
   import genanki
   return genanki.Model(
@@ -968,6 +1042,7 @@ def _model():
       .prompt img, .answer img { max-width: 100%; }
       .answer { text-align: left; font-size: 15px; line-height: 1.5; }
       .answer b { color: #1d4e8f; }
+      .question { font-size: 17px; font-weight: 600; margin: 6px 0 2px; }
       ''',
       sort_field_index=0)
 
@@ -993,6 +1068,7 @@ def build_deck(cfg: AnalyzerConfig, piece, deck: DeckSpec,
 
   cards: List[BuiltCard] = []
   problems: List[str] = []
+  # a spoken question can fail while the card is still worth building
   for spec in deck.cards:
     try:
       cards.append(build_card(cfg, piece, render, spec, scratch))
@@ -1000,12 +1076,20 @@ def build_deck(cfg: AnalyzerConfig, piece, deck: DeckSpec,
       problems.append('bars %d-%d: %s' % (spec.bar_range[0], spec.bar_range[1], e))
   if not cards:
     raise CardError('no card could be built (%s)' % '; '.join(problems[:3]))
+  for card in cards:
+    problems.extend('bars %d-%d: %s' % (card.spec.bar_range[0], card.spec.bar_range[1], w)
+                    for w in card.warnings)
 
   anki_deck = genanki.Deck(abs(hash(deck.slug)) % (10 ** 9),
                            '%s::%s' % (DECK_PREFIX, deck.name or piece.display_name))
   media: List[str] = []
   for card in cards:
+    question = (card.spec.question or '').strip()
     front = '<img src="%s">' % card.front_png.name
+    if question:
+      front += '<div class="question">%s</div>' % _escape(question)
+      if card.question_audio is not None:
+        front += '[sound:%s]' % card.question_audio.name
     audio = ''
     if card.audio is not None:
       tag = '[sound:%s]' % card.audio.name
@@ -1015,6 +1099,11 @@ def build_deck(cfg: AnalyzerConfig, piece, deck: DeckSpec,
       elif card.spec.audio_side == 'both':
         front = front + '<br>' + tag
     back = '<img src="%s">' % card.back_png.name
+    if (card.spec.question or '').strip():
+      # the question is not repeated by the template any more, so it comes back with
+      # the answer -- useful when the card is used with the sound off. Below the
+      # picture, so the score stays where it was on the front and does not jump.
+      back += '<div class="question">%s</div>' % _escape(card.spec.question.strip())
     if card.audio is not None and card.spec.audio_side in ('back', 'both'):
       back += '<br>' + audio
     back += card.answer_html()
@@ -1025,6 +1114,8 @@ def build_deck(cfg: AnalyzerConfig, piece, deck: DeckSpec,
     media.append(str(card.back_png))
     if card.audio is not None:
       media.append(str(card.audio))
+    if card.question_audio is not None:
+      media.append(str(card.question_audio))
 
   package = genanki.Package(anki_deck)
   package.media_files = media
