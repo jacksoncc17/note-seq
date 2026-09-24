@@ -81,6 +81,7 @@ class CardSpec:
   fingering: Dict[str, str] = field(default_factory=dict)  # glyph key -> digit
   question: str = ''                        # shown, and optionally spoken, on the front
   speak_question: bool = True               # attach a clip of it to the front
+  repeat_question: bool = True              # say the question again on the back
   voice: str = ''                           # empty means the configured default
   fields: Dict[str, str] = field(default_factory=dict)     # curated back text
   tags: List[str] = field(default_factory=list)
@@ -1099,7 +1100,7 @@ def build_deck(cfg: AnalyzerConfig, piece, deck: DeckSpec,
       elif card.spec.audio_side == 'both':
         front = front + '<br>' + tag
     back = '<img src="%s">' % card.back_png.name
-    if (card.spec.question or '').strip():
+    if (card.spec.question or '').strip() and card.spec.repeat_question:
       # the question is not repeated by the template any more, so it comes back with
       # the answer -- useful when the card is used with the sound off. Below the
       # picture, so the score stays where it was on the front and does not jump.

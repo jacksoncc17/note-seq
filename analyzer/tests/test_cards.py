@@ -613,3 +613,44 @@ def test_rewording_a_question_updates_the_card_rather_than_adding_one(real):
   c = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['left_hand'],
                      question='What is the chord here?')
   assert c.signature() != a.signature(), 'the masks still identify it'
+
+
+@needs_real
+def test_the_question_can_be_kept_off_the_back(real, tmp_path, monkeypatch):
+  """The repeat is a nicety, not a rule: some cards read better ending on the answer."""
+  import sqlite3
+  import zipfile
+  from analyzer import speech
+  cfg, piece, render = real
+  monkeypatch.setattr(speech, 'speak_to_file',
+                      lambda text, path, **kw: (None, 'no speech server'))
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                        question='What is the chord in bar 53?', repeat_question=False)
+  deck = cards.DeckSpec(slug=SLUG, name='no repeat', cards=[spec])
+  package = cards.build_deck(cfg, piece, deck, workspace=tmp_path)
+
+  with zipfile.ZipFile(package) as z:
+    db_path = tmp_path / 'r.anki2'
+    db_path.write_bytes(z.read('collection.anki2'))
+  db = sqlite3.connect(str(db_path))
+  front, back = db.execute('select flds from notes').fetchone()[0].split('\x1f')
+  db.close()
+  assert 'What is the chord in bar 53?' in front
+  assert 'question">' not in back, 'asked once, on the front'
+  assert '<img' in back and 'chords' in back, 'the answer is still there'
+  assert back.index('<img') == 0, 'and the score still starts where the front left it'
+
+
+@needs_real
+def test_how_the_back_is_written_is_not_part_of_the_card_identity(real):
+  """Turning the repeat off should re-write the card you have, not add another."""
+  asked = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                         question='What is the chord here?')
+  quiet = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, rules=['everything'],
+                         question='What is the chord here?', repeat_question=False)
+  assert asked.signature() == quiet.signature()
+  assert asked.to_dict()['repeat_question'] is True, 'and it survives a round trip'
+  assert cards.CardSpec.from_dict(quiet.to_dict()).repeat_question is False
+  older = {'slug': SLUG, 'first_bar': 53, 'last_bar': 53}
+  assert cards.CardSpec.from_dict(older).repeat_question is True, \
+      'cards written before the option existed still repeat, as they did'

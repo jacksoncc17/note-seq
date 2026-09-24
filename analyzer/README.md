@@ -252,9 +252,11 @@ measure 53?" comes from the bank's own 1080 questions, so the wording is already
 written to be read aloud — and *suggest* re-asks for the current bars if you change
 the range. Tick **speak it** and a clip of the question is attached to the front, so
 the card can be answered with your eyes on the keys rather than the screen. The
-question is on **both sides**: on the back it sits under the picture (the score stays
-where it was on the front, so nothing jumps on reveal), which matters when the card is
-used with the sound off.
+question is on **both sides** by default: on the back it sits under the picture (the
+score stays where it was on the front, so nothing jumps on reveal), which matters when
+the card is used with the sound off. Untick **say it again on the back** for a card
+that ends on the answer — how the back is written is not part of a card's identity
+either, so changing your mind rewrites the card you have.
 
 A prefilled suggestion only has to *name every bar of the passage*. The bank's
 questions are all about a single bar, so for bars 40-43 a single-bar question is
@@ -412,7 +414,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 316 tests, 314 of which run by default (two are
+**M1-M7 are implemented**, with 319 tests, 317 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map

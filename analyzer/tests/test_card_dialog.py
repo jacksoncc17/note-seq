@@ -315,3 +315,14 @@ def test_the_summary_says_the_question_will_be_spoken(qapp, real):
   assert 'spoken with' in dialog.summary.text()
   dialog.speak_check.setChecked(False)
   assert 'spoken with' not in dialog.summary.text()
+
+
+@needs_real
+def test_the_repeat_on_the_back_is_a_checkbox(qapp, real):
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  assert dialog.repeat_check.isChecked(), 'the question repeats unless told otherwise'
+  assert dialog.spec().repeat_question is True
+  dialog.repeat_check.setChecked(False)
+  assert dialog.spec().repeat_question is False
+  assert dialog.spec().question, 'the question itself is untouched'

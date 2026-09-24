@@ -122,6 +122,13 @@ class CardDialog(QDialog):
     spoken.addWidget(suggest)
     spoken.addStretch(1)
     question_layout.addLayout(spoken)
+
+    self.repeat_check = QCheckBox('say it again on the back')
+    self.repeat_check.setChecked(True)
+    self.repeat_check.setToolTip('the question comes back under the answer, for when '
+                                 'the card is used with the sound off')
+    self.repeat_check.stateChanged.connect(self._preview)
+    question_layout.addWidget(self.repeat_check)
     box.addWidget(question)
 
     fingering = QGroupBox('Fingering')
@@ -243,6 +250,7 @@ class CardDialog(QDialog):
         fingering={k: v for k, v in self.fingering.items() if v},
         question=self.question_edit.text().strip(),
         speak_question=self.speak_check.isChecked(),
+        repeat_question=self.repeat_check.isChecked(),
         voice=self.voice_edit.text().strip(),
         audio_side=self.audio_side.text().strip() if self.audio_check.isChecked() else 'none')
 
