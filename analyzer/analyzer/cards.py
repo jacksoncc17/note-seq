@@ -548,119 +548,140 @@ def fingerings_in(spec: CardSpec, piece=None) -> Dict[str, str]:
           if k.split(':')[0].isdigit() and low <= int(k.split(':')[0]) <= high}
 
 
+def passage_pages(render: ScoreRender, spec: CardSpec):
+  """Each page the passage touches, with the staff boxes to crop, in page order."""
+  low, high = spec.bar_range
+  strips = passage_strips(render, low, high)
+  if not strips:
+    raise CardError('bars %d-%d are not in the engraving' % (low, high))
+  by_page: Dict[int, List[Tuple[float, float, float, float]]] = {}
+  for page_number, rect in strips:
+    by_page.setdefault(page_number, []).append(rect)
+  pages = []
+  for page_number in sorted(by_page):
+    page = next((p for p in render.pages if p.number == page_number), None)
+    if page is not None:
+      pages.append((page_number, page, by_page[page_number]))
+  return pages
+
+
+def _rasterise_page(svg: str, scale: float, page_number: int):
+  """One page's SVG as pixels."""
+  import io
+
+  import cairosvg
+  from PIL import Image
+
+  try:
+    png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
+  except Exception as e:
+    raise CardError('could not draw page %d: %s' % (page_number, e))
+  with Image.open(io.BytesIO(png)) as drawn:
+    return flatten(drawn)
+
+
+def _ink_region(image, page, boxes) -> Tuple[float, float, float, float]:
+  """The rectangle the passage's ink occupies on that page, in this image's pixels."""
+  ratio = image.width / float(page.width)
+  grown = []
+  for x0, y0, x1, y1 in boxes:
+    height = max(1.0, y1 - y0)
+    grown.append(expand_to_ink(image, (x0 * ratio, y0 * ratio, x1 * ratio, y1 * ratio),
+                               budget=0.7 * height * ratio, bridge=0.12 * height * ratio))
+  return (min(b[0] for b in grown), min(b[1] for b in grown),
+          max(b[2] for b in grown), max(b[3] for b in grown))
+
+
 def passage_regions(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
                     scale: float = CARDS_SCALE,
                     xml_text: Optional[str] = None) -> Dict[int, Tuple[float, float, float, float]]:
   """The rectangle each page's passage occupies, measured from the ink.
 
-  Computed once and used for both sides of the card, so the front and the back show
-  exactly the same region -- measuring again after hiding notes would give the front
-  a different crop, and the two images would not line up.
+  `passage_images` measures this for itself as it draws; this is here for callers that
+  need to know where a glyph ended up in the picture, such as the tests.
   """
-  import io
-
-  import cairosvg
-  from PIL import Image
-
-  low, high = spec.bar_range
-  strips = passage_strips(render, low, high)
-  if not strips:
-    raise CardError('bars %d-%d are not in the engraving' % (low, high))
-  by_page: Dict[int, List[Tuple[int, Tuple[float, float, float, float]]]] = {}
-  for page_number, rect in strips:
-    by_page.setdefault(page_number, []).append((page_number, rect))
-
   regions: Dict[int, Tuple[float, float, float, float]] = {}
-  for page_number in sorted(by_page):
-    page = next((p for p in render.pages if p.number == page_number), None)
-    if page is None:
-      continue
+  for page_number, page, boxes in passage_pages(render, spec):
     try:
       svg, _ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale,
                                              xml_text=xml_text)
-      png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
     except Exception as e:
       raise CardError('could not engrave page %d for the card: %s' % (page_number, e))
-    with Image.open(io.BytesIO(png)) as drawn:
-      image = flatten(drawn)
-    ratio = image.width / float(page.width)
-    boxes = []
-    for _number, (x0, y0, x1, y1) in by_page[page_number]:
-      height = max(1.0, y1 - y0)
-      boxes.append(expand_to_ink(image, (x0 * ratio, y0 * ratio, x1 * ratio, y1 * ratio),
-                                 budget=0.7 * height * ratio, bridge=0.12 * height * ratio))
-    regions[page_number] = (min(b[0] for b in boxes), min(b[1] for b in boxes),
-                            max(b[2] for b in boxes), max(b[3] for b in boxes))
+    regions[page_number] = _ink_region(_rasterise_page(svg, scale, page_number), page, boxes)
   return regions
 
 
-def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
-                  hidden: Sequence[str], scale: float = CARDS_SCALE, hide: bool = True,
-                  regions: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
-                  xml_text: Optional[str] = None,
-                  hide_fingering: bool = False):
-  """One image of the passage, optionally with the chosen glyphs suppressed.
+def passage_images(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
+                   hidden: Sequence[str], scale: float = CARDS_SCALE,
+                   xml_text: Optional[str] = None, hide_fingering: bool = False):
+  """Both sides of one card, from a **single** engraving of each page.
 
-  Usage:
-    back  = passage_image(..., hide=False)
-    front = passage_image(..., hide=True, hidden=masked_keys(...))
+  Engraving is the expensive part of making a card -- about 300 ms a page here, against
+  about 530 ms to rasterise it -- and drawing the two sides separately engraved every
+  page twice, in the dialog on every keystroke. One engraving does for both, because
+  masking edits the SVG: the back is the page as engraved, and the front is the same
+  SVG with the masked elements and (when the card asks a fingering question) the
+  fingering numbers suppressed.
 
-  The page is engraved again at `scale` and the masked elements are hidden in the
-  SVG before it is rasterised, so a hidden notehead is genuinely not drawn -- no
-  patch beside it, and the staff lines stay clean. The crop rectangles come from the
-  cached render, so they are scaled from that render's page width to this one.
+  Both sides are cropped with the **same** rectangle, measured once from the untouched
+  side. Measuring after hiding notes would give the front a different crop -- slightly,
+  but the two pictures would no longer line up when the card is revealed.
+
+  Returns:
+    (front, back) as PIL images, the same size.
 
   Raises:
-    CardError: if the passage is not in the engraving, or a page cannot be made.
+    CardError: if the passage is not in the engraving, a page cannot be made, or the
+      masks match nothing at all in this engraving.
   """
-  import io
-
-  import cairosvg
-  from PIL import Image
-
   low, high = spec.bar_range
-  strips = passage_strips(render, low, high)
-  if not strips:
-    raise CardError('bars %d-%d are not in the engraving' % (low, high))
-
-  by_page: Dict[int, List[Tuple[int, Tuple[float, float, float, float]]]] = {}
-  for page_number, rect in strips:
-    by_page.setdefault(page_number, []).append((page_number, rect))
-
-  pieces = []
-  for page_number in sorted(by_page):
-    page = next((p for p in render.pages if p.number == page_number), None)
-    if page is None:
-      continue
+  masked_anything = False
+  fingered = bool(hide_fingering and fingerings_in(spec, piece))
+  fronts: List[object] = []
+  backs: List[object] = []
+  for page_number, page, boxes in passage_pages(render, spec):
     try:
       svg, ids = scoreview.page_svg_and_ids(cfg, piece.musicxml, page_number, scale=scale,
                                             xml_text=xml_text)
     except Exception as e:
       raise CardError('could not engrave page %d for the card: %s' % (page_number, e))
-    if hide and hidden:
-      wanted = [ids[key] for key in hidden if key in ids]
-      if not wanted:
-        raise CardError('the masks do not match this engraving (page %d)' % page_number)
-      svg = scoreview.hide_elements(svg, wanted)
-    if hide_fingering and fingerings_in(spec, piece):
-      # the front asks "what fingering would you use?" by not showing the answer
-      svg = scoreview.hide_classes(svg, ['fing'])
-    try:
-      png = cairosvg.svg2png(bytestring=svg.encode('utf-8'), scale=scale)
-    except Exception as e:
-      raise CardError('could not draw page %d: %s' % (page_number, e))
-    with Image.open(io.BytesIO(png)) as drawn:
-      image = flatten(drawn)
-    ratio = image.width / float(page.width)
-    if regions is not None and page_number in regions:
-      tight = tuple(v for v in regions[page_number])
+    back = _rasterise_page(svg, scale, page_number)
+    region = _ink_region(back, page, boxes)
+    backs.append(crop_passage(back, [(page_number, region)], back.size))
+
+    front_svg = svg
+    wanted = [ids[key] for key in hidden if key in ids]
+    if wanted:
+      masked_anything = True
+      front_svg = scoreview.hide_elements(front_svg, wanted)
+    if fingered:
+      front_svg = scoreview.hide_classes(front_svg, ['fing'])
+    if front_svg is svg:
+      # nothing to hide on this page -- a masked passage can span pages, and only
+      # some of them carry a masked glyph
+      fronts.append(backs[-1].copy())
     else:
-      tight = expand_to_ink(image, (by_page[page_number][0][1][0] * ratio,
-                                    by_page[page_number][0][1][1] * ratio,
-                                    by_page[page_number][0][1][2] * ratio,
-                                    by_page[page_number][0][1][3] * ratio))
-    pieces.append(crop_passage(image, [(page_number, tight)], image.size))
-  return _stack(pieces, low, high)
+      front = _rasterise_page(front_svg, scale, page_number)
+      fronts.append(crop_passage(front, [(page_number, region)], front.size))
+
+  if hidden and not masked_anything:
+    raise CardError('the masks do not match this engraving')
+  return _stack(fronts, low, high), _stack(backs, low, high)
+
+
+def passage_image(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
+                  hidden: Sequence[str], scale: float = CARDS_SCALE, hide: bool = True,
+                  xml_text: Optional[str] = None, hide_fingering: bool = False):
+  """One side of the card. Prefer `passage_images`, which engraves the page once.
+
+  The two sides are cropped to the same rectangle either way, so calling this twice
+  gives two images that line up -- it just costs an engraving more than asking for
+  both at once.
+  """
+  front, back = passage_images(cfg, piece, render, spec, hidden if hide else [],
+                               scale=scale, xml_text=xml_text,
+                               hide_fingering=hide_fingering)
+  return front if hide else back
 
 
 def _stack(pieces: List[object], low: int, high: int):
@@ -921,14 +942,10 @@ def build_card(cfg: AnalyzerConfig, piece, render: ScoreRender, spec: CardSpec,
 
   xml_text = card_score_xml(piece, spec)
   has_fingering = bool(fingerings_in(spec, piece))
-  # one engraving, used for both sides, so the two images line up
-  regions = passage_regions(cfg, piece, render, spec, xml_text=xml_text)
-  back_image = passage_image(cfg, piece, render, spec, hidden, hide=False, regions=regions,
-                             xml_text=xml_text)
-  front_image = (passage_image(cfg, piece, render, spec, hidden, hide=True, regions=regions,
-                               xml_text=xml_text, hide_fingering=has_fingering)
-                 if (hidden or has_fingering) else back_image.copy())
-  assert front_image.size == back_image.size, 'the two sides must line up' 
+  # one engraving per page, and one crop for both sides, so the two images line up
+  front_image, back_image = passage_images(cfg, piece, render, spec, hidden,
+                                           xml_text=xml_text, hide_fingering=has_fingering)
+  assert front_image.size == back_image.size, 'the two sides must line up'
 
   front_path = workspace / ('front-%s.png' % spec.signature())
   back_path = workspace / ('back-%s.png' % spec.signature())

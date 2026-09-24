@@ -334,6 +334,45 @@ them**. A card's identity is its passage and its masks — *not* its question �
 rewording a question updates the card you already have, with its review history,
 instead of leaving a second copy behind in Anki.
 
+### Keeping the dialog responsive
+
+The first version of the question field made the dialog unusable, and the reason is
+worth writing down because it is a cost that does not show up in the code:
+**`_preview` drew both sides of the card, and drawing a side engraved the score.**
+Engraving a page of this Chopin takes ~300 ms and rasterising it ~530 ms, so a side
+cost ~840 ms, a preview ~1.7 s — and the preview ran on *every* keystroke, checkbox
+and tap. Measured: **2.3 seconds per character typed**, 1.8 s per tap.
+
+Three things fixed it, in order of how much they mattered:
+
+* **Only redraw when the picture can have changed.** A question, a voice, a title, the
+  audio side — none of them touch the engraving. The pictures are keyed by what does:
+  the bar range, the masks and the fingerings. A keystroke now costs **26 ms**
+  (2.3 s → 26 ms) and the drawing is skipped entirely.
+* **Engrave each page once.** `passage_images` takes the page as engraved, rasterises
+  it for the back, then hides the masked elements *in the same SVG text* and
+  rasterises that for the front. The front and the back used to be engraved
+  separately — three engravings where one will do, and two independently measured
+  crops that could disagree about where the music is.
+* **Draw the state the user settles on.** A 120 ms single-shot timer coalesces a spin
+  box drag or a burst of taps into one drawing, and the last few states are kept, so a
+  tap and its undo cost nothing the second time. Six taps in a row measure 1.1 s, the
+  same as one.
+
+Opening the dialog went 3.9 s → 1.2 s and exporting a card 2.5 s → 1.7 s. What is left
+is the work itself: about a second to redraw after a tap, because the rasteriser walks
+the whole page whatever it is asked to keep. Two things were wrong rather than just
+slow, and the same rework fixed them: the preview's two sides were cropped from
+separately measured regions (so the score could shift by a pixel or two when a card
+was revealed), and **the preview never engraved fingerings at all** — it drew the
+plain score, so the digits you had just entered were invisible, and the front looked
+exactly like the back. The preview now calls exactly what `build_card` calls.
+
+Masking a passage that spans two pages also failed outright — "the masks do not match
+this engraving (page 2)" — because each page was checked for masks that could only be
+on one of them. The check now asks whether the masks matched the engraving *anywhere*,
+which is what it was always trying to say.
+
 ## What the map knows about itself
 
 A map is only as good as the recording it came from, so each one stores its
@@ -401,7 +440,7 @@ analyzer/
       main_window.py        the window
       waveform.py           envelope + draggable measure markers
       score_widget.py       the engraved score: click a bar, mask a note
-      card_dialog.py        author cards: rules, taps, preview, export
+      card_dialog.py        author cards: rules, taps, questions, preview, export
       player.py             sample-accurate playback of a bar range
       workers.py            download, alignment and engraving on background threads
     cards.py                Anki cards: masks, crops, audio, questions, decks
@@ -414,7 +453,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 319 tests, 317 of which run by default (two are
+**M1-M7 are implemented**, with 328 tests, 326 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map

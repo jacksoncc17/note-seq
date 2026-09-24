@@ -27,7 +27,9 @@ mtime, so opening a piece is instant after the first render.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
+import hashlib
 import json
 import pathlib
 import re
@@ -43,6 +45,13 @@ Progress = Optional[Callable[[float, str], None]]
 
 CACHE_VERSION = 4      # 4 adds each bar's full ink extent, for cropping cards
 RASTER_SCALE = 1.5          # PNG pixels per SVG pixel; ~1260 px wide pages
+ENGRAVING_CACHE_SIZE = 8    # page engravings kept in memory; see page_svg_and_ids
+
+# Engraving a page is the slow part of both drawing the score and making a card, and
+# the same page is asked for repeatedly -- so the last few are kept. Masking edits the
+# SVG string, so one engraving serves every set of masks.
+_PAGE_ENGRAVINGS: "collections.OrderedDict[str, Tuple[str, Dict[str, str]]]" = \
+    collections.OrderedDict()
 MEI_NS = '{http://www.musicxml.org/ns/musicxml}'
 
 
@@ -511,12 +520,28 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
   regenerates ids every time, so asking a second instance for the MEI produces ids
   that match nothing and the mask silently does nothing at all.
 
+  Engraving is the slowest step in making a card (about 300 ms a page on this score),
+  and the same page is asked for again and again -- both sides of a card, and every
+  keystroke in the card dialog. The result is therefore kept: the engraving depends
+  only on the score and the page, since masking is done by editing the returned SVG.
+  Callers must treat what they get back as read-only; `hide_elements` and
+  `hide_classes` both return a new string rather than changing this one.
+
+  `scale` is accepted and ignored: Verovio's own scale is pinned at 40 so every
+  engraving lays the score out identically, and size comes from the rasteriser. It
+  stays in the signature because callers pass the raster scale they will use.
+
   Returns:
     (svg, {glyph key: element id}) for that page.
   """
   # `xml_text` lets a caller engrave a modified score (fingerings added) without any
   # file existing: Verovio takes the document as a string
   text = xml_text if xml_text is not None else _score_xml(pathlib.Path(musicxml))
+  key = '%s|%s|%s' % (musicxml, page_number, hashlib.sha1(text.encode('utf-8')).hexdigest())
+  remembered = _PAGE_ENGRAVINGS.get(key)
+  if remembered is not None:
+    _PAGE_ENGRAVINGS.move_to_end(key)
+    return remembered
   engine = verovio_module().toolkit()
   # Verovio's own `scale` must stay at the value the cached geometry was engraved
   # with: it changes the *layout* (how many bars fit on a system), so raising it to
@@ -527,7 +552,11 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
                      'header': 'none', 'footer': 'none'})
   engine.loadData(text)
   svg = engine.renderToSVG(page_number)
-  return svg, element_ids(svg, measure_ids(engine.getMEI()))
+  drawn = (svg, element_ids(svg, measure_ids(engine.getMEI())))
+  _PAGE_ENGRAVINGS[key] = drawn
+  while len(_PAGE_ENGRAVINGS) > ENGRAVING_CACHE_SIZE:
+    _PAGE_ENGRAVINGS.popitem(last=False)
+  return drawn
 
 
 def element_ids(svg: str, ids: Dict[str, int]) -> Dict[str, str]:

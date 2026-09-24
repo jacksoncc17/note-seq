@@ -15,7 +15,7 @@ from __future__ import annotations
 import pathlib
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
                              QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -25,6 +25,16 @@ from PyQt5.QtWidgets import (QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
 from .. import cards, library, store
 from ..config import AnalyzerConfig
 from ..scoreview import ScoreRender
+
+# The preview is a preview: a smaller raster is enough, and the two sides are drawn
+# from one engraving whichever scale is asked for.
+PREVIEW_SCALE = 1.2
+# How many states' pictures to keep. A tap is cheap to undo, so going back and forth
+# should not re-draw; each state is two small images.
+PICTURE_CACHE = 12
+# Long enough that a spin box drag or a burst of taps is one drawing, short enough to
+# feel immediate after a single one.
+PICTURE_DELAY_MS = 120
 
 
 class CardDialog(QDialog):
@@ -44,6 +54,13 @@ class CardDialog(QDialog):
     self.pointed = 0                       # index into the passage's notes
     self.built: Optional[cards.BuiltCard] = None
     self.exported: List[pathlib.Path] = []
+    # the pictures already drawn, by what they depend on, and the state still wanted
+    self._pictures_seen: Dict[tuple, tuple] = {}
+    self._wanted: Optional[tuple] = None
+    self._picture_timer = QTimer(self)
+    self._picture_timer.setSingleShot(True)
+    self._picture_timer.setInterval(PICTURE_DELAY_MS)
+    self._picture_timer.timeout.connect(self._draw_pictures)
 
     self.setWindowTitle('Anki cards for %s' % piece.display_name)
     self.resize(1100, 780)
@@ -240,6 +257,13 @@ class CardDialog(QDialog):
 
   # ------------------------------------------------------------------ state
 
+  def done(self, result: int) -> None:
+    """Closed: drop any drawing that was still waiting, rather than draw into a
+    dialog that is on its way out."""
+    self._picture_timer.stop()
+    self._wanted = None
+    super().done(result)
+
   def spec(self) -> cards.CardSpec:
     rules = [name for name, check in self.rule_boxes.items() if check.isChecked()]
     tags = [t.strip() for t in self.tags_edit.text().split(',') if t.strip()]
@@ -388,7 +412,13 @@ class CardDialog(QDialog):
   # ------------------------------------------------------------------ preview
 
   def _preview(self) -> None:
-    """Rebuild both sides with the same code that will export them."""
+    """Update everything that is cheap, and ask for the pictures.
+
+    The pictures cost about half a second a side to draw, so they are not redrawn
+    here: `_pictures` works out whether they can possibly have changed, and draws
+    them only if they have. Typing a question, or ticking "speak it", changes nothing
+    that is drawn -- and used to re-engrave the score twice per keystroke.
+    """
     spec = self.spec()
     try:
       hidden = cards.masked_keys(spec, self._glyphs)
@@ -401,28 +431,10 @@ class CardDialog(QDialog):
           '%s:%s' % (key, value) for key, value in sorted(self.fingering.items())))
     else:
       self.fingering_label.setText('none')
-    try:
-      front = cards.passage_image(self.cfg, self.piece, self.render, spec, hidden,
-                                 scale=1.2, hide=True)
-      back = cards.passage_image(self.cfg, self.piece, self.render, spec, hidden,
-                                scale=1.2, hide=False)
-    except cards.CardError as e:
-      self.summary.setText('cannot build this card: %s' % e)
-      return
-    for name, image in (('front', front), ('back', back)):
-      import io
-      buffer = io.BytesIO()
-      image.save(buffer, format='PNG')
-      pixmap = QPixmap()
-      pixmap.loadFromData(buffer.getvalue(), 'PNG')
-      target = getattr(self, '%s_image' % name)
-      target.setPixmap(pixmap.scaled(target.width() or 320, 400, Qt.KeepAspectRatio,
-                                     Qt.SmoothTransformation))
 
     fields = cards.memorisation_fields(self.piece, spec.first_bar, spec.last_bar)
     self.fields_label.setText('back of the card: ' + ' · '.join(
         '%s: %s' % (key, value) for key, value in fields.items() if value))
-    hidden_notes = [k for k in hidden if ':note:' in k]
     spoken = ''
     if spec.question.strip() and spec.speak_question:
       spoken = ' · spoken with %s' % (spec.voice or getattr(self.cfg, 'tts_voice', 'the default voice'))
@@ -434,6 +446,74 @@ class CardDialog(QDialog):
     has_work = bool(hidden) or bool(self.fingering) or self.question_changed()
     self.export_button.setEnabled(has_work)
     self.save_button.setEnabled(has_work)
+    self._pictures(spec, hidden)
+
+  # ------------------------------------------------------------- the pictures
+
+  def _picture_key(self, spec, hidden):
+    """What the two pictures depend on. Nothing else can change them.
+
+    The question is not here, and neither are the audio side and the label: they change
+    the card's text, not its engraving. The fingerings are, because they are engraved
+    into the score -- the digits appear on the back and are suppressed on the front.
+    """
+    return (spec.bar_range, tuple(sorted(hidden)),
+            tuple(sorted(cards.fingerings_in(spec, self.piece).items())))
+
+  def _pictures(self, spec, hidden) -> None:
+    """Show the pictures for this state, drawing them only if they are not to hand."""
+    key = self._picture_key(spec, hidden)
+    remembered = self._pictures_seen.get(key)
+    if remembered is not None:
+      self._show_pictures(*remembered)
+      return
+    # Not drawn yet: draw the last state the user settles on, not every one they pass
+    # through (a spin box drag emits a value per step).
+    self._wanted = (key, spec, hidden)
+    self._picture_timer.start()
+
+  def flush_pictures(self) -> None:
+    """Draw the pictures now instead of waiting for the debounce.
+
+    For anything that needs them immediately: the tests, and code that reads the
+    preview back.
+    """
+    self._picture_timer.stop()
+    self._draw_pictures()
+
+  def _draw_pictures(self) -> None:
+    if self._wanted is None:
+      return
+    key, spec, hidden = self._wanted
+    self._wanted = None
+    if key in self._pictures_seen:
+      self._show_pictures(*self._pictures_seen[key])
+      return
+    try:
+      # exactly what `build_card` will do, fingerings and all: anything less and the
+      # preview stops being a preview of the card
+      front, back = cards.passage_images(
+          self.cfg, self.piece, self.render, spec, hidden, scale=PREVIEW_SCALE,
+          xml_text=cards.card_score_xml(self.piece, spec),
+          hide_fingering=bool(cards.fingerings_in(spec, self.piece)))
+    except cards.CardError as e:
+      self.summary.setText('cannot build this card: %s' % e)
+      return
+    self._pictures_seen[key] = (front, back)
+    while len(self._pictures_seen) > PICTURE_CACHE:
+      self._pictures_seen.pop(next(iter(self._pictures_seen)))
+    self._show_pictures(front, back)
+
+  def _show_pictures(self, front, back) -> None:
+    import io
+    for name, image in (('front', front), ('back', back)):
+      buffer = io.BytesIO()
+      image.save(buffer, format='PNG')
+      pixmap = QPixmap()
+      pixmap.loadFromData(buffer.getvalue(), 'PNG')
+      target = getattr(self, '%s_image' % name)
+      target.setPixmap(pixmap.scaled(target.width() or 320, 400, Qt.KeepAspectRatio,
+                                     Qt.SmoothTransformation))
 
   # ------------------------------------------------------------------ output
 

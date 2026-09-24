@@ -391,8 +391,7 @@ def test_a_crop_includes_the_music_outside_the_staves(real):
   cfg, piece, render = real
   for low, high in ((53, 53), (1, 4), (100, 103), (200, 204)):
     spec = cards.CardSpec(slug=SLUG, first_bar=low, last_bar=high)
-    regions = cards.passage_regions(cfg, piece, render, spec)
-    image = cards.passage_image(cfg, piece, render, spec, [], hide=False, regions=regions)
+    image = cards.passage_image(cfg, piece, render, spec, [], hide=False)
     grey = np.asarray(image.convert('L'))
     dark = grey < 128
 

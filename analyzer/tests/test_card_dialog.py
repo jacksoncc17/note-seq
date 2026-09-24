@@ -63,6 +63,10 @@ def silent(monkeypatch):
 def test_the_dialog_shows_a_front_and_a_back(qapp, real):
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  # the pictures are drawn a moment later rather than inside the constructor: they
+  # cost about a second, and the dialog has to be usable while they are coming
+  assert dialog.front_image.pixmap() is None, 'not drawn synchronously'
+  dialog.flush_pictures()
   assert dialog.front_image.pixmap() is not None
   assert not dialog.front_image.pixmap().isNull()
   assert not dialog.back_image.pixmap().isNull()
@@ -326,3 +330,188 @@ def test_the_repeat_on_the_back_is_a_checkbox(qapp, real):
   dialog.repeat_check.setChecked(False)
   assert dialog.spec().repeat_question is False
   assert dialog.spec().question, 'the question itself is untouched'
+
+
+# ---------------------------------------------------------------------------
+# the dialog has to keep up with typing
+# ---------------------------------------------------------------------------
+
+def _engraving_counter(monkeypatch):
+  """Count engravings: they are the slow part of the preview (~300 ms a page)."""
+  from analyzer import scoreview
+  counted = []
+  real = scoreview.page_svg_and_ids
+
+  def counted_call(*args, **kwargs):
+    counted.append(args[2] if len(args) > 2 else kwargs.get('page_number'))
+    return real(*args, **kwargs)
+
+  monkeypatch.setattr(scoreview, 'page_svg_and_ids', counted_call)
+  return counted
+
+
+@needs_real
+def test_typing_a_question_does_not_redraw_the_score(qapp, real, monkeypatch):
+  """The regression this pins: every keystroke re-engraved the score twice, which
+  measured at 2.3 seconds a character -- typing the question was unusable."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
+  dialog.flush_pictures()
+  counted = _engraving_counter(monkeypatch)
+  for character in 'What is the chord in these bars?':
+    dialog.question_edit.setText(dialog.question_edit.text() + character)
+    qapp.processEvents()
+  dialog.flush_pictures()
+  assert counted == [], 'a question is text, not engraving'
+
+
+@needs_real
+def test_text_only_choices_do_not_redraw_the_score(qapp, real, monkeypatch):
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
+  dialog.rule_boxes['everything'].setChecked(True)   # draw once, with a mask
+  dialog.flush_pictures()
+  counted = _engraving_counter(monkeypatch)
+  dialog.speak_check.setChecked(False)
+  dialog.repeat_check.setChecked(False)
+  dialog.audio_check.setChecked(False)
+  dialog.title_edit.setText('a label')
+  dialog.flush_pictures()
+  assert counted == []
+
+
+@needs_real
+def test_the_same_state_is_not_drawn_twice(qapp, real, monkeypatch):
+  """A tap and its undo should not cost two drawings."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.flush_pictures()
+  counted = _engraving_counter(monkeypatch)
+  key = dialog._notes()[0].key
+  dialog.toggle_note(key)
+  dialog.flush_pictures()
+  once = len(counted)
+  dialog.toggle_note(key)          # back to the state that was already drawn
+  dialog.flush_pictures()
+  assert len(counted) == once, 'the first state was already drawn, so it is reused'
+
+
+@needs_real
+def test_masking_still_redraws(qapp, real, monkeypatch):
+  """The other half of the same rule: the pictures must follow the masks."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.flush_pictures()
+  counted = _engraving_counter(monkeypatch)
+  dialog.toggle_note(dialog._notes()[0].key)
+  dialog.flush_pictures()
+  assert counted, 'hiding a note changes the picture, so it is drawn again'
+
+
+@needs_real
+def test_an_unwanted_burst_is_one_drawing(qapp, real, monkeypatch):
+  """Dragging a spin box emits a value per step; only where it lands is drawn."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.flush_pictures()
+  drawn = []
+  real_draw = dialog._draw_pictures
+
+  def counted_draw():
+    drawn.append(1)
+    real_draw()
+
+  monkeypatch.setattr(dialog, '_draw_pictures', counted_draw)
+  for bar in range(54, 60):
+    dialog.last_spin.setValue(bar)
+  qapp.processEvents()
+  assert drawn == [], 'nothing is drawn while the value is still moving'
+  dialog.flush_pictures()
+  assert len(drawn) == 1, 'the state it settled on is drawn once'
+  assert dialog.last_spin.value() == 59
+
+
+@needs_real
+def test_the_front_and_the_back_show_the_same_region(qapp, real):
+  """A card is a reveal: if the two crops differ, the score jumps when it flips."""
+  import numpy as np
+  cfg, piece, render = real
+  for first, last in ((53, 53), (31, 32)):     # 31-32 spans a page break
+    dialog = CardDialog(cfg, piece, render, None, first_bar=first, last_bar=last)
+    dialog.rule_boxes['everything'].setChecked(True)
+    dialog.flush_pictures()
+    front = np.asarray(dialog.front_image.pixmap().toImage().convertToFormat(4).bits().asstring(
+        dialog.front_image.pixmap().width() * dialog.front_image.pixmap().height() * 4))
+    back = np.asarray(dialog.back_image.pixmap().toImage().convertToFormat(4).bits().asstring(
+        dialog.back_image.pixmap().width() * dialog.back_image.pixmap().height() * 4))
+    assert front.shape == back.shape, \
+        'bars %d-%d: the two sides are different sizes, so they cannot line up' % (first, last)
+    spec = dialog.spec()
+    front_image, back_image = cards.passage_images(
+        cfg, piece, render, spec, dialog.masked_keys(),
+        xml_text=cards.card_score_xml(piece, spec))
+    assert front_image.size == back_image.size
+
+
+@needs_real
+def test_masking_only_some_pages_of_a_passage_still_builds(qapp, real):
+  """The bug this pins: masks that all fall on one page of a two-page passage made
+  the card fail with "the masks do not match this engraving (page 2)"."""
+  cfg, piece, render = real
+  glyphs = render.glyphs_in_measures(31, 32)
+  taps = [g.key for g in glyphs if g.key.startswith('31:') and ':note:' in g.key]
+  assert taps, 'bar 31 should have noteheads'
+  spec = cards.CardSpec(slug=SLUG, first_bar=31, last_bar=32, masks=taps)
+  front, back = cards.passage_images(cfg, piece, render, spec, taps)
+  assert front.size == back.size and front.height > 0
+
+
+@needs_real
+def test_the_masks_must_match_the_engraving_somewhere(real):
+  """A stale mask set is still an error -- it just has to be judged for the passage,
+  not page by page."""
+  cfg, piece, render = real
+  spec = cards.CardSpec(slug=SLUG, first_bar=53, last_bar=53, masks=['9999:1:note:0'])
+  with pytest.raises(cards.CardError) as caught:
+    cards.passage_images(cfg, piece, render, spec, ['9999:1:note:0'])
+  assert 'do not match' in str(caught.value)
+
+
+@needs_real
+def test_the_preview_engraves_the_fingerings(qapp, real):
+  """The preview used to draw the plain score, so the digits you had just entered
+  were nowhere to be seen -- and the front looked exactly like the back."""
+  import numpy as np
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.flush_pictures()
+  key = dialog._notes()[0].key
+  plain = _preview_ink(dialog)
+
+  dialog.fingering_check.setChecked(True)
+  dialog.set_fingering(key, '3')
+  dialog.flush_pictures()
+  fingered = _preview_ink(dialog)
+  assert fingered.shape == plain.shape
+  assert (fingered != plain).any(), 'setting a fingering must show up in the preview'
+
+  spec = dialog.spec()
+  assert cards.fingerings_in(spec, piece) == {key: '3'}
+  front, back = cards.passage_images(cfg, piece, render, spec, [],
+                                     xml_text=cards.card_score_xml(piece, spec),
+                                     hide_fingering=True)
+  # the front asks "what fingering?", so it shows less ink than the back
+  assert _ink(front) < _ink(back)
+
+
+def _preview_ink(dialog):
+  import numpy as np
+  pixmap = dialog.back_image.pixmap()
+  image = pixmap.toImage().convertToFormat(4)
+  buffer = image.bits().asstring(image.width() * image.height() * 4)
+  return np.frombuffer(buffer, dtype=np.uint8).copy()
+
+
+def _ink(image):
+  import numpy as np
+  return float((np.asarray(image.convert('L')) < 128).mean())
