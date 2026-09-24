@@ -351,32 +351,74 @@ def _engraving_counter(monkeypatch):
 
 
 @needs_real
-def test_typing_a_question_does_not_redraw_the_score(qapp, real, monkeypatch):
-  """The regression this pins: every keystroke re-engraved the score twice, which
-  measured at 2.3 seconds a character -- typing the question was unusable."""
+def test_typing_a_question_does_not_run_the_preview(qapp, real, monkeypatch):
+  """The regression this pins: every keystroke ran the preview, which re-engraved the
+  score twice -- 2.3 seconds a character, unusable for typing. The fix is that a text
+  field does not reach the preview at all."""
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
   dialog.flush_pictures()
   counted = _engraving_counter(monkeypatch)
+  previews = []
+  monkeypatch.setattr(dialog, '_preview', lambda: previews.append(1))
   for character in 'What is the chord in these bars?':
     dialog.question_edit.setText(dialog.question_edit.text() + character)
     qapp.processEvents()
   dialog.flush_pictures()
-  assert counted == [], 'a question is text, not engraving'
+  assert previews == [], 'a question is text: it must not go through the preview'
+  assert counted == [], 'and so must not engrave anything'
 
 
 @needs_real
-def test_text_only_choices_do_not_redraw_the_score(qapp, real, monkeypatch):
+def test_typing_still_updates_what_the_question_decides(qapp, real):
+  """Cheap does not mean stale: the two things a question decides are still live."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.flush_pictures()
+  assert not dialog.export_button.isEnabled(), 'the suggested question is not work'
+  dialog.question_edit.setText('Name the chord in bar 53.')
+  assert dialog.export_button.isEnabled(), 'your own question is'
+  assert 'spoken with' in dialog.summary.text()
+  dialog.speak_check.setChecked(False)
+  assert 'spoken with' not in dialog.summary.text(), 'and the hint follows the tick'
+  dialog.voice_edit.setText('am_adam')
+  dialog.speak_check.setChecked(True)
+  assert 'am_adam' in dialog.summary.text(), 'the voice is named'
+  dialog.question_edit.clear()
+  assert not dialog.export_button.isEnabled(), 'cleared means nothing to make'
+
+
+@needs_real
+def test_typing_does_not_touch_the_pictures(qapp, real):
+  """Showing cached pictures is not free either: it re-encodes both images."""
+  cfg, piece, render = real
+  dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
+  dialog.rule_boxes['everything'].setChecked(True)
+  dialog.flush_pictures()
+  shown = (dialog.front_image.pixmap().cacheKey(), dialog.back_image.pixmap().cacheKey())
+  for character in 'a question':
+    dialog.question_edit.setText(dialog.question_edit.text() + character)
+    qapp.processEvents()
+  after = (dialog.front_image.pixmap().cacheKey(), dialog.back_image.pixmap().cacheKey())
+  assert after == shown, 'the same pictures are still there, untouched'
+
+
+@needs_real
+def test_text_only_choices_do_not_run_the_preview(qapp, real, monkeypatch):
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
   dialog.rule_boxes['everything'].setChecked(True)   # draw once, with a mask
   dialog.flush_pictures()
   counted = _engraving_counter(monkeypatch)
+  previews = []
+  monkeypatch.setattr(dialog, '_preview', lambda: previews.append(1))
   dialog.speak_check.setChecked(False)
   dialog.repeat_check.setChecked(False)
   dialog.audio_check.setChecked(False)
   dialog.title_edit.setText('a label')
+  qapp.processEvents()
   dialog.flush_pictures()
+  assert previews == []
   assert counted == []
 
 

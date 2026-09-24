@@ -338,26 +338,33 @@ instead of leaving a second copy behind in Anki.
 
 The first version of the question field made the dialog unusable, and the reason is
 worth writing down because it is a cost that does not show up in the code:
-**`_preview` drew both sides of the card, and drawing a side engraved the score.**
-Engraving a page of this Chopin takes ~300 ms and rasterising it ~530 ms, so a side
-cost ~840 ms, a preview ~1.7 s — and the preview ran on *every* keystroke, checkbox
-and tap. Measured: **2.3 seconds per character typed**, 1.8 s per tap.
+**the preview ran on every keystroke, it drew both sides of the card, and drawing a
+side engraved the score.** Engraving a page of this Chopin takes ~300 ms and
+rasterising it ~530 ms, so a side cost ~840 ms and a preview ~1.7 s — on *every*
+keystroke, checkbox and tap. Measured: **2.3 seconds per character typed**, 1.8 s per
+tap.
 
 Three things fixed it, in order of how much they mattered:
 
-* **Only redraw when the picture can have changed.** A question, a voice, a title, the
-  audio side — none of them touch the engraving. The pictures are keyed by what does:
-  the bar range, the masks and the fingerings. A keystroke now costs **26 ms**
-  (2.3 s → 26 ms) and the drawing is skipped entirely.
+* **A text field does not reach the preview at all.** The question, the voice, the
+  label, *speak it*, *say it again* and the audio side only change the card's text, so
+  they are wired to `_text_changed`, which updates the two things they do decide —
+  whether there is anything to export, and whether the card will be spoken. Wiring them
+  to `_preview` meant that typing a question read the piece's question bank (to ask
+  what the suggested question was), re-encoded both preview images to PNG and set them
+  on their labels again. **130 characters now cost 5 ms in total**; a keystroke was
+  2.3 seconds.
 * **Engrave each page once.** `passage_images` takes the page as engraved, rasterises
   it for the back, then hides the masked elements *in the same SVG text* and
   rasterises that for the front. The front and the back used to be engraved
   separately — three engravings where one will do, and two independently measured
-  crops that could disagree about where the music is.
+  crops that could disagree about where the music is. Engravings are also remembered
+  across calls, which is sound because masking edits the returned SVG rather than
+  needing a new one.
 * **Draw the state the user settles on.** A 120 ms single-shot timer coalesces a spin
-  box drag or a burst of taps into one drawing, and the last few states are kept, so a
-  tap and its undo cost nothing the second time. Six taps in a row measure 1.1 s, the
-  same as one.
+  box drag or a burst of taps into one drawing, the last few states are kept so a tap
+  and its undo cost nothing the second time, and pictures already on screen are left
+  alone. Six taps in a row measure 1.1 s, the same as one.
 
 Opening the dialog went 3.9 s → 1.2 s and exporting a card 2.5 s → 1.7 s. What is left
 is the work itself: about a second to redraw after a tap, because the rasteriser walks
@@ -453,7 +460,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 328 tests, 326 of which run by default (two are
+**M1-M7 are implemented**, with 330 tests, 328 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map

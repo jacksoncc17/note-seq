@@ -48,6 +48,8 @@ class CardDialog(QDialog):
     self.render = render
     self.repo = store.open_repository(cfg)
     self.masked: List[str] = []
+    # what the masks resolve to; a text field can be typed in before the first preview
+    self._hidden: List[str] = []
     self.fingering: Dict[str, str] = {}
     self.digit = '1'
     self.undo_stack: List[tuple] = []
@@ -56,11 +58,15 @@ class CardDialog(QDialog):
     self.exported: List[pathlib.Path] = []
     # the pictures already drawn, by what they depend on, and the state still wanted
     self._pictures_seen: Dict[tuple, tuple] = {}
+    self._shown_key: Optional[tuple] = None
     self._wanted: Optional[tuple] = None
     self._picture_timer = QTimer(self)
     self._picture_timer.setSingleShot(True)
     self._picture_timer.setInterval(PICTURE_DELAY_MS)
     self._picture_timer.timeout.connect(self._draw_pictures)
+    # the suggested question, per bar range
+    self._suggested_for: Optional[tuple] = None
+    self._suggested = ''
 
     self.setWindowTitle('Anki cards for %s' % piece.display_name)
     self.resize(1100, 780)
@@ -121,17 +127,18 @@ class CardDialog(QDialog):
     question_layout = QVBoxLayout(question)
     self.question_edit = QLineEdit()
     self.question_edit.setPlaceholderText('asked on the front, e.g. what is the chord in bar 53?')
-    self.question_edit.textChanged.connect(self._preview)
+    self.question_edit.textChanged.connect(self._text_changed)
     question_layout.addWidget(self.question_edit)
 
     spoken = QHBoxLayout()
     self.speak_check = QCheckBox('speak it')
     self.speak_check.setChecked(True)
-    self.speak_check.stateChanged.connect(self._preview)
+    self.speak_check.stateChanged.connect(self._text_changed)
     spoken.addWidget(self.speak_check)
     spoken.addWidget(QLabel('voice'))
     self.voice_edit = QLineEdit(getattr(self.cfg, 'tts_voice', '') or 'af_heart')
     self.voice_edit.setMaximumWidth(120)
+    self.voice_edit.textChanged.connect(self._text_changed)
     spoken.addWidget(self.voice_edit)
     suggest = QPushButton('suggest')
     suggest.setToolTip('take a question about these bars from the question bank')
@@ -144,7 +151,7 @@ class CardDialog(QDialog):
     self.repeat_check.setChecked(True)
     self.repeat_check.setToolTip('the question comes back under the answer, for when '
                                  'the card is used with the sound off')
-    self.repeat_check.stateChanged.connect(self._preview)
+    self.repeat_check.stateChanged.connect(self._text_changed)
     question_layout.addWidget(self.repeat_check)
     box.addWidget(question)
 
@@ -199,7 +206,7 @@ class CardDialog(QDialog):
     sound_layout = QVBoxLayout(sound)
     self.audio_check = QCheckBox('include the recording of these bars')
     self.audio_check.setChecked(True)
-    self.audio_check.stateChanged.connect(self._preview)
+    self.audio_check.stateChanged.connect(self._text_changed)
     sound_layout.addWidget(self.audio_check)
     self.audio_side = QLineEdit('back')
     self.audio_side.setMaximumWidth(90)
@@ -291,8 +298,16 @@ class CardDialog(QDialog):
     self._pointed_changed()
 
   def _suggested_question(self) -> str:
-    """What the question field starts as, and what "unchanged" means."""
-    return cards.suggest_question(self.piece, self.first_spin.value(), self.last_spin.value())
+    """What the question field starts as, and what "unchanged" means.
+
+    Remembered per bar range: answering it means reading the piece's question bank,
+    which a keystroke has no business doing.
+    """
+    bars = (self.first_spin.value(), self.last_spin.value())
+    if self._suggested_for != bars:
+      self._suggested_for = bars
+      self._suggested = cards.suggest_question(self.piece, *bars)
+    return self._suggested
 
   def question_changed(self) -> bool:
     """Whether the question is the user's own, rather than the offered default.
@@ -412,12 +427,10 @@ class CardDialog(QDialog):
   # ------------------------------------------------------------------ preview
 
   def _preview(self) -> None:
-    """Update everything that is cheap, and ask for the pictures.
+    """Everything the masks, the fingerings and the range decide, plus the pictures.
 
-    The pictures cost about half a second a side to draw, so they are not redrawn
-    here: `_pictures` works out whether they can possibly have changed, and draws
-    them only if they have. Typing a question, or ticking "speak it", changes nothing
-    that is drawn -- and used to re-engrave the score twice per keystroke.
+    Not for text fields: see `_text_changed`. The expensive parts here -- masking, the
+    question bank, an engraving -- cannot depend on what a question says.
     """
     spec = self.spec()
     try:
@@ -425,6 +438,7 @@ class CardDialog(QDialog):
     except cards.CardError as e:
       self.summary.setText('masking problem: %s' % e)
       return
+    self._hidden = hidden
     self.tapped_label.setText(', '.join(self.masked) if self.masked else 'none')
     if self.fingering:
       self.fingering_label.setText(' '.join(
@@ -435,18 +449,40 @@ class CardDialog(QDialog):
     fields = cards.memorisation_fields(self.piece, spec.first_bar, spec.last_bar)
     self.fields_label.setText('back of the card: ' + ' · '.join(
         '%s: %s' % (key, value) for key, value in fields.items() if value))
+    self._update_summary()
+    self._pointed_changed()
+    self._update_actions()
+    self._pictures(spec, hidden)
+
+  def _text_changed(self) -> None:
+    """A choice that only changes the card's text: the question, the voice, the label,
+    whether to speak it, whether to repeat it, which side the passage audio goes on.
+
+    Typing must not run the preview. Nothing the preview computes can change because a
+    question was reworded, and going through it used to read the question bank,
+    re-encode both preview images and set them again -- on every keystroke. What these
+    choices *do* decide is whether there is anything to export and whether the card
+    will be spoken, so only those two are updated.
+    """
+    self._update_summary()
+    self._update_actions()
+
+  def _update_summary(self) -> None:
+    spec = self.spec()
+    hidden = self._hidden
     spoken = ''
     if spec.question.strip() and spec.speak_question:
-      spoken = ' · spoken with %s' % (spec.voice or getattr(self.cfg, 'tts_voice', 'the default voice'))
+      spoken = ' · spoken with %s' % (spec.voice or getattr(self.cfg, 'tts_voice',
+                                                           'the default voice'))
     self.summary.setText(
         'bars %d-%d · %d notes · hiding %d (%s) · fingerings %d%s'
         % (spec.bar_range[0], spec.bar_range[1], len(self._glyphs), len(hidden),
            ', '.join(sorted(spec.rules)) or 'none by rule', len(self.fingering), spoken))
-    self._pointed_changed()
-    has_work = bool(hidden) or bool(self.fingering) or self.question_changed()
+
+  def _update_actions(self) -> None:
+    has_work = bool(self._hidden) or bool(self.fingering) or self.question_changed()
     self.export_button.setEnabled(has_work)
     self.save_button.setEnabled(has_work)
-    self._pictures(spec, hidden)
 
   # ------------------------------------------------------------- the pictures
 
@@ -463,9 +499,11 @@ class CardDialog(QDialog):
   def _pictures(self, spec, hidden) -> None:
     """Show the pictures for this state, drawing them only if they are not to hand."""
     key = self._picture_key(spec, hidden)
+    if key == self._shown_key:
+      return                      # already on screen: showing them again is not free
     remembered = self._pictures_seen.get(key)
     if remembered is not None:
-      self._show_pictures(*remembered)
+      self._show_pictures(*remembered, key)
       return
     # Not drawn yet: draw the last state the user settles on, not every one they pass
     # through (a spin box drag emits a value per step).
@@ -486,8 +524,10 @@ class CardDialog(QDialog):
       return
     key, spec, hidden = self._wanted
     self._wanted = None
+    if key == self._shown_key:
+      return
     if key in self._pictures_seen:
-      self._show_pictures(*self._pictures_seen[key])
+      self._show_pictures(*self._pictures_seen[key], key)
       return
     try:
       # exactly what `build_card` will do, fingerings and all: anything less and the
@@ -502,10 +542,12 @@ class CardDialog(QDialog):
     self._pictures_seen[key] = (front, back)
     while len(self._pictures_seen) > PICTURE_CACHE:
       self._pictures_seen.pop(next(iter(self._pictures_seen)))
-    self._show_pictures(front, back)
+    self._show_pictures(front, back, key)
 
-  def _show_pictures(self, front, back) -> None:
+  def _show_pictures(self, front, back, key) -> None:
+    """Put these two images on screen and remember which state they show."""
     import io
+    self._shown_key = key
     for name, image in (('front', front), ('back', back)):
       buffer = io.BytesIO()
       image.save(buffer, format='PNG')
