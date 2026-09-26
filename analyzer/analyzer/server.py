@@ -33,8 +33,16 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote
 
 from .config import AnalyzerConfig
-from . import library, measures, scoreview, store, syncmap
+from . import library, measures, scoreview, store, syncmap, synth
 from .store import PieceQuery
+
+# A bar's audio starts before its downbeat and ends after its last note: starting
+# exactly on the barline clips the previous note's resonance. The desktop uses the
+# same two numbers for the audio it puts on a card, and the phone adds them itself for
+# the recording -- so a score track gets them here, where the bars are turned into
+# seconds, and the phone is told which seconds it is getting.
+PRE_ROLL_S = 0.12
+POST_ROLL_S = 0.25
 
 
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / 'web'
@@ -194,6 +202,9 @@ def piece_detail(cfg: AnalyzerConfig, piece: library.Piece) -> Dict[str, object]
                  'measures': [b.to_dict() for b in p.measures]} for p in render.pages],
       'warnings': list(render.warnings),
   } if render else None)
+  # The practice tracks: which hands this score can be played in, and the grid their
+  # bar positions follow. Answered from the score file, so it costs one XML parse.
+  detail['tracks'] = synth.available(cfg, piece)
   return detail
 
 
@@ -204,14 +215,29 @@ def slice_audio(cfg: AnalyzerConfig, piece: library.Piece, start_s: float,
   Returns:
     (wav bytes, None) or (None, an error message to show the caller).
   """
-  import soundfile as sf
   if not piece.has_audio:
     return None, 'no recording has been fetched for this piece'
-  path = str(piece.audio.path)
+  return slice_file(piece.audio.path, start_s, end_s)
+
+
+def slice_track(path, start_s: float, end_s: float) -> Tuple[Optional[bytes], Optional[str]]:
+  """`[start_s, end_s)` of a practice track; the same slicing, a different source."""
+  return slice_file(path, start_s, end_s)
+
+
+def slice_file(path, start_s: float,
+               end_s: float) -> Tuple[Optional[bytes], Optional[str]]:
+  """`[start_s, end_s)` of an audio file as a standalone WAV.
+
+  Returns:
+    (wav bytes, None) or (None, an error message to show the caller).
+  """
+  import soundfile as sf
+  path = str(path)
   try:
     info = sf.info(path)
   except Exception as e:
-    return None, 'could not read the cached recording: %s' % e
+    return None, 'could not read the audio: %s' % e
 
   duration = float(info.frames) / float(info.samplerate)
   start_s = max(0.0, min(float(start_s), duration))
@@ -224,7 +250,7 @@ def slice_audio(cfg: AnalyzerConfig, piece: library.Piece, start_s: float,
   try:
     data, rate = sf.read(path, dtype='float32', start=first, stop=last, always_2d=False)
   except Exception as e:
-    return None, 'could not read that part of the recording: %s' % e
+    return None, 'could not read that part of the audio: %s' % e
   if len(data) == 0:
     return None, 'that range contains no audio'
 
@@ -232,6 +258,19 @@ def slice_audio(cfg: AnalyzerConfig, piece: library.Piece, start_s: float,
   subtype = info.subtype if info.subtype in ('PCM_16', 'PCM_24', 'FLOAT') else 'PCM_16'
   sf.write(buffer, data, rate, format='WAV', subtype=subtype)
   return buffer.getvalue(), None
+
+
+def _grid_headers(info: Dict[str, object], start_s: float) -> Dict[str, str]:
+  """Where the audio being returned sits in its track, for the phone's bar highlight.
+
+  A practice track's bars are arithmetic -- one tempo throughout -- so three small
+  headers are all the phone needs to follow along without a second request.
+  """
+  headers = {'X-Track-Start': '%.4f' % float(start_s or 0.0)}
+  if info.get('seconds_per_bar'):
+    headers['X-Track-Seconds-Per-Bar'] = '%.6f' % float(info['seconds_per_bar'])
+    headers['X-Track-First-Bar'] = str(int(info.get('first_bar') or 1))
+  return headers
 
 
 class AnalyzerApp:
@@ -311,6 +350,12 @@ class AnalyzerApp:
     piece, error = self._piece(slug)
     if error:
       return error
+    track = (request.get('track') or 'recording').strip().lower()
+    if track in synth.TRACKS:
+      return self._track(request, piece, track)
+    if track not in ('recording', ''):
+      return json_response({'error': 'unknown track %r; try %s or recording'
+                                     % (track, ', '.join(synth.TRACKS))}, 404)
     from_s = request.number('from')
     to_s = request.number('to')
     first = request.number('from_bar')
@@ -344,6 +389,50 @@ class AnalyzerApp:
       return json_response({'error': message}, status)
     return _response(200, 'audio/wav', wav,
                      extra={'Content-Disposition': 'inline; filename="%s.wav"' % slug})
+
+  def _track(self, request: Request, piece: library.Piece, track: str) -> bytes:
+    """A practice track: the score rendered whole, or one hand at a time.
+
+    Bars are placed by the track's *own* grid, not by the recording's map -- the two
+    have different tempos on purpose, and using the map here would cut the wrong
+    audio. The grid goes back in the headers so the phone can highlight the bars it
+    is hearing without asking again.
+    """
+    grid = synth.grid(self.cfg, piece)
+    try:
+      path = synth.build_track(self.cfg, piece, track)
+    except synth.SynthError as e:
+      return json_response({'error': str(e)}, 404)
+
+    info = grid or {}
+    from_s = request.number('from')
+    to_s = request.number('to')
+    first = request.number('from_bar')
+    last = request.number('to_bar')
+    if from_s is None and to_s is None and first is None and last is None:
+      # no range at all: the whole track
+      return _response(200, 'audio/wav', path.read_bytes(), extra={
+          'Content-Disposition': 'inline; filename="%s-%s.wav"' % (piece.slug, track),
+          **_grid_headers(info, 0.0)})
+
+    if (from_s is None or to_s is None) and first is not None and last is not None:
+      if not info.get('seconds_per_bar'):
+        return json_response({'error': 'this piece has no bar grid yet for the %s'
+                                       % synth.TRACK_LABELS[track]}, 404)
+      per_bar = float(info['seconds_per_bar'])
+      origin = int(info.get('first_bar') or 1)
+      low, high = min(int(first), int(last)), max(int(first), int(last))
+      from_s = max(0.0, (low - origin) * per_bar - PRE_ROLL_S)
+      to_s = (high - origin + 1) * per_bar + POST_ROLL_S
+    if from_s is None or to_s is None:
+      return error_response('give either from/to in seconds, or from_bar/to_bar', 400)
+
+    wav, message = slice_track(path, from_s, to_s)
+    if wav is None:
+      return json_response({'error': message}, 400)
+    return _response(200, 'audio/wav', wav, extra={
+        'Content-Disposition': 'inline; filename="%s-%s.wav"' % (piece.slug, track),
+        **_grid_headers(info, from_s)})
 
   # ------------------------------------------------------------------ decks
 

@@ -42,6 +42,13 @@
   #play { background:#1d4e2a; border-color:#2f7a45; font-weight:600; }
   #play.on { background:#2f7a45; }
   .hint { color:var(--dim); font-size:12px; margin-top:6px; }
+  #tracks { gap:6px; }
+  .chip { padding:7px 11px; border-radius:999px; border:1px solid var(--line);
+          background:#232a34; color:var(--ink); font-size:14px; }
+  .chip[aria-pressed="true"] { background:var(--accent); border-color:var(--accent);
+                               color:#0f1319; font-weight:600; }
+  .chip .why { color:var(--dim); font-size:12px; margin-left:6px; }
+  .chip[aria-pressed="true"] .why { color:#0f1319; }
   .big { font-size:17px; }
 </style>
 </head>
@@ -75,6 +82,8 @@
     <span id="rangeline" class="big">tap a bar to set the start</span>
     <button id="clear">clear</button>
   </div>
+  <div class="row" id="tracks" style="margin-top:8px" role="group"
+       aria-label="what to play"></div>
   <div class="row" style="margin-top:8px">
     <button id="play">▶ Play</button>
     <button id="stop">■ Stop</button>
@@ -93,7 +102,22 @@
 const PRE_ROLL = 0.12, POST_ROLL = 0.25;
 
 const $ = (id) => document.getElementById(id);
-const state = { piece: null, detail: null, page: 1, from: null, to: null, playing: -1 };
+const state = { piece: null, detail: null, page: 1, from: null, to: null, playing: -1,
+                track: 'recording', range: null };
+
+// What each choice is, in words. The recording is the piece as played; the others are
+// the score itself, which is the only thing that can be taken apart by hand.
+const TRACKS = [
+  { id: 'recording', label: '♪ Performance',
+    why: 'the recording, mapped to the bars',
+    title: 'the performance you aligned — rubato and all' },
+  { id: 'both', label: 'Both hands', why: 'score',
+    title: 'the score played back, both hands' },
+  { id: 'left', label: 'Left hand', why: 'score',
+    title: 'the lower staff alone — separated from the score, not from the recording' },
+  { id: 'right', label: 'Right hand', why: 'score',
+    title: 'the upper staff alone — separated from the score, not from the recording' },
+];
 
 async function api(path) {
   const response = await fetch(path, { cache: 'no-store' });
@@ -153,6 +177,9 @@ async function loadPiece(slug) {
   stop();
   const detail = await api('/piece/' + encodeURIComponent(slug));
   state.detail = detail;
+  state.range = null;
+  pickTrack();
+  renderTracks();
 
   const bits = [];
   if (detail.bars) bits.push(detail.bars + ' bars');
@@ -267,17 +294,116 @@ function tapBar(number) {
 
 function updateRangeUI() {
   const line = $('rangeline');
+  const readiness = trackReadiness();
+  if (!readiness.ready) {
+    // Say what is missing rather than leaving a dead button and no explanation.
+    line.textContent = readiness.why;
+    paintHighlights();
+    return;
+  }
   if (state.from === null) {
-    line.textContent = 'tap a bar to set the start';
+    line.textContent = 'tap a bar to set the start — or play the whole piece';
   } else if (state.to === null) {
     line.innerHTML = 'from bar <b>' + state.from + '</b> — tap the last bar';
   } else {
     const low = Math.min(state.from, state.to), high = Math.max(state.from, state.to);
-    const span = spanFor(low, high);
+    const isScore = state.track !== 'recording';
+    const span = isScore ? spanForTrack(low, high) : spanFor(low, high);
     line.innerHTML = 'bars <b>' + low + '</b>–<b>' + high + '</b>' +
       (span ? ' · ' + span[0].toFixed(1) + '–' + span[1].toFixed(1) + ' s' : '');
   }
   paintHighlights();
+}
+
+// ------------------------------------------------------------------ tracks
+
+// What this piece can actually play: the recording if one was fetched, and the score
+// tracks its score allows. A single-staff piece offers no left or right hand, and the
+// server says so rather than letting the button fail.
+function offeredTracks() {
+  const detail = state.detail;
+  if (!detail) return [];
+  const score = (detail.tracks && detail.tracks.tracks) || [];
+  const ids = detail.has_audio ? ['recording'] : [];
+  return ids.concat(score);
+}
+
+// Whether the chosen track can actually be played, and why not when it cannot.
+function trackReadiness() {
+  const detail = state.detail || {};
+  if (state.track === 'recording') {
+    if (!detail.has_audio) return { ready: false, why: 'no recording cached' };
+    if (!detail.map) return { ready: false, why: 'no measure map' };
+    return { ready: true };
+  }
+  if (!(detail.tracks && detail.tracks.tracks.includes(state.track))) {
+    return { ready: false, why: (detail.tracks && detail.tracks.reason) || 'no score track' };
+  }
+  return { ready: true };
+}
+
+function pickTrack() {
+  const offered = offeredTracks();
+  if (!offered.length) return;
+  if (offered.includes(state.track) && (state.chosen || trackReadiness().ready)) return;
+  // Nothing chosen yet, or the remembered choice cannot play here. A recording that
+  // was never aligned is a dead end, but the score tracks carry their own grid -- so
+  // fall back to one of those rather than to a button that says "no map".
+  if (trackReadiness().ready) return;
+  state.track = offered.includes('both') ? 'both'
+             : (offered.includes('recording') ? 'recording' : offered[0]);
+}
+
+function renderTracks() {
+  const box = $('tracks');
+  const offered = offeredTracks();
+  const detail = state.detail || {};
+  box.innerHTML = '';
+  if (!offered.length) {
+    const why = (detail.tracks && detail.tracks.reason) || 'no recording and no score to render';
+    box.innerHTML = '<span style="color:var(--dim);font-size:13px">nothing to play: ' + why + '</span>';
+    return;
+  }
+  for (const id of offered) {
+    const spec = TRACKS.find((t) => t.id === id);
+    if (!spec) continue;
+    const chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.setAttribute('aria-pressed', String(state.track === id));
+    chip.title = spec.title;
+    chip.innerHTML = spec.label + '<span class="why">' + spec.why + '</span>';
+    chip.addEventListener('click', () => chooseTrack(id));
+    box.appendChild(chip);
+  }
+}
+
+function chooseTrack(id) {
+  const wasPlaying = !!$('player').src && !$('player').paused;
+  state.track = id;
+  state.chosen = true;
+  state.range = null;
+  state.range = null;
+  renderTracks();
+  updateRangeUI();
+  updatePlayButton();
+  writeUrl();
+  if (wasPlaying) play();               // switching hands mid-listen keeps it going
+}
+
+// The grid a score track is laid out on: one tempo throughout, so a bar's position is
+// arithmetic. The same sum the server does when it turns bars into a slice.
+function trackGrid() {
+  const grid = state.detail && state.detail.tracks ? state.detail.tracks.grid : null;
+  if (!grid || !grid.seconds_per_bar) return null;
+  return { per: grid.seconds_per_bar, first: grid.first_bar || 1 };
+}
+
+function spanForTrack(low, high) {
+  const grid = trackGrid();
+  if (!grid) return null;
+  const start = (low - grid.first) * grid.per;
+  const end = (high - grid.first + 1) * grid.per;
+  return [Math.max(0, start - PRE_ROLL), end + POST_ROLL];
 }
 
 function spanFor(low, high) {
@@ -295,48 +421,68 @@ function spanFor(low, high) {
 
 function updatePlayButton() {
   const detail = state.detail;
-  const hasAudio = !!(detail && detail.has_audio);
-  const hasMap = !!(detail && detail.map);
-  const chosen = state.from !== null;
   const button = $('play');
+  if (!detail) { button.disabled = true; return; }
+  pickTrack();
+  const track = state.track;
+  const isScore = track !== 'recording';
+  // A recording has to have been aligned before its bars mean anything; a score track
+  // brings its own grid with it, so it can be played from the moment it is rendered.
+  const ready = isScore ? !!(detail.tracks && detail.tracks.tracks.includes(track))
+                        : !!(detail.has_audio && detail.map);
+  const chosen = state.from !== null;
 
-  button.disabled = !(hasAudio && hasMap) || !chosen;
-  // Say *why* it is unavailable, rather than presenting a dead button.
-  if (!hasAudio) {
-    button.textContent = '▶ no recording';
-    button.title = 'fetch a recording for this piece in the desktop app';
-  } else if (!hasMap) {
-    button.textContent = '▶ no map';
-    button.title = 'align this piece in the desktop app first';
+  button.disabled = !ready;
+  if (!ready) {
+    button.textContent = isScore ? '▶ no score track' : (detail.has_audio ? '▶ no map' : '▶ no recording');
+    button.title = isScore
+      ? ((detail.tracks && detail.tracks.reason) || 'this piece cannot be rendered')
+      : 'fetch and align a recording in the desktop app first';
   } else if (!chosen) {
-    button.textContent = '▶ pick bars';
-    button.title = 'tap a bar on the score to choose what to play';
+    button.textContent = '▶ Whole piece';
+    button.title = 'play all of it in ' + (isScore ? 'this score track' : 'the recording')
+                 + ' — or tap a bar to practise a passage';
   } else {
     button.textContent = '▶ Play';
-    button.title = 'play the passage you picked';
+    button.title = 'play the bars you picked';
   }
-
-  $('stop').disabled = !hasAudio;
-  if (!detail) return;
-  if (!hasAudio) {
-    $('rangeline').textContent = 'no recording cached — fetch one in the desktop app';
-  } else if (!hasMap) {
-    $('rangeline').textContent = 'no measure map yet — align it in the desktop app';
-  }
+  $('stop').disabled = !ready;
 }
 
 function play() {
-  const low = Math.min(state.from, state.to === null ? state.from : state.to);
-  const high = Math.max(state.from, state.to === null ? state.from : state.to);
-  const span = spanFor(low, high);
-  if (!span) return;
   const player = $('player');
-  const start = Math.max(0, span[0] - PRE_ROLL);
-  const end = span[1] + POST_ROLL;
-  player.src = '/audio/' + encodeURIComponent(state.piece) +
-               '?from=' + start.toFixed(3) + '&to=' + end.toFixed(3);
+  const isScore = state.track !== 'recording';
+  const whole = state.from === null;
+
+  if (isScore) {
+    // Bars, not seconds: the server slices a score track by its own grid, which is a
+    // different tempo from the recording's map.
+    const query = ['track=' + state.track];
+    let range = null;
+    if (!whole) {
+      const low = Math.min(state.from, state.to === null ? state.from : state.to);
+      const high = Math.max(state.from, state.to === null ? state.from : state.to);
+      query.push('from_bar=' + low, 'to_bar=' + high);
+      range = spanForTrack(low, high);
+    }
+    player.src = '/audio/' + encodeURIComponent(state.piece) + '?' + query.join('&');
+    state.range = range || [0, null];        // the whole track: filled in on load
+  } else {
+    const query = ['track=recording'];
+    let range = null;
+    if (!whole) {
+      const low = Math.min(state.from, state.to === null ? state.from : state.to);
+      const high = Math.max(state.from, state.to === null ? state.from : state.to);
+      const span = spanFor(low, high);
+      if (!span) return;
+      query.push('from=' + Math.max(0, span[0] - PRE_ROLL).toFixed(3),
+                 'to=' + (span[1] + POST_ROLL).toFixed(3));
+      range = [Math.max(0, span[0] - PRE_ROLL), span[1] + POST_ROLL];
+    }
+    player.src = '/audio/' + encodeURIComponent(state.piece) + '?' + query.join('&');
+    state.range = range || [0, null];
+  }
   player.loop = $('loop').checked;
-  state.range = [start, end];
   player.play().then(() => {
     $('play').classList.add('on');
     setMeta($('meta').textContent, false);
@@ -348,6 +494,7 @@ function stop() {
   player.pause();
   player.removeAttribute('src');
   player.load();
+  state.range = null;
   $('play').classList.remove('on');
   state.playing = -1;
   paintHighlights();
@@ -355,12 +502,27 @@ function stop() {
 }
 
 function measureAtTime(seconds) {
+  if (state.track !== 'recording') {
+    // A score track runs at one tempo, so a bar is arithmetic rather than a lookup.
+    const grid = trackGrid();
+    const bars = state.detail ? state.detail.bars : 0;
+    if (!grid) return -1;
+    const bar = grid.first + Math.floor(seconds / grid.per);
+    return (bar >= grid.first && bar <= (bars || bar)) ? bar : -1;
+  }
   if (!state.detail || !state.detail.map) return -1;
   for (const m of state.detail.map.measures) {
     if (seconds >= m.start_s && seconds < m.end_s) return m.measure;
   }
   return -1;
 }
+
+$('player').addEventListener('loadedmetadata', () => {
+  // The whole-piece case has no end time until the audio says how long it is.
+  if (state.range && state.range[1] === null && isFinite($('player').duration)) {
+    state.range[1] = $('player').duration;
+  }
+});
 
 $('player').addEventListener('timeupdate', () => {
   const player = $('player');
@@ -378,8 +540,10 @@ $('player').addEventListener('timeupdate', () => {
     }
     paintHighlights();
   }
-  $('clock').textContent = player.currentTime.toFixed(1) + ' / ' +
-                           Math.max(0, (state.range[1] - state.range[0])).toFixed(1) + ' s';
+  const total = state.range[1] === null
+    ? (isFinite(player.duration) ? player.duration : 0)
+    : Math.max(0, state.range[1] - state.range[0]);
+  $('clock').textContent = player.currentTime.toFixed(1) + ' / ' + total.toFixed(1) + ' s';
 });
 
 $('player').addEventListener('ended', () => {
@@ -397,7 +561,9 @@ function writeUrl() {
   params.set('piece', state.piece);
   if (state.from !== null) params.set('from', state.from);
   if (state.to !== null) params.set('to', state.to);
+  if (state.track) params.set('track', state.track);
   history.replaceState(null, '', '?' + params.toString());
+  try { localStorage.setItem('analyzer.track', state.track); } catch (e) {}
 }
 
 function readUrl() {
@@ -406,6 +572,11 @@ function readUrl() {
   const to = parseInt(params.get('to'), 10);
   if (!Number.isNaN(from)) state.from = from;
   if (!Number.isNaN(to)) state.to = to;
+  let remembered = params.get('track');
+  if (!remembered) {
+    try { remembered = localStorage.getItem('analyzer.track'); } catch (e) {}
+  }
+  if (remembered && TRACKS.some((t) => t.id === remembered)) state.track = remembered;
 }
 
 // ------------------------------------------------------------------ wiring

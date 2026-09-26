@@ -26,7 +26,7 @@ import pytest
 
 from analyzer.config import AnalyzerConfig
 from analyzer.schema import AudioSource
-from analyzer import library, scoreview, server, syncmap
+from analyzer import align, library, scoreview, server, syncmap
 
 CHROME = shutil.which('google-chrome') or shutil.which('chromium')
 needs_engines = pytest.mark.skipif(
@@ -59,7 +59,29 @@ def score_xml(bars=6):
   return SCORE % ''.join(parts)
 
 
-def make_piece(cfg, slug='demo', bars=6, seconds=12.0, with_map=True, title='Demo Piece'):
+def two_staff_score_xml(bars=6):
+  """The same fixture with the hands written on separate staves."""
+  parts = []
+  for n in range(1, bars + 1):
+    attributes = ('<attributes><divisions>1</divisions><key><fifths>0</fifths></key>'
+                  '<time><beats>4</beats><beat-type>4</beat-type></time>'
+                  '<staves>2</staves>'
+                  '<clef><sign>G</sign><line>2</line></clef>'
+                  '<clef number="2"><sign>F</sign><line>4</line></clef></attributes>'
+                  ) if n == 1 else ''
+    parts.append(
+        '<measure number="%d">%s'
+        '<note><pitch><step>C</step><octave>5</octave></pitch><duration>4</duration>'
+        '<voice>1</voice><type>whole</type><staff>1</staff></note>'
+        '<backup><duration>4</duration></backup>'
+        '<note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration>'
+        '<voice>2</voice><type>whole</type><staff>2</staff></note>'
+        '</measure>' % (n, attributes))
+  return SCORE % ''.join(parts)
+
+
+def make_piece(cfg, slug='demo', bars=6, seconds=12.0, with_map=True, title='Demo Piece',
+               hands=False):
   """A complete piece on disk: score, bank, cached recording, map, engraving."""
   import numpy as np
   import soundfile as sf
@@ -67,7 +89,7 @@ def make_piece(cfg, slug='demo', bars=6, seconds=12.0, with_map=True, title='Dem
   cfg.ensure_dirs()
   score = cfg.sheet_music_dir / ('%s.musicxml' % slug)
   cfg.sheet_music_dir.mkdir(parents=True, exist_ok=True)
-  score.write_text(score_xml(bars), encoding='utf-8')
+  score.write_text(two_staff_score_xml(bars) if hands else score_xml(bars), encoding='utf-8')
 
   bank = cfg.bank_dir / slug
   bank.mkdir(parents=True, exist_ok=True)
@@ -137,6 +159,16 @@ def get(port, path):
       return response.status, response.read()
   except urllib.error.HTTPError as e:
     return e.code, e.read()
+
+
+def get_headers(port, path):
+  """(status, response headers, body) for a GET -- some answers are in the headers."""
+  url = 'http://127.0.0.1:%d%s' % (port, path)
+  try:
+    with urllib.request.urlopen(url, timeout=60) as response:
+      return response.status, dict(response.headers), response.read()
+  except urllib.error.HTTPError as e:
+    return e.code, dict(e.headers), e.read()
 
 
 def get_json(port, path):
@@ -412,3 +444,110 @@ def test_a_deck_whose_package_is_gone_is_reported(cfg):
     # honest 404s, so either message passes.
     assert status == 404
     assert 'missing' in body['error'] or 'no built deck' in body['error'], body['error']
+
+
+# ---------------------------------------------------------------------------
+# practice tracks: the score whole, or one hand at a time
+# ---------------------------------------------------------------------------
+
+needs_fluidsynth = pytest.mark.skipif(
+    shutil.which('fluidsynth') is None or align.find_soundfont() is None,
+    reason='rendering a score track needs fluidsynth and a soundfont')
+
+
+def test_a_score_with_two_staves_offers_both_hands(cfg):
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    status, body = get(port, '/piece/demo')
+    assert status == 200
+    detail = json.loads(body)
+    assert detail['tracks']['tracks'] == ['both', 'left', 'right']
+    grid = detail['tracks']['grid']
+    assert grid['beats'] == 4 and grid['first_bar'] == 1
+    assert grid['seconds_per_bar'] > 0
+    assert detail['tracks']['reason'] == ''
+
+
+def test_a_single_staff_score_offers_only_the_whole(cfg):
+  """Nothing is promised that cannot be played: no hands means no hand chips."""
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0)          # one staff, no <staff>
+  with running(cfg) as port:
+    status, body = get(port, '/piece/demo')
+    detail = json.loads(body)
+    assert detail['tracks']['tracks'] == ['both']
+    assert 'one staff' in detail['tracks']['reason']
+
+
+@needs_fluidsynth
+def test_a_track_is_sliced_by_its_own_grid(cfg):
+  """Bars mean the track's bars, not the recording's: the two tempos differ on purpose."""
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    status, body = get_json(port, '/piece/demo')
+    grid = body['tracks']['grid']
+    per_bar = grid['seconds_per_bar']
+
+    status, head, body = get_headers(port, '/audio/demo?track=left&from_bar=3&to_bar=3')
+    assert status == 200, body[:200]
+    assert body[:4] == b'RIFF'
+    assert slices_duration(body) == pytest.approx(per_bar + 0.12 + 0.25, abs=0.04), \
+        'one bar, plus the same rolls the desktop uses'
+    # where the audio sits in the track, so the phone can highlight without asking again
+    assert float(head['X-Track-Seconds-Per-Bar']) == pytest.approx(per_bar, abs=1e-6)
+    assert int(head['X-Track-First-Bar']) == 1
+    assert float(head['X-Track-Start']) == pytest.approx(max(0.0, 2 * per_bar - 0.12), abs=0.01)
+
+    # four bars are four bars, whatever the recording thinks -- and from bar 1 there is
+    # no room for the pre-roll, so only the tail is added
+    status, head, body = get_headers(port, '/audio/demo?track=both&from_bar=1&to_bar=4')
+    assert slices_duration(body) == pytest.approx(4 * per_bar + 0.25, abs=0.05)
+    assert float(head['X-Track-Start']) == 0.0
+
+
+@needs_fluidsynth
+def test_the_same_bars_are_different_audio_in_each_track(cfg):
+  """The point of the feature: the hands are not the same recording twice."""
+  import io
+  import numpy as np
+  import soundfile as sf
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    samples = {}
+    for track in ('both', 'left', 'right'):
+      status, body = get(port, '/audio/demo?track=%s&from_bar=2&to_bar=4' % track)
+      assert status == 200, body[:200]
+      data, rate = sf.read(io.BytesIO(body), dtype='float32')
+      samples[track] = data.mean(axis=1) if data.ndim > 1 else data
+    n = min(len(v) for v in samples.values())
+    assert not np.allclose(samples['left'][:n], samples['right'][:n], atol=1e-4), \
+        'the two hands must not be the same audio'
+
+
+@needs_fluidsynth
+def test_playing_the_whole_track_needs_no_bars(cfg):
+  """Play with nothing tapped hands back the whole thing."""
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    status, head, body = get_headers(port, '/audio/demo?track=left')
+    assert status == 200 and body[:4] == b'RIFF'
+    assert float(head['X-Track-Start']) == 0.0
+    assert slices_duration(body) > 1.0
+
+
+def test_an_unknown_track_is_refused_with_the_list(cfg):
+  make_piece(cfg)
+  with running(cfg) as port:
+    status, body = get(port, '/audio/demo?track=elbow')
+    assert status == 404
+    message = json.loads(body)['error']
+    assert 'elbow' in message and 'left' in message and 'recording' in message
+
+
+def test_asking_for_a_hand_a_score_does_not_have_says_which(cfg):
+  """A single-staff score: no left hand, and the reason says so rather than 500ing."""
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0)
+  with running(cfg) as port:
+    status, body = get(port, '/audio/demo?track=left')
+    assert status in (404, 200 if shutil.which('fluidsynth') else 404)
+    if status == 404:
+      assert 'left hand' in json.loads(body)['error']

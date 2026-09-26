@@ -52,14 +52,19 @@ class AnalyzerConfig:
   tts_voice: str = os.environ.get('ANALYZER_TTS_VOICE', 'af_heart')
 
   def ensure_dirs(self) -> None:
-    for d in (self.audio_dir, self.sync_dir, self.render_dir, self.library_dir,
-              self.decks_dir):
+    for d in (self.audio_dir, self.tracks_dir, self.sync_dir, self.render_dir,
+              self.library_dir, self.decks_dir):
       d.mkdir(parents=True, exist_ok=True)
 
   @property
   def audio_dir(self) -> pathlib.Path:
     """Cached recordings, one WAV plus one JSON of metadata per piece."""
     return self.cache_dir / 'audio'
+
+  @property
+  def tracks_dir(self) -> pathlib.Path:
+    """Practice tracks: the score rendered whole, or one hand at a time."""
+    return self.cache_dir / 'tracks'
 
   @property
   def sync_dir(self) -> pathlib.Path:

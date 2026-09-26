@@ -128,14 +128,15 @@ def browser(tmp_path):
 
 # ---------------------------------------------------------------------------
 
-def test_play_starts_disabled_and_comes_alive_when_a_bar_is_tapped(cfg, tmp_path, browser):
-  """The regression: tapping a bar must enable Play, without a range in the URL."""
+def test_play_offers_the_whole_piece_then_the_tapped_passage(cfg, tmp_path, browser):
+  """The regression this pins: tapping a bar must enable Play without a range in the
+  URL. With a track available it is enabled from the start -- as the whole piece."""
   make_piece(cfg, bars=6, seconds=12.0)
   with running(cfg) as port:
     browser.open('http://127.0.0.1:%d/' % port)
 
-    assert browser.evaluate('document.getElementById("play").disabled') is True
-    assert browser.evaluate('document.getElementById("play").textContent').strip() == '▶ pick bars'
+    assert browser.evaluate('document.getElementById("play").disabled') is False
+    assert browser.evaluate('document.getElementById("play").textContent').strip() == '▶ Whole piece'
     assert browser.evaluate('document.querySelectorAll(".bar").length') == 6
 
     browser.evaluate('document.querySelectorAll(".bar")[2].click()')     # bar 3
@@ -181,26 +182,59 @@ def test_a_bookmark_opens_with_its_range_ready(cfg, tmp_path, browser):
     assert selected == 4, 'bars 2-5 should be highlighted, got %s' % selected
 
 
-def test_clear_resets_the_range_and_disables_play(cfg, tmp_path, browser):
+def test_clear_resets_the_range_and_goes_back_to_the_whole_piece(cfg, tmp_path, browser):
   make_piece(cfg, bars=6, seconds=12.0)
   with running(cfg) as port:
     browser.open('http://127.0.0.1:%d/?piece=demo&from=1&to=3' % port)
-    assert browser.evaluate('document.getElementById("play").disabled') is False
+    assert browser.evaluate('document.getElementById("play").textContent').strip() == '▶ Play'
     browser.evaluate('document.getElementById("clear").click()')
-    assert browser.evaluate('document.getElementById("play").disabled') is True
     assert browser.evaluate('document.querySelectorAll(".bar.sel").length') == 0
+    assert browser.evaluate('document.getElementById("play").disabled') is False
+    assert browser.evaluate('document.getElementById("play").textContent').strip() == '▶ Whole piece'
 
 
-def test_a_piece_without_a_map_says_so_instead_of_offering_play(cfg, tmp_path, browser):
+def test_a_recording_that_was_never_aligned_says_what_is_missing(cfg, tmp_path, browser):
+  """The one offered track cannot play, and the phone says why rather than going quiet."""
   make_piece(cfg, bars=6)
-  (cfg.sync_path('demo')).unlink()               # a piece that was never aligned
+  (cfg.sync_path('demo')).unlink()               # never aligned
+  (cfg.sheet_music_dir / 'demo.musicxml').unlink()   # and no score to render either
   with running(cfg) as port:
     browser.open('http://127.0.0.1:%d/?piece=demo' % port, wait_for='document.body.innerText.length')
     time.sleep(1.0)
-    label = browser.evaluate('document.getElementById("play").textContent').strip()
-    assert label == '▶ no map', label
     assert browser.evaluate('document.getElementById("play").disabled') is True
-    assert 'no measure map' in browser.evaluate('document.getElementById("rangeline").textContent')
+    line = browser.evaluate('document.getElementById("rangeline").textContent')
+    assert 'no measure map' in line, line
+
+
+def test_a_piece_with_nothing_at_all_says_so(cfg, tmp_path, browser):
+  make_piece(cfg, bars=6)
+  (cfg.sync_path('demo')).unlink()
+  (cfg.sheet_music_dir / 'demo.musicxml').unlink()
+  cfg.audio_path('demo').unlink()                # no recording either
+  cfg.audio_meta_path('demo').unlink()
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port, wait_for='document.body.innerText.length')
+    time.sleep(1.0)
+    assert browser.evaluate('document.getElementById("play").disabled') is True
+    body = browser.evaluate('document.body.innerText')
+    assert 'nothing to play' in body, body[:200]
+    assert browser.evaluate('document.querySelectorAll(".chip").length') == 0
+
+
+def test_a_piece_with_no_map_plays_its_score_instead(cfg, tmp_path, browser):
+  """A recording that was never aligned is a dead end, but the score needs no map: its
+  tracks carry their own bar grid, so the phone falls back to one of those."""
+  make_piece(cfg, bars=6, seconds=12.0)
+  (cfg.sync_path('demo')).unlink()
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port, wait_for='document.body.innerText.length')
+    time.sleep(1.0)
+    assert browser.evaluate('document.getElementById("play").disabled') is False, \
+        'the score track can be played without a map'
+    pressed = browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip"))'
+        '.filter(c => c.getAttribute("aria-pressed") === "true").map(c => c.textContent)')
+    assert pressed and 'Both hands' in pressed[0], pressed
 
 
 def test_typing_in_the_filter_narrows_the_piece_list(cfg, tmp_path, browser):
@@ -232,3 +266,87 @@ def test_typing_in_the_filter_narrows_the_piece_list(cfg, tmp_path, browser):
     time.sleep(1.2)
     assert browser.evaluate('document.getElementById("piece").options.length') == 1
     assert browser.evaluate('document.getElementById("play").disabled') is True
+
+
+# ---------------------------------------------------------------------------
+# practice tracks: left hand, right hand, or the whole piece
+# ---------------------------------------------------------------------------
+
+def test_three_hand_chips_appear_for_a_two_staff_piece(cfg, tmp_path, browser):
+  """The controls the phone was missing: pick a hand, or both."""
+  make_piece(cfg, bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port)
+    labels = browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip")).map(c => c.textContent)')
+    assert any('Left hand' in l for l in labels), labels
+    assert any('Right hand' in l for l in labels), labels
+    assert any('Both hands' in l for l in labels), labels
+    # the recording is still there, so it can still be listened to
+    assert any('Performance' in l for l in labels), labels
+
+
+def test_a_single_staff_piece_offers_no_hands(cfg, tmp_path, browser):
+  """Nothing is offered that the score cannot do."""
+  make_piece(cfg, bars=6, seconds=12.0)          # one staff
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port)
+    labels = browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip")).map(c => c.textContent)')
+    assert any('Both hands' in l for l in labels), labels
+    assert not any('Left hand' in l for l in labels), labels
+    assert not any('Right hand' in l for l in labels), labels
+
+
+def test_choosing_the_left_hand_asks_for_the_left_hand(cfg, tmp_path, browser):
+  """The whole point: the request carries the track, and the server answers it."""
+  make_piece(cfg, bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port)
+    browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip"))'
+        '.find(c => c.textContent.includes("Left hand")).click()')
+    browser.evaluate('document.querySelectorAll(".bar")[2].click()')     # bar 3
+    browser.evaluate('document.getElementById("play").click()')
+    time.sleep(0.5)
+
+    src = browser.evaluate('document.getElementById("player").src')
+    assert 'track=left' in src, src
+    assert 'from_bar=3' in src and 'to_bar=3' in src, src
+    status, body = get(port, '/audio/demo?' + src.split('?', 1)[1])
+    assert status == 200 and body[:4] == b'RIFF', body[:200]
+    # and the choice is in the URL, so the phone keeps it on a refresh
+    assert 'track=left' in browser.evaluate('location.search')
+
+
+def test_the_chosen_hand_survives_a_piece_switch(cfg, tmp_path, browser):
+  make_piece(cfg, slug='demo', bars=6, seconds=12.0, hands=True)
+  make_piece(cfg, slug='other', bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port)
+    browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip"))'
+        '.find(c => c.textContent.includes("Right hand")).click()')
+    browser.evaluate(
+        'const s = document.getElementById("piece"); s.value = "other";'
+        's.dispatchEvent(new Event("change"));')
+    time.sleep(1.0)
+    pressed = browser.evaluate(
+        'Array.from(document.querySelectorAll(".chip"))'
+        '.filter(c => c.getAttribute("aria-pressed") === "true").map(c => c.textContent)')
+    assert pressed and 'Right hand' in pressed[0], pressed
+
+
+def test_playing_with_nothing_tapped_plays_the_whole_track(cfg, tmp_path, browser):
+  """"Whole piece playback" without tapping a bar first."""
+  make_piece(cfg, bars=6, seconds=12.0, hands=True)
+  with running(cfg) as port:
+    browser.open('http://127.0.0.1:%d/?piece=demo' % port)
+    assert browser.evaluate('document.getElementById("play").textContent').strip() == '▶ Whole piece'
+    browser.evaluate('document.getElementById("play").click()')
+    time.sleep(0.5)
+    src = browser.evaluate('document.getElementById("player").src')
+    assert 'track=' in src and 'from_bar' not in src, src
+    status, body = get(port, '/audio/demo?' + src.split('?', 1)[1])
+    assert status == 200 and body[:4] == b'RIFF'
+    assert slices_duration(body) > 4.0, 'the whole piece, not a bar'

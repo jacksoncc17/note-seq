@@ -155,7 +155,10 @@ cd analyzer
 Then open `http://192.168.0.128:8090` on the phone (change the address to whatever
 the machine prints). You get the same piece list, the same engraved score, and the
 same measure map as the desktop — pick a bar, tap the last bar of the passage,
-press **Play**, loop it if you like. `?piece=…&from=40&to=83` is kept in the URL,
+press **Play**, loop it if you like. Above the transport there are chips for the
+practice tracks: **both hands**, **left hand**, **right hand** (the score, synthesised)
+and **♪ Performance** (the recording); with nothing tapped, Play plays the whole piece
+in whichever is chosen. `?piece=…&from=40&to=83` is kept in the URL,
 so a bookmark or a home-screen icon reopens that exact passage, on the page that
 contains it. The bar being played is outlined and the page turns with it.
 
@@ -170,8 +173,9 @@ iOS. The phone needs no internet and no yt-dlp.
 | endpoint | what it returns |
 |---|---|
 | `GET /` | the client page (self-contained; no external assets) |
-| `GET /pieces`, `GET /piece/<slug>` | piece list, and one piece with its map, played order and page geometry |
+| `GET /pieces`, `GET /piece/<slug>` | piece list, and one piece with its map, played order, page geometry, and the practice tracks it offers |
 | `GET /audio/<slug>?from=&to=` or `?from_bar=&to_bar=` | that passage as a WAV. Bars are answered from the map. |
+| `GET /audio/<slug>?track=left\|right\|both` | a practice track, whole, or `&from_bar=&to_bar=` for a passage of it |
 | `GET /audio/<slug>` | the whole cached recording |
 | `GET /score/<slug>/pages.json` | page sizes and a rectangle per measure, in image pixels |
 | `GET /score/<slug>/page-N.png` | one engraved page |
@@ -184,6 +188,51 @@ engrave a score. Those are one-time setup steps that want a keyboard and a
 progress bar, so they stay in the desktop app — and the client says so plainly
 when a piece has no recording or no map yet (`intermezzo-left — no map` in the
 list) rather than appearing broken.
+
+### Practice tracks: left hand, right hand, or the whole piece
+
+Above the transport there are chips. **Both hands**, **Left hand** and **Right
+hand** play the *score*, synthesised — and that is the only way to get one hand
+alone, because separating the hands in a *recording* is source separation, which
+nothing here does. The **♪ Performance** chip is the real recording, kept because it
+is the reference for how the piece actually goes; it is offered only when one has
+been fetched, so a piece with no recording shows the three score tracks and nothing
+else.
+
+The split is by the score's own `<staff>`, never by pitch: on the Chopin, 297 of
+1912 notes would be misassigned by a "below middle C is the left hand" rule, because
+the hands overlap in the middle — the right hand goes down to B3 and the left up to
+E♭4. `synth.py` splits at the parse step, since the repo's MusicXML reader keeps
+`<voice>` but drops `<staff>` (voices are per staff, not per hand; this score uses
+five of them across two staves). Deleting the other staff's notes after parsing moves
+nothing, because onsets are fixed while parsing — so all three tracks are exactly as
+long as each other, **308.079 s** on the Chopin, and bar 53 is at the same instant in
+every one of them.
+
+The tracks are laid out in **strict time, at the tempo of the piece's own reference
+MIDI** — which is already a steady render of the score, the one `align.midi_grid`
+reads. So bar positions are arithmetic (`(bar − 1) × seconds_per_bar`) rather than a
+fitted map, and the phone gets `seconds_per_bar` in `/piece/<slug>` and follows the
+bar highlight from it. Measured on the real Chopin over HTTP, bars 40-43:
+
+| track | audio | energy below middle C |
+|---|---|---|
+| left hand | 6.36 s | 64.2% |
+| right hand | 6.36 s | 0.4% |
+| both hands | 6.36 s | 35.6% |
+| the performance | 4.88 s | 21.5% |
+
+The two hands are *different* audio, not the same render relabelled, and they sum to
+the whole to within 2.5% (the residue is FluidSynth's own mixing). Building all three
+takes about 5 s for a four-minute piece and they are cached per score — a track is
+named after the size and mtime of the score it came from, so an edited score is never
+served as a stale render.
+
+Pressing **Play** with nothing tapped plays the whole piece in the chosen track; that
+is new, and it is what makes "whole piece playback" one of the three choices rather
+than a separate control. A recording that was never aligned stays a dead end — but
+the score tracks carry their own grid, so the phone falls back to one of those and
+says which, instead of showing a greyed-out button.
 
 ## Storage, and the way out to a database
 
@@ -452,6 +501,7 @@ analyzer/
       workers.py            download, alignment and engraving on background threads
     cards.py                Anki cards: masks, crops, audio, questions, decks
     speech.py               Kokoro text-to-speech for a card's question
+    synth.py                practice tracks: the score split by staff, rendered
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -460,13 +510,14 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 330 tests, 328 of which run by default (two are
+**M1-M7 are implemented**, with 358 tests, 356 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
 * **M4** the engraved score view · **M5a** the phone client
 * **M6** storage behind ports a database can implement
 * **M7** Anki cards for a selected passage, exported as `.apkg`
+* practice tracks on the phone: the score whole, or one hand at a time
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads
@@ -483,10 +534,17 @@ then read back out of the package: a 19,821-byte MP3 (`ID3` header) in `media`,
 
 * **Nothing appears** — the window needs a display. On a headless box use
   `QT_QPA_PLATFORM=offscreen` for the tests, but the GUI itself needs a desktop.
+  FluidSynth plus a soundfont are needed to render practice tracks (and for the
+  alignment tests that render the score); the tests that need them skip without them.
 * **"no reference MIDI"** — alignment needs a machine-readable performance of the
   score, which the question bank provides. Build it with
   `.venv/bin/python memorization/analyze.py <score.musicxml> --name <slug>`.
   Until then, place bars by hand from the average-tempo estimate.
+* **Practice tracks take disk** — the three tracks of a four-minute piece are 78 MB
+  (27 MB each: 22 kHz stereo PCM, about 5 s to build). They live in `cache/tracks` and
+  are rebuilt on demand, so deleting that directory costs nothing but the render.
+  Playing a whole track streams all 27 MB to the phone; a tapped passage streams only
+  its bars.
 * **Fetch fails** — check `yt-dlp --version` (it needs updating regularly as
   YouTube changes) and that `ffmpeg`/`ffprobe` are on `PATH`. The error message in
   the dialog says which of these it was.
