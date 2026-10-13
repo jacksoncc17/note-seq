@@ -240,10 +240,25 @@ been reached yet is covered**, so it cannot be read off the screen in advance. I
 recall aid rather than a viewer: you have to know what comes next, at tempo.
 
 ```
-Sync playing  [▶ Play] [■] [loop]  reveal [every beat ▾]  play speed [1.00 x] [1x]
-              page speed [1.00 x] [0 ms]                    ‹ page 2/9 ›
-              bar 40 · beat 2 of 3 · 62.9 s
+Sync playing  [▶ Play] [■] [loop]  view [one line ▾]  reveal [every beat ▾]
+              play speed [1.00 x] [1x]  page speed [1.00 x] [0 ms]
+              page 2 / 9 · line 2 / 4      bar 40 · beat 2 of 3 · 62.9 s
 ```
+
+**One line at a time** is the default view, and it is not only tidier. On a whole page
+the curtain had to reach up into the bottom of the line above to keep the next line out
+of sight, and it could not do that cleanly: ledger lines and dynamics are drawn *outside*
+the staves, lower than the noteheads the reveal knows about, so "cover everything from
+here down" clipped music that had already been played. With a single system on screen
+there is no line above or below — to cover, or to be revealed. The curtain is cut to the
+line being shown, the label says `page 2 / 9 · line 2 / 4`, and the view moves down the
+page line by line as the music does. `view: whole page` puts the page back.
+
+The line is shown with air above and below for those ledger lines and dynamics — two
+notehead heights, 23 px on this score — but *bounded by the neighbouring line's ink*:
+on page 2 the next line's music starts 133–169 px below, so the air never reaches it,
+and on a tightly-set score where it would, the air is reduced instead. The line below is
+the future, and the one thing this view must never do is show it.
 
 **Play speed** (0.40–2.00×) slows the *recording* down, next to the dial that lines the
 *page* up with it. Pitch is preserved — a phase vocoder, `librosa.effects.time_stretch`
@@ -623,7 +638,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 404 tests, 402 of which run by default (two are
+**M1-M7 are implemented**, with 410 tests, 408 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map

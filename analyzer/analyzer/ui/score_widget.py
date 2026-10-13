@@ -24,6 +24,12 @@ _ZOOM_STEPS = (0.5, 0.65, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 class ScoreView(QWidget):
   """One engraved page, scaled, with the selected bars highlighted.
 
+  Can also show a single **system** -- one line of music -- instead of the whole page,
+  which is what the Sync playing tab uses: a line at a time is easier to read, and it
+  removes the awkward question of what to do with the lines above and below the one
+  being played. `set_line(top, bottom)` takes page-pixel coordinates, so the caller
+  keeps working in the coordinates the render and the reveal already speak.
+
   Signals:
     measureClicked: (measure number) on a single click.
     measureActivated: (measure number) on a double click -- the window plays it.
@@ -55,6 +61,7 @@ class ScoreView(QWidget):
     self._range_open = False            # a click has started a range, not finished it
     self._hover_glyph: Optional[str] = None
     self._curtain: List[Tuple[float, float, float, float]] = []
+    self._line: Optional[Tuple[float, float]] = None      # one system, in page pixels
 
   # ------------------------------------------------------------------ content
 
@@ -145,8 +152,11 @@ class ScoreView(QWidget):
     page = self.page()
     if page is None:
       return
+    height = page.height
+    if self._line is not None:
+      height = max(1.0, self._line[1] - self._line[0])
     self.setMinimumSize(max(1, int(page.width * self._zoom)),
-                        max(1, int(page.height * self._zoom)))
+                        max(1, int(height * self._zoom)))
     self.updateGeometry()
 
   def resizeEvent(self, event):
@@ -210,6 +220,24 @@ class ScoreView(QWidget):
     self._playhead = measure
     self.update()
 
+  def set_line(self, top: Optional[float], bottom: Optional[float] = None) -> None:
+    """Show one system only: page-pixel `top`..`bottom`, or None for the whole page.
+
+    Everything the widget does is in page pixels -- the pixmap, the highlights, the
+    curtain -- so this only changes what part of that space is put on screen: the
+    widget shrinks to the line and painting is offset by `top`.
+    """
+    line = None if top is None else (float(top), float(bottom))
+    if line == self._line:
+      return
+    self._line = line
+    self._apply_page_size()
+    self.update()
+
+  def line(self):
+    """The system being shown, in page pixels, or None for the whole page."""
+    return self._line
+
   def set_curtain(self, rects) -> None:
     """Cover these page-pixel rectangles, hiding what has not been played yet.
 
@@ -266,6 +294,10 @@ class ScoreView(QWidget):
       return
 
     target = QRect(0, 0, int(pixmap.width() * self._zoom), int(pixmap.height() * self._zoom))
+    if self._line is not None:
+      # draw the page shifted up so the chosen system starts at the top of the widget
+      painter.setClipRect(self.rect())
+      painter.translate(0, -int(self._line[0] * self._zoom))
     painter.drawPixmap(target, pixmap)
 
     page = self.page()

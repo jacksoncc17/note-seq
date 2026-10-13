@@ -43,6 +43,9 @@ POST_ROLL_S = 0.25
 BY_BEAT = 'every beat'
 BY_BAR = 'every bar'
 
+ONE_LINE = 'one line'
+WHOLE_PAGE = 'whole page'
+
 # Below this the map is telling us it is not sure of a bar's boundary -- the DTW fit
 # was erratic there and the marker was clamped to something plausible. The page follows
 # the map, so it is worth saying so at the moment it matters rather than leaving the
@@ -54,6 +57,10 @@ SPEED_STEP = 0.05
 NUDGE_MIN_MS, NUDGE_MAX_MS = -3000, 3000
 NUDGE_STEP_MS = 25
 PLAY_STEP = 0.05
+# How much air to show above and below the staves of the line being played, in notehead
+# heights (about a staff space each): two is enough for ledger lines and dynamics, and
+# the neighbouring line's ink has the final say.
+LINE_AIR_SPACES = 2.0
 
 
 def warped_clock(seconds: float, start: float, speed: float = 1.0, nudge_ms: float = 0.0,
@@ -135,6 +142,14 @@ class SyncPlayingPanel(QWidget):
 
     self.loop_check = QCheckBox('loop')
     row.addWidget(self.loop_check)
+
+    row.addSpacing(12)
+    row.addWidget(QLabel('view'))
+    self.view_combo = QComboBox()
+    self.view_combo.addItems([ONE_LINE, WHOLE_PAGE])
+    self.view_combo.setToolTip('a single line of music at a time, or the whole page')
+    self.view_combo.currentTextChanged.connect(lambda _text: self._view_changed())
+    row.addWidget(self.view_combo)
 
     row.addSpacing(12)
     row.addWidget(QLabel('reveal'))
@@ -220,7 +235,7 @@ class SyncPlayingPanel(QWidget):
     self.view.set_curtain([])
     if render and render.pages:
       self.view.set_page(render.pages[0].number)
-      self.page_label.setText('page %d / %d' % (self.view.page_number, len(render.pages)))
+      self._show_line(None)
     else:
       self.page_label.setText('no engraved score')
     bars = [m.measure for m in (result.measures if result else [])]
@@ -354,17 +369,16 @@ class SyncPlayingPanel(QWidget):
     if not any(m.measure == measure for m in reveal.marks):
       # the bar is on another page: turn to it, then reveal
       if self.view.show_measure(measure):
-        self.page_label.setText('page %d / %d'
-                                % (self.view.page_number, len(self.render.pages)))
         reveal = self._reveal_for(self.view.page_number)
         if reveal is None:
           return
+    reveal = self._show_line(measure) or reveal
     if self.unit_combo.currentText() == BY_BAR:
       unit = max(0, (reveal.units.get(measure) or 1) - 1)
     else:
       unit = reveal.unit_of(measure, reveal_at, span)
     self.view.set_playhead_measure(measure)
-    self.view.set_curtain(reveal.rects(measure, unit))
+    self.view.set_curtain(self.curtain_rects(reveal, measure, unit))
     if reveal.coarse and measure in reveal.coarse:
       note = ' · by the bar (its durations do not add up)'
     else:
@@ -372,6 +386,84 @@ class SyncPlayingPanel(QWidget):
     self.status.setText('bar %d%s · %.1f s%s%s'
                         % (measure, note, reveal_at, self._unsure_note(measure),
                            self._settings_note()))
+
+  def _line_view(self) -> bool:
+    return self.view_combo.currentText() == ONE_LINE
+
+  def _view_changed(self) -> None:
+    """Switching between one line and the whole page re-lays the view out."""
+    self._reveals = self._reveals                # kept: the reveal does not depend on it
+    if not self._line_view():
+      self.view.set_line(None)
+    self._show_line(self._playing_measure())
+    self._refresh()
+
+  def _playing_measure(self) -> Optional[int]:
+    """The bar the display is showing, if any, so a layout change can keep it."""
+    measure, _span = self._measure_at(self._reveal_seconds(self._seconds))
+    return measure
+
+  def _show_line(self, measure: Optional[int]) -> Optional[scoreview.PageReveal]:
+    """Put the system holding `measure` on screen, and say what the reveal is.
+
+    One line at a time is both cleaner to read and simpler to conceal: with no line
+    above or below it there is no question about what to do with them.
+    """
+    reveal = self._reveal_for(self.view.page_number)
+    if reveal is None:
+      return None
+    if measure is None:
+      # nothing playing: the first line of the page, so the view is never empty
+      measure = min((m.measure for m in reveal.marks), default=None)
+    if measure is None:
+      return None
+    band = reveal.system_band(measure)
+    if band is None:
+      return reveal
+    if self._line_view():
+      self.view.set_line(*self._padded_band(reveal, measure, band))
+      number = reveal.system_number(measure)
+      total = len(reveal.systems)
+      self.page_label.setText('page %d / %d · line %s / %d'
+                              % (self.view.page_number, len(self.render.pages),
+                                 number, total))
+    else:
+      self.view.set_line(None)
+      self.page_label.setText('page %d / %d'
+                              % (self.view.page_number, len(self.render.pages)))
+    return reveal
+
+  def _padded_band(self, reveal: scoreview.PageReveal, measure: int, band):
+    """The line, with as much air above and below as the neighbours allow.
+
+    Ledger lines and dynamics are drawn outside the staves, so a band cut exactly to
+    them clips the music. The air is bounded by where the line above and the line below
+    actually have ink -- showing more than that would put another line's music on screen,
+    and the line below is the future, which must not be readable.
+    """
+    index = reveal.system_number(measure)
+    ink = reveal.system_ink()
+    top_room = bottom_room = LINE_AIR_SPACES * max(1.0, reveal.space)
+    if index is not None and 1 <= index <= len(ink):
+      if index >= 2:
+        top_room = min(top_room, max(0.0, band[0] - ink[index - 2][1] - 1.0))
+      if index < len(ink):
+        bottom_room = min(bottom_room, max(0.0, ink[index][0] - band[1] - 1.0))
+    return (max(0.0, band[0] - top_room), min(reveal.height, band[1] + bottom_room))
+
+  def curtain_rects(self, reveal: scoreview.PageReveal, measure: int, unit: int):
+    """What to cover, cut down to the line being shown when only one is on screen."""
+    rects = reveal.rects(measure, unit)
+    line = self.view.line()
+    if line is None:
+      return rects
+    top, bottom = line
+    out = []
+    for x0, y0, x1, y1 in rects:
+      y0, y1 = max(y0, top), min(y1, bottom)
+      if y1 > y0:
+        out.append((x0, y0, x1, y1))
+    return out
 
   def _unsure_note(self, measure: int) -> str:
     """Flag a bar the map is not sure of: this is where the page can slip."""

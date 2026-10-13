@@ -705,7 +705,7 @@ class PageReveal:
     # note of the next system is written above its staves, so a curtain ending at the
     # next staff box lets it stick out into view -- measured on this score, 319 of the
     # noteheads on four pages did exactly that.
-    ink = self._system_ink()
+    ink = self.system_ink()
     above = ink[index - 1][1] if index > 0 else 0.0
     if index + 1 < len(self.systems):
       below = ink[index + 1][0] - 1.5 * height
@@ -719,8 +719,12 @@ class PageReveal:
       out.append((0.0, below, self.width, self.height))
     return out
 
-  def _system_ink(self) -> List[Tuple[float, float]]:
-    """The topmost and bottommost drawn music of each system, in page pixels."""
+  def system_ink(self) -> List[Tuple[float, float]]:
+    """The topmost and bottommost drawn music of each system, in page pixels.
+
+    A caller showing one line at a time wants this: the air it can show above and
+    below a system is bounded by where the neighbouring line's music starts.
+    """
     ink = [[self.height, 0.0] for _ in self.systems]
     for mark in self.marks:
       index = self._system_index(mark.measure)
@@ -729,6 +733,22 @@ class PageReveal:
       ink[index][0] = min(ink[index][0], mark.y0)
       ink[index][1] = max(ink[index][1], mark.y1)
     return [(top, bottom if bottom > 0 else top) for top, bottom in ink]
+
+  def system_band(self, measure: int) -> Optional[Tuple[float, float]]:
+    """The band of staves a measure is written on -- one line of the page.
+
+    What a caller wants to show a single system at a time, rather than a whole page
+    with the lines above and below the one being played.
+    """
+    index = self._system_index(measure)
+    if index is None or index >= len(self.systems):
+      return None
+    return self.systems[index]
+
+  def system_number(self, measure: int) -> Optional[int]:
+    """Which line of the page this measure is on, counting from 1."""
+    index = self._system_index(measure)
+    return None if index is None else index + 1
 
   def _system_index(self, measure: int) -> Optional[int]:
     """Which line of the page this measure is written on."""

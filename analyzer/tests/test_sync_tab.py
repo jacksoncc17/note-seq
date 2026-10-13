@@ -22,7 +22,8 @@ from PyQt5.QtWidgets import QApplication
 
 from analyzer import library, scoreview
 from analyzer.config import AnalyzerConfig
-from analyzer.ui.sync_tab import BY_BAR, BY_BEAT, SyncPlayingPanel, warped_clock
+from analyzer.ui.sync_tab import (BY_BAR, BY_BEAT, ONE_LINE, WHOLE_PAGE,
+                                 SyncPlayingPanel, warped_clock)
 
 SCORE = pathlib.Path('/home/wei/sheet_music/chopin-waltz-in-a-minor-op-34-no-2.mxl')
 SLUG = 'chopin-waltz-in-a-minor-op-34-no-2'
@@ -384,3 +385,140 @@ def test_the_status_names_a_speed_that_is_not_the_recordings_own(panel):
   tab.play_speed_spin.setValue(0.75)
   tab.on_position(span.start_s + 0.2)
   assert 'play x0.75' in tab.status.text(), tab.status.text()
+
+
+# ---------------------------------------------------------------------------
+# one line at a time
+# ---------------------------------------------------------------------------
+
+def _bars_in_system(reveal, index):
+  top, bottom = reveal.systems[index]
+  return sorted({m.measure for m in reveal.marks
+                 if top - 1 <= (m.y0 + m.y1) / 2 <= bottom + 1})
+
+
+@needs_real
+def test_a_single_line_is_what_is_shown_by_default(panel):
+  """A whole page put the lines above and below on screen, and the curtain then had to
+  eat into the bottom of the line above to keep the next one out of sight."""
+  tab, _player, _piece, _render, cfg = panel
+  assert tab.view_combo.currentText() == ONE_LINE
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  assert len(reveal.systems) > 1, 'this page should have several lines'
+
+  bars = _bars_in_system(reveal, 1)
+  span = next(m for m in tab.result.measures if m.measure == bars[0])
+  tab._playing = True
+  tab.on_position(span.start_s + 0.05)
+
+  line = tab.view.line()
+  assert line is not None, 'one line at a time means the view is given a line'
+  top, bottom = reveal.systems[1]
+  assert line[0] <= top and line[1] >= bottom, 'the line must be fully on screen'
+  assert line[1] - line[0] < 0.75 * reveal.height, \
+      'the widget is showing most of the page, not one line'
+  assert 'line 2 /' in tab.page_label.text(), tab.page_label.text()
+
+
+@needs_real
+def test_only_the_line_being_played_is_on_screen(panel):
+  """The point of it: there is no line above or below to be covered or revealed."""
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  bars = _bars_in_system(reveal, 1)
+  span = next(m for m in tab.result.measures if m.measure == bars[0])
+  tab._playing = True
+  tab.on_position(span.start_s + 0.05)
+
+  line = tab.view.line()
+  zoom = tab.view.zoom()
+  assert tab.view.minimumHeight() == pytest.approx((line[1] - line[0]) * zoom, abs=2), \
+      'the widget is exactly one line tall'
+
+  stray = [m for m in reveal.marks
+           if not (line[0] - 1 <= (m.y0 + m.y1) / 2 <= line[1] + 1)]
+  assert stray, 'the page should have music outside this line'
+  assert all(not (line[0] <= m.y0 and m.y1 <= line[1]) for m in stray)
+
+
+@needs_real
+def test_the_curtain_stays_inside_the_line(panel):
+  """So it can never reach up into the line above or down into the line below."""
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  bars = _bars_in_system(reveal, 2)
+  span = next(m for m in tab.result.measures if m.measure == bars[0])
+  tab._playing = True
+  tab.on_position(span.start_s + 0.05)
+
+  line = tab.view.line()
+  rects = tab.view.curtain()
+  assert rects, 'something should be covered'
+  for x0, y0, x1, y1 in rects:
+    assert y0 >= line[0] - 0.5 and y1 <= line[1] + 0.5, \
+        'a curtain rect (%s) escaped the line %s' % ((y0, y1), line)
+    assert x1 == pytest.approx(reveal.width, abs=1), 'and reach the right edge'
+
+
+@needs_real
+def test_the_view_follows_the_music_line_by_line(panel):
+  """Within one page the page image does not change: the line shown does."""
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  assert len(reveal.systems) > 1
+  tab._playing = True
+  tops = []
+  for index in (0, 1):
+    bars = _bars_in_system(reveal, index)
+    span = next(m for m in tab.result.measures if m.measure == bars[0])
+    tab.on_position(span.start_s + 0.02)
+    tops.append(tab.view.line()[0])
+  assert tops[1] > tops[0], 'the view must move down the page as the music does'
+
+
+@needs_real
+def test_switching_to_the_whole_page_shows_the_whole_page(panel):
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  bars = _bars_in_system(reveal, 1)
+  span = next(m for m in tab.result.measures if m.measure == bars[0])
+  tab._playing = True
+  tab.on_position(span.start_s + 0.05)
+  one_line = tab.view.minimumHeight()
+
+  tab.view_combo.setCurrentText(WHOLE_PAGE)
+  assert tab.view.line() is None
+  assert tab.view.minimumHeight() > one_line * 1.5, 'the page is back'
+  assert 'line' not in tab.page_label.text(), tab.page_label.text()
+
+
+@needs_real
+def test_the_line_shows_air_for_ledger_lines_but_never_the_next_line(panel):
+  """Ledger lines and dynamics sit outside the staves, so a band cut exactly to them
+  clips music -- but the air may not reach the neighbouring line's ink, because the
+  line below is the future and must not be readable."""
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  ink = reveal.system_ink()
+  for index in (0, 1, 2):
+    bars = _bars_in_system(reveal, index)
+    span = next(m for m in tab.result.measures if m.measure == bars[0])
+    tab._playing = True
+    tab.on_position(span.start_s + 0.02)
+    top, bottom = tab.view.line()
+    band = reveal.systems[index]
+    assert top <= band[0] and bottom >= band[1], 'the staves themselves must be shown'
+    if index > 0:
+      assert top >= ink[index - 1][1], \
+          'the line above reaches into view (its ink ends at %.0f, view starts at %.0f)' \
+          % (ink[index - 1][1], top)
+    if index + 1 < len(reveal.systems):
+      assert bottom <= ink[index + 1][0], \
+          'the line below (the future) reaches into view: its ink starts at %.0f, ' \
+          'the view ends at %.0f' % (ink[index + 1][0], bottom)
