@@ -378,6 +378,83 @@ highlighted bar cannot give away how much music is coming. Stopping uncovers the
 again so it can be browsed, and leaving the tab stops covering but keeps the music
 playing.
 
+## Can a learned score follower read our scores? (measured: no)
+
+`cyolo_score_following` (Henkel & Widmer, *Real-time Music Following in Score Sheet
+Images*, Frontiers 2021, MIT) is a real-time score follower: a small YOLO-style detector
+(1.38 M parameters), conditioned on the audio by an LSTM, that predicts note / bar /
+system bounding boxes **on the score page image**. It would be the live version of the
+Sync playing tab — the page following the audio, rather than the audio following a
+pre-computed map, and so with nothing to drift in the bars where our map was clamped.
+
+`analyzer/cyolo.py` exports a piece in the format it reads, so the question could be
+answered by measurement rather than by opinion. It writes `sheets` (page images, uint8,
+255 = paper), `coords` (noteheads with onsets in seconds), `bars` and `systems`, plus the
+performance as a WAV beside it. `tools/cyolo_eval.py` runs their own `eval.py` over that
+file, bridging one environment problem: numpy 2 renamed `numpy.core` to `numpy._core`, so
+an object array written by our numpy cannot be unpickled by the numpy 1.x in their python
+3.7 env — the alias is installed in the runner, and nothing in their checkout is modified.
+
+Two timings are exported, because they separate the two possible obstacles:
+
+| export | audio | ground truth |
+|---|---|---|
+| `--timing synthetic` | the practice track (FluidSynth, one tempo) | the exact bar grid |
+| `--timing recording` | the real performance | the measure map, interpolated inside each bar |
+
+The writer is faithful: round-tripping one of *their* pieces through it reproduces the
+ground truth their loader produces **bit for bit** (identical onsets, coords, bars and
+systems). So the numbers below are about the material, not about the file.
+
+```
+$ ~/miniconda3/envs/cyolo_score_following/bin/python tools/cyolo_eval.py \
+    --repo ~/projects/cyolo_score_following -- \
+    --param_path ~/projects/cyolo_score_following/trained_models/cyolo_sb/best_model.pt \
+    --test_dirs output/cyolo/synthetic --only_onsets --num_workers 1
+```
+
+| | their corpus (16 pieces) | our Chopin, synthetic | our Chopin, recording |
+|---|---|---|---|
+| bar accuracy | **0.873** | 0.000 | 0.000 |
+| system accuracy | **0.947** | 0.000 | 0.000 |
+| frames within 50 ms | **77.5%** | 2.7% | 0.8% |
+| frames within 0.5 s | **85.4%** | 5.8% | 3.9% |
+
+And behind those numbers, what the model does on our page: its predicted note box does
+travel across the page (x spans 386–1474 against a truth of 362–1394), but it is
+**uncorrelated with the music** (r = +0.04 synthetic, +0.14 recording), sits a median of
+**~300 px** from the right place on a 1260 px wide page, and names the correct system only
+**25%** of the time — which is chance for four lines to a page.
+
+Why, with the arithmetic to back it:
+
+* **Their note class is three to eight times larger than anything we draw.** Their
+  detection anchors for a note are 11 x 26 px in the 416 px input the model sees, because
+  their "note" box includes the stem; our notehead boxes are **4.0 x 3.3 px** at the same
+  scale. Yes, ours are also noteheads while theirs are stems — but 4 px is outside the
+  anchor range however you measure it.
+* **Bars and systems are in range and still fail**, which says the obstacle is not only
+  note size: our pages run 22.7 bars per page against their 20, so the density matches —
+  but their systems are **one staff** (five lines, checked in the pixels) and ours are
+  two-staff piano systems, with a system band of 329 px against their 95.
+* **The audio is not the problem.** The synthetic export is FluidSynth piano at one tempo
+  — close to their training domain, which is entirely synthesised performances (the
+  `_do`, `_room` and `_rp_synth` variants are note-dropout, reverb and tempo augmentation)
+  — and it fails as badly as the real recording.
+
+**What that means.** The pretrained checkpoint is not usable on our engravings, and the
+two ways to fix that are both real work: re-engrave our scores to their geometry (one
+staff per system, noteheads of 6–11% of the page height — for a two-staff piano piece
+that means a page or two per bar), or fine-tune their model on our own pages, for which
+we now have the recipe: `analyzer/cyolo.py` plus the practice tracks generate
+MSMD-shaped training data (rendered audio with exact onsets, bar, system and note boxes)
+straight from our own scores. Fine-tuning needs a GPU; there is none on this machine.
+
+What is worth keeping regardless: the *idea* of live following, which for our material is
+better served by online DTW against a practice track — audio against audio, no
+engraving involved, and no training data needed — and this adapter, which makes any
+future checkpoint measurable in minutes.
+
 ## Storage, and the way out to a database
 
 Everything the app keeps lives behind four ports in `store.py`, so no caller knows
@@ -648,6 +725,7 @@ analyzer/
     cards.py                Anki cards: masks, crops, audio, questions, decks
     speech.py               Kokoro text-to-speech for a card's question
     synth.py                practice tracks: the score split by staff, rendered
+    cyolo.py                export a piece for cyolo_score_following (see the README)
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -656,7 +734,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 412 tests, 410 of which run by default (two are
+**M1-M7 are implemented**, with 421 tests, 419 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
