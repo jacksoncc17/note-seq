@@ -828,7 +828,9 @@ analyzer/
     store.py                the storage ports, and the filesystem + memory adapters
     library.py              the domain view: a record plus paths, a map, warnings
     scoreview.py            MusicXML -> page images with a rectangle per measure,
-                            and where each notehead begins for the reveal
+                            and where each notehead begins for the reveal;
+                            render_svg_pages() is the same engraving as SVG, for the
+                            browser (see service/)
     ui/
       main_window.py        the window
       waveform.py           envelope + draggable measure markers
@@ -851,9 +853,11 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 480 tests, 478 of which run here. The two that do not are
+**M1-M7 are implemented**, with 484 tests, 482 of which run here. The two that do not are
 network tests, switched on with `ANALYZER_NETWORK_TESTS=1` (one wants the speech server,
-one a live YouTube search); two more skip if there is no capture device.
+one a live YouTube search); two more skip if there is no capture device. The service
+beside the app has 47 tests of its own -- `python -m pytest service/tests` -- and the two
+suites together are 527 passed, 4 skipped in about four minutes.
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
 * **M4** the engraved score view · **M5a** the phone client
@@ -865,6 +869,10 @@ one a live YouTube search); two more skip if there is no capture device.
 * **listen to me** in that tab: the same reveal, driven by an online-DTW follower reading
   the microphone -- or a file, at speed. Additive, off by default, and switchable off
   wholesale with `ANALYZER_FOLLOW=0`
+* **a web service** beside the app (`service/`, its own README): upload a score and a
+  recording -- or a YouTube URL -- and get a page with the engraved score where any range
+  of bars can be selected and heard. It runs this package's alignment, engraving and
+  measure map unchanged; measured, its map is identical to the desktop app's, bar for bar
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads

@@ -1,0 +1,15 @@
+# Everything the service produces: analysed pieces, uploads, the job database, and the
+# engraving cache. All of it is regenerable from a score and a recording.
+data/
+
+# Bytecode from running the service or its tests.
+__pycache__/
+*.pyc
+
+# Scratch space used while developing, and the browser check's screenshot.
+.scratch/
+
+# The front end's build outputs.
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

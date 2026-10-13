@@ -200,9 +200,17 @@ def test_a_recording_that_was_never_aligned_says_what_is_missing(cfg, tmp_path, 
   (cfg.sheet_music_dir / 'demo.musicxml').unlink()   # and no score to render either
   with running(cfg) as port:
     browser.open('http://127.0.0.1:%d/?piece=demo' % port, wait_for='document.body.innerText.length')
-    time.sleep(1.0)
+    # Poll for the line rather than sleeping a fixed second: the detail fetch is one round
+    # trip, and under a full test run it has been slower than a second -- which failed this
+    # test once, for no reason to do with what it is about.
+    deadline = time.time() + 10
+    line = ''
+    while time.time() < deadline:
+      line = browser.evaluate('document.getElementById("rangeline").textContent')
+      if 'no measure map' in line:
+        break
+      time.sleep(0.2)
     assert browser.evaluate('document.getElementById("play").disabled') is True
-    line = browser.evaluate('document.getElementById("rangeline").textContent')
     assert 'no measure map' in line, line
 
 

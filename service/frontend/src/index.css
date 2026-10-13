@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/* The score is an SVG the server engraved, inlined so each bar can be a click target.
+   Two things worth pinning down here: it must not draw its own frame, and its own
+   <style> block (Verovio's) must keep applying to it. */
+@layer base {
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-stone-50 text-stone-900 antialiased;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+}
+
+/* Where a page of music is drawn.
+   Verovio's output is two nested SVGs: an outer one with a fixed pixel size and no
+   viewBox (840x1138 for this score), and an inner `definition-scale` one carrying the
+   real viewBox (21000x28440). Left alone, the inner drawing is letterboxed inside the
+   outer box and a click target placed by percentage lands beside its bar -- measured at
+   230 px out on a 1400 px window, which is more than a bar.
+   So the container is given the engraving's own aspect ratio and both SVGs are made to
+   fill it: viewBox units then map linearly onto container pixels, no letterboxing, and
+   a bar at x0/width through the page is at x0/width through the box. The click targets
+   are positioned in exactly those percentages. */
+.score-page { @apply relative select-none; }
+.score-page svg { @apply block w-full h-full; }
+
+/* Verovio paints the staves black on nothing; give the paper a page of its own. */
+.score-sheet {
+  @apply relative bg-white shadow-sm ring-1 ring-stone-200 rounded-sm overflow-hidden;
+}
+
+@keyframes flash { from { opacity: 0.9; } to { opacity: 0; } }
+.flash { animation: flash 1.1s ease-out forwards; }

@@ -1,0 +1,4 @@
+# For the service's own tests (the web layer's test client, and pytest).
+-r requirements.txt
+pytest>=8
+httpx>=0.27

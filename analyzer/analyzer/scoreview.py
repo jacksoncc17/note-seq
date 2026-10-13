@@ -1169,6 +1169,89 @@ def write_cache(cfg: AnalyzerConfig, musicxml, render: ScoreRender,
   return manifest
 
 
+@dataclass
+class SvgPage:
+  """One page engraved as SVG, with where its measures are in the SVG's own units.
+
+  The counterpart of `ScorePage`, which carries a PNG and boxes in that PNG's pixels.
+  A browser draws the SVG itself, so the boxes it needs a click tested against are the
+  unscaled ones -- and cairosvg, whose only job was making pixels, is not needed at all.
+  """
+
+  number: int
+  svg: str
+  width: float
+  height: float
+  measures: List[MeasureBox] = field(default_factory=list)
+
+  def to_dict(self) -> Dict[str, object]:
+    return {'number': self.number, 'width': round(self.width, 1),
+            'height': round(self.height, 1),
+            'measures': [box.to_dict() for box in self.measures]}
+
+
+def viewbox_size(svg: str) -> Tuple[float, float]:
+  """The (width, height) of an engraving, from the viewBox Verovio writes."""
+  match = re.search(r'viewBox="([-\d.eE ]+)"', svg)
+  if not match:
+    return (0.0, 0.0)
+  parts = [float(value) for value in match.group(1).split()]
+  if len(parts) != 4:
+    return (0.0, 0.0)
+  return (parts[2], parts[3])
+
+
+def render_svg_pages(cfg: AnalyzerConfig, musicxml,
+                     progress: Progress = None) -> Tuple[List[SvgPage], List[str]]:
+  """Engrave `musicxml` into page SVGs, with the measure boxes that go with them.
+
+  This is `render_score` without the rasteriser: the same engraving options, the same
+  measure geometry, the same warnings -- the difference is that nothing is turned into
+  pixels, so a caller that can draw SVG (a browser) gets the vector score and the boxes
+  in one coordinate system instead of a page image and a scale factor.
+
+  Returns:
+    (pages, warnings), where each page's `measures` are in SVG user units.
+
+  Raises:
+    ScoreRenderError: if the score cannot be read or Verovio fails, as `render_score`.
+  """
+  path = pathlib.Path(musicxml)
+  if not path.is_file():
+    raise ScoreRenderError('no such score: %s' % path)
+  verovio, _cairosvg = _require_engines()
+  try:
+    xml = _score_xml(path)
+  except (OSError, zipfile.BadZipFile) as e:
+    raise ScoreRenderError('could not read %s: %s' % (path.name, e))
+  _report(progress, 5.0, 'reading the score')
+  toolkit = verovio.toolkit()
+  toolkit.setOptions({'pageWidth': 2100, 'scale': 40, 'adjustPageHeight': True,
+                      'svgBoundingBoxes': True, 'header': 'none', 'footer': 'none'})
+  try:
+    toolkit.loadData(xml)
+  except Exception as e:
+    raise ScoreRenderError('verovio could not read %s: %s' % (path.name, e))
+  total = max(1, toolkit.getPageCount())
+  ids = measure_ids(toolkit.getMEI())
+  if not ids:
+    raise ScoreRenderError('no measures were found in %s' % path.name)
+
+  pages: List[SvgPage] = []
+  warnings: List[str] = []
+  for number in range(1, total + 1):
+    _report(progress, 5.0 + 90.0 * (number - 1) / total,
+            'engraving page %d of %d' % (number, total))
+    svg = toolkit.renderToSVG(number)
+    boxes, box_warnings = _measure_geometry(svg, ids)
+    warnings.extend(box_warnings)
+    width, height = viewbox_size(svg)
+    pages.append(SvgPage(number=number, svg=svg, width=width, height=height,
+                         measures=boxes))
+  _report(progress, 100.0, 'engraved %d page(s)' % len(pages))
+  return pages, warnings
+
+
 def render_score(cfg: AnalyzerConfig, musicxml, scale: float = RASTER_SCALE,
                  force: bool = False, progress: Progress = None) -> ScoreRender:
   """Engrave `musicxml` into page images with measure geometry.

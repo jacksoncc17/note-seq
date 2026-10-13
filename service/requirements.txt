@@ -1,0 +1,9 @@
+# The web layer. Everything else the service needs -- librosa, soundfile, verovio,
+# numpy, yt-dlp -- is already in the checkout's venv for the analyzer, and the service
+# imports the analyzer rather than reimplementing it. Install these into that venv:
+#
+#   .venv/bin/pip install -r service/requirements.txt
+#
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9

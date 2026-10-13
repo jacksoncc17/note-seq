@@ -183,3 +183,68 @@ def test_round_trip_through_a_cache_dict(tmp_path):
   assert restored.measure_count == render.measure_count
   assert restored.box_of(3)[1] == render.box_of(3)[1]
   assert [p.number for p in restored.pages] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# the same engraving, without the rasteriser (what the web service draws)
+# ---------------------------------------------------------------------------
+
+@needs_verovio
+def test_svg_pages_carry_the_same_geometry_as_the_rendered_pages(cfg):
+  """`render_svg_pages` must agree with `render_score` about where the bars are.
+
+  The two differ only in what they do with the engraving: one rasterises each page and
+  scales the boxes into image pixels, the other hands back the SVG and the boxes in
+  SVG units. If they ever disagree, the browser's click targets and the desktop app's
+  hit-testing are looking at two different scores.
+  """
+  pages, warnings = scoreview.render_svg_pages(cfg, CHOPIN)
+  assert len(pages) == 9
+  assert warnings == []
+
+  render = scoreview.render_score(cfg, CHOPIN)
+  assert len(render.pages) == len(pages)
+
+  # The raster is about 1260 px wide for a page 21000 units across, so the factor from
+  # the SVG's own units to image pixels is about 0.06. What matters is not the number
+  # but that it is the *same* number everywhere -- one scale for every page and every
+  # box, which is what makes a bar's box mean the same thing in both views.
+  factors = set()
+  for page, raster in zip(pages, render.pages):
+    assert page.number == raster.number
+    assert len(page.measures) == len(raster.measures)
+    factor = raster.width / page.width
+    factors.add(round(factor, 6))
+    for box, scaled in zip(page.measures, raster.measures):
+      assert box.number == scaled.number
+      assert box.x0 * factor == pytest.approx(scaled.x0, abs=1.0)
+      assert box.x1 * factor == pytest.approx(scaled.x1, abs=1.0)
+      assert box.y0 * factor == pytest.approx(scaled.y0, abs=1.0)
+      assert box.y1 * factor == pytest.approx(scaled.y1, abs=1.0)
+  assert len(factors) == 1, 'every page must be scaled by the same factor'
+  assert 0.04 < factors.pop() < 0.1
+
+
+@needs_verovio
+def test_svg_pages_are_the_document_the_browser_can_draw(cfg):
+  pages, _warnings = scoreview.render_svg_pages(cfg, CHOPIN)
+  page = pages[0]
+  assert page.svg.startswith('<svg')
+  assert page.svg.count('class="measure">') == len(page.measures) == 31
+  assert page.svg.rstrip().endswith('</svg>')
+  width, height = scoreview.viewbox_size(page.svg)
+  assert (width, height) == (page.width, page.height)
+  assert page.to_dict()['measures'][0]['number'] == 1
+  # Every bar, exactly once, across the pages.
+  numbers = sorted(box.number for drawn in pages for box in drawn.measures)
+  assert numbers == list(range(1, 205))
+
+
+def test_viewbox_size_of_something_that_is_not_svg(cfg):
+  assert scoreview.viewbox_size('<svg></svg>') == (0.0, 0.0)
+  assert scoreview.viewbox_size('not an svg at all') == (0.0, 0.0)
+
+
+def test_svg_pages_reports_a_missing_score(cfg, tmp_path):
+  with pytest.raises(scoreview.ScoreRenderError):
+    scoreview.render_svg_pages(cfg, tmp_path / 'nothing.mxl')
