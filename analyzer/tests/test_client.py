@@ -214,9 +214,16 @@ def test_a_piece_with_nothing_at_all_says_so(cfg, tmp_path, browser):
   cfg.audio_meta_path('demo').unlink()
   with running(cfg) as port:
     browser.open('http://127.0.0.1:%d/?piece=demo' % port, wait_for='document.body.innerText.length')
-    time.sleep(1.0)
+    # wait for the piece detail to arrive rather than sleeping a fixed second: under a full
+    # test run the fetch can take longer, and this failed once for that reason alone
+    deadline = time.time() + 10
+    body = ''
+    while time.time() < deadline:
+      body = browser.evaluate('document.body.innerText')
+      if 'nothing to play' in body:
+        break
+      time.sleep(0.2)
     assert browser.evaluate('document.getElementById("play").disabled') is True
-    body = browser.evaluate('document.body.innerText')
     assert 'nothing to play' in body, body[:200]
     assert browser.evaluate('document.querySelectorAll(".chip").length') == 0
 

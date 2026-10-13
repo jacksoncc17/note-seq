@@ -455,6 +455,64 @@ better served by online DTW against a practice track — audio against audio, no
 engraving involved, and no training data needed — and this adapter, which makes any
 future checkpoint measurable in minutes.
 
+## Following a performance live (built, and measured honestly)
+
+`syncmap` answers "when is bar 40?" *afterwards*: it aligns the whole recording to the whole
+score in one pass. `follow.py` answers it *while it happens* -- the page following the
+microphone, at whatever tempo and rubato is being played, with no map to drift in the bars
+where the fit had to be clamped. The method is online DTW: one frame of audio at a time, a
+single row of costs kept in a band from `BACKTRACK` frames behind to `MAX_ADVANCE` ahead,
+and the position emitted as it goes. A frame is one FFT and a few dozen dot products --
+**0.3 ms against a 46 ms hop**, so live input is nowhere near the limit.
+
+What it does, measured:
+
+| material | result |
+|---|---|
+| the practice track (a rendered score) | tracks to **0.09 s** over a minute |
+| that track slowed to 0.7x | **0.03 s** of drift over 45 s |
+| that track sped to 1.3x | **0.12 s** |
+| fed silence | holds, reports quality 0.00, "unsure" on every frame |
+| fed noise | walks no faster than real time, but *reports* 0.90 quality (see below) |
+| **a real piano recording against a rendered reference** | **does not track** -- 55 bars behind |
+
+That last row is the honest one, and it is why nothing in the UI uses this yet. Two
+candidates for the cause were measured and both were wrong, which is the interesting part:
+
+* **Compressing the spectrum is exactly backwards.** `log1p(gamma * |X|)` before folding to
+  pitch classes looks like the obvious way to compare a real instrument with a rendering,
+  and it destroys the thing that matters -- *contrast*, how much cheaper the right position
+  is than a wrong one:
+
+  | compression | rendered vs rendered | real recording vs rendered |
+  |---|---|---|
+  | none | 0.000 / 0.336 (**+0.336**) | 0.235 / 0.322 (**+0.086**) |
+  | log1p(1x) | 0.000 / 0.128 (+0.128) | 0.100 / 0.114 (+0.014) |
+  | log1p(10x) | 0.000 / 0.052 (+0.052) | 0.037 / 0.043 (+0.006) |
+  | log1p(100x) | 0.000 / 0.015 (+0.015) | 0.014 / 0.012 (**-0.002**) |
+
+  At 100x the right position is *indistinguishable* from a wrong one, so the follower has
+  nothing to follow and obeys its step penalties instead: it walked the piece at the
+  reference's own tempo and reported high confidence while doing it. It also scored well
+  against a real recording for a while -- degenerately, because that performance's average
+  tempo happens to equal the reference's. A metric that rewards ignoring the audio is worse
+  than no metric.
+* **The step penalty must be small compared with the cost differences the music produces**
+  (about 0.01 here). At 0.12 the penalty, not the audio, decided the path: a 0.7x
+  performance was tracked as if it were 1.0x. Two features written to fix the symptoms of
+  that -- an adaptive rate estimate, and a backward step to correct overshoot -- were both
+  measured to be worse than useless and are in the code switched off, with what they did
+  recorded next to them: the rate estimate is a feedback loop that ran away (26 s of drift
+  in 85 s), and backtracking lets the path hover around whichever bar matches best instead
+  of following (it tracked half of a 0.7x rendering and then stopped).
+
+Matching a real instrument needs a **real reference**. With the recording as its own
+reference the follower tracks it exactly -- 309.4 s reached against 309.5 s of audio -- so
+the features are capable; it is the render-versus-real pair that has no contrast. Following
+somebody at a piano therefore wants the piece's own recording as the reference, which means
+the bar timeline has to come from the measure map rather than from a uniform grid. That is
+the next piece of work, and the reason this one is not wired to a microphone.
+
 ## Storage, and the way out to a database
 
 Everything the app keeps lives behind four ports in `store.py`, so no caller knows
@@ -726,6 +784,7 @@ analyzer/
     speech.py               Kokoro text-to-speech for a card's question
     synth.py                practice tracks: the score split by staff, rendered
     cyolo.py                export a piece for cyolo_score_following (see the README)
+    follow.py               streaming score following (online DTW against the score)
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -734,7 +793,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 421 tests, 419 of which run by default (two are
+**M1-M7 are implemented**, with 434 tests, 432 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
