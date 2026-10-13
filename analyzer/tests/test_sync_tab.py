@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import QApplication
 
 from analyzer import library, scoreview
 from analyzer.config import AnalyzerConfig
-from analyzer.ui.sync_tab import BY_BAR, BY_BEAT, SyncPlayingPanel
+from analyzer.ui.sync_tab import BY_BAR, BY_BEAT, SyncPlayingPanel, warped_clock
 
 SCORE = pathlib.Path('/home/wei/sheet_music/chopin-waltz-in-a-minor-op-34-no-2.mxl')
 SLUG = 'chopin-waltz-in-a-minor-op-34-no-2'
@@ -231,3 +231,116 @@ def test_leaving_the_tab_stops_covering_the_page(panel):
   assert tab.view.curtain()
   tab.unfollow()
   assert tab.view.curtain() == []
+
+
+# ---------------------------------------------------------------------------
+# lining the page up with the music by hand
+# ---------------------------------------------------------------------------
+
+def test_the_page_clock_is_the_music_clock_unless_told_otherwise():
+  """Untouched dials change nothing: the display is the map's own times."""
+  assert warped_clock(30.0, start=20.0) == 30.0
+  assert warped_clock(30.0, start=20.0, speed=1.0, nudge_ms=0.0) == 30.0
+
+
+def test_page_speed_scales_the_page_against_the_music():
+  """The music running ahead of the page is what a map that is too slow looks like."""
+  assert warped_clock(30.0, start=20.0, speed=2.0) == 40.0
+  assert warped_clock(30.0, start=20.0, speed=0.5) == 25.0
+
+
+def test_the_warp_is_anchored_at_the_start_of_the_passage():
+  """Otherwise turning the dial would jump you to another bar mid-passage."""
+  for speed in (0.5, 1.0, 2.0):
+    assert warped_clock(20.0, start=20.0, speed=speed) == 20.0, speed
+
+
+def test_a_nudge_shifts_the_page_in_time():
+  assert warped_clock(30.0, start=20.0, nudge_ms=-250) == pytest.approx(29.75)
+  assert warped_clock(30.0, start=20.0, nudge_ms=500) == pytest.approx(30.5)
+
+
+def test_the_page_cannot_run_past_the_passage_being_played():
+  """At speed 4 the page reaches the last bar and waits, rather than running off."""
+  assert warped_clock(100.0, start=0.0, speed=4.0, end=60.0) == 60.0
+  assert warped_clock(0.0, start=10.0, nudge_ms=-5000) == 0.0, 'and never before zero'
+
+
+@needs_real
+def test_raising_the_page_speed_advances_the_page_sooner(panel):
+  """The complaint this answers: the music gets ahead of the page."""
+  tab, _player, _piece, _render, _cfg = panel
+  tab.set_range(40, 43)
+  tab.play()
+  start = tab._range[0]
+  span = next(m for m in tab.result.measures if m.measure == 40)
+  clock = start + (span.start_s - start) + 1.5        # 1.5 s into the passage
+
+  tab._playing = True
+  tab.speed_spin.setValue(1.0)
+  tab.on_position(clock)
+  plain = tab.view.curtain()[0][0]
+  plain_status = tab.status.text()
+
+  tab.speed_spin.setValue(1.5)
+  tab.on_position(clock)                              # same clock, faster page
+  faster = tab.view.curtain()[0][0]
+  assert faster > plain, 'a raised page speed must uncover more, not less'
+  assert 'x1.50' in tab.status.text(), tab.status.text()
+  assert 'x1.50' not in plain_status
+
+
+@needs_real
+def test_a_nudge_moves_the_page_within_the_bar(panel):
+  tab, _player, _piece, _render, _cfg = panel
+  tab.set_range(40, 43)
+  tab.play()
+  start = tab._range[0]
+  span = next(m for m in tab.result.measures if m.measure == 40)
+  clock = start + (span.start_s - start) + 1.0
+
+  tab._playing = True
+  tab.on_position(clock)
+  plain = tab.view.curtain()[0][0]
+  tab.nudge_spin.setValue(-400)                       # reveal earlier
+  tab.on_position(clock)
+  assert tab.view.curtain()[0][0] != plain, 'the nudge must move the boundary'
+  assert 'ms' in tab.status.text(), tab.status.text()
+
+
+@needs_real
+def test_moving_a_dial_mid_passage_does_not_jump_the_bar(panel):
+  """The anchor is the passage start, so a dial change cannot skip music."""
+  tab, _player, _piece, _render, _cfg = panel
+  tab.set_range(40, 43)
+  tab.play()
+  span = next(m for m in tab.result.measures if m.measure == 40)
+  tab._playing = True
+  tab.on_position(span.start_s + 0.2)
+  before = tab.view.curtain()[0][0]
+  tab.speed_spin.setValue(1.05)                       # a small correction
+  after = tab.view.curtain()[0][0]
+  assert abs(after - before) < 40, 'a 5%% correction moved the page %.0f px' % abs(after - before)
+
+
+@needs_real
+def test_the_tab_says_when_the_map_is_unsure_of_a_bar(panel):
+  """The page follows the map, so where the map is guessing the page can slip -- and
+  saying which bars those are is more use than leaving the player to guess. This score
+  has eleven of them."""
+  tab, _player, piece, _render, _cfg = panel
+  unsure = [m.measure for m in tab.result.measures
+            if m.confidence is not None and m.confidence < 0.5]
+  assert unsure, 'this score is expected to have low-confidence bars'
+  sure = [m.measure for m in tab.result.measures
+          if m.confidence is not None and m.confidence > 0.8]
+  tab._playing = True
+
+  def status_for(measure):
+    span = next(m for m in tab.result.measures if m.measure == measure)
+    tab.view.set_page(tab.render.box_of(measure)[0].number)
+    tab.on_position(span.start_s + 0.05)
+    return tab.status.text()
+
+  assert 'map unsure' in status_for(unsure[0]), status_for(unsure[0])
+  assert 'map unsure' not in status_for(sure[0]), status_for(sure[0])

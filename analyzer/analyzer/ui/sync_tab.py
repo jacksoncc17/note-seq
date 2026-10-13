@@ -26,8 +26,8 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton,
-                             QScrollArea, QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
+                             QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from .. import library, scoreview, syncmap
 from ..config import AnalyzerConfig
@@ -42,6 +42,46 @@ POST_ROLL_S = 0.25
 
 BY_BEAT = 'every beat'
 BY_BAR = 'every bar'
+
+# Below this the map is telling us it is not sure of a bar's boundary -- the DTW fit
+# was erratic there and the marker was clamped to something plausible. The page follows
+# the map, so it is worth saying so at the moment it matters rather than leaving the
+# player to wonder why the page slipped.
+UNSURE_CONFIDENCE = 0.5
+
+SPEED_MIN, SPEED_MAX = 0.25, 4.0
+SPEED_STEP = 0.05
+NUDGE_MIN_MS, NUDGE_MAX_MS = -3000, 3000
+NUDGE_STEP_MS = 25
+
+
+def warped_clock(seconds: float, start: float, speed: float = 1.0, nudge_ms: float = 0.0,
+                 end: Optional[float] = None) -> float:
+  """The clock the page is revealed by, from the clock the music is playing by.
+
+  The display follows the measure map, and a map is an estimate: DTW fits bar boundaries
+  to a recording to within a few hundred milliseconds at best, and on this score twenty
+  bars had to be clamped because the fit there was erratic. Where the map is slow the
+  music gets ahead of the page, and no care in the reveal can fix that -- the times it
+  is handed are wrong. So the two clocks are separated here and can be lined up by hand:
+
+    * **page speed** scales how fast the page advances relative to the music, for a map
+      that is uniformly too slow (or too fast);
+    * **nudge** shifts the page in milliseconds, for a constant lag -- a map that is
+      late everywhere, or the small delay of a 40 ms position tick.
+
+  The warp is anchored at the start of the passage being played, so moving either dial
+  does not change which bar you are on at that moment, and the result is clamped to the
+  passage: at 2 the page reaches the last bar and waits there while the music finishes,
+  rather than running off the end.
+  """
+  if speed <= 0:
+    speed = 1.0
+  warped = float(start) + (float(seconds) - float(start)) * float(speed)
+  warped += float(nudge_ms) / 1000.0
+  if end is not None:
+    warped = min(warped, float(end))
+  return max(0.0, warped)
 
 
 class SyncPlayingPanel(QWidget):
@@ -58,6 +98,9 @@ class SyncPlayingPanel(QWidget):
     self.last_bar = 1
     self._reveals: Dict[int, scoreview.PageReveal] = {}
     self._playing = False
+    self._range: Optional[Tuple[float, Optional[float]]] = None
+    self._seconds = 0.0
+    self._confidence: Dict[int, Optional[float]] = {}
 
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -71,10 +114,11 @@ class SyncPlayingPanel(QWidget):
     self.scroll.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
     layout.addWidget(self.scroll, 1)
 
-    hint = QLabel('Press ▶ and read: the music you have not reached yet is covered, '
-                  'so it cannot be read ahead. Stop to uncover the page again.')
-    hint.setStyleSheet('color: #8a8a8a;')
-    layout.addWidget(hint)
+    self.hint = QLabel()
+    self.hint.setWordWrap(True)
+    self.hint.setStyleSheet('color: #8a8a8a;')
+    layout.addWidget(self.hint)
+    self._set_hint()
 
   def _controls(self) -> QHBoxLayout:
     row = QHBoxLayout()
@@ -98,6 +142,29 @@ class SyncPlayingPanel(QWidget):
     self.unit_combo.setToolTip('how finely the page is uncovered as it plays')
     self.unit_combo.currentTextChanged.connect(lambda _text: self._refresh())
     row.addWidget(self.unit_combo)
+
+    # The map is an estimate, so the page can run behind the music or ahead of it. These
+    # two line the page up with what is actually heard; see `warped_clock`.
+    row.addSpacing(12)
+    row.addWidget(QLabel('page speed'))
+    self.speed_spin = QDoubleSpinBox()
+    self.speed_spin.setRange(SPEED_MIN, SPEED_MAX)
+    self.speed_spin.setSingleStep(SPEED_STEP)
+    self.speed_spin.setDecimals(2)
+    self.speed_spin.setValue(1.0)
+    self.speed_spin.setSuffix('x')
+    self.speed_spin.setToolTip('raise this if the music runs ahead of the page, '
+                               'lower it if the page runs ahead of the music')
+    self.speed_spin.valueChanged.connect(lambda _value: self._refresh())
+    row.addWidget(self.speed_spin)
+
+    self.nudge_spin = QSpinBox()
+    self.nudge_spin.setRange(NUDGE_MIN_MS, NUDGE_MAX_MS)
+    self.nudge_spin.setSingleStep(NUDGE_STEP_MS)
+    self.nudge_spin.setSuffix(' ms')
+    self.nudge_spin.setToolTip('shift the page in time; negative reveals it earlier')
+    self.nudge_spin.valueChanged.connect(lambda _value: self._refresh())
+    row.addWidget(self.nudge_spin)
 
     self.page_prev = QPushButton('‹')
     self.page_prev.setFixedWidth(32)
@@ -124,6 +191,9 @@ class SyncPlayingPanel(QWidget):
     self.result = result
     self._reveals = {}
     self._playing = False
+    self._range = None
+    self._confidence = {m.measure: m.confidence for m in (result.measures if result else [])}
+    self._set_hint()
     self.view.set_render(render)
     self.view.set_curtain([])
     if render and render.pages:
@@ -135,6 +205,17 @@ class SyncPlayingPanel(QWidget):
     if bars:
       self.first_bar, self.last_bar = min(bars), max(bars)
     self._update_ready()
+
+  def _set_hint(self) -> None:
+    """What the dials are for, and any warning about the map the page follows."""
+    lines = ['Press ▶ and read: the music you have not reached yet is covered, so it '
+             'cannot be read ahead. Stop to uncover the page again.',
+             'The page follows the measure map, which is an estimate: if the music '
+             'runs ahead of the page, raise “page speed”; if the page is ahead of the '
+             'music, lower it. “nudge” shifts the page in time.']
+    if self.result is not None:
+      lines.extend(self.result.warnings[:1])
+    self.hint.setText('\n'.join(lines))
 
   def set_range(self, first: int, last: int) -> None:
     self.first_bar, self.last_bar = min(first, last), max(first, last)
@@ -167,6 +248,8 @@ class SyncPlayingPanel(QWidget):
     duration = self.player.duration
     start = max(0.0, span[0] - PRE_ROLL_S)
     end = min(duration, span[1] + POST_ROLL_S) if duration else span[1] + POST_ROLL_S
+    # the dials are anchored here, so turning one mid-passage does not shift the bar
+    self._range = (start, end)
     self._playing = True
     if not self.player.play_range(start, end):
       self.status.setText('could not play that range')
@@ -225,6 +308,12 @@ class SyncPlayingPanel(QWidget):
       self._reveals[page_number] = cached
     return cached
 
+  def _reveal_seconds(self, seconds: float) -> float:
+    """Where to reveal up to, for a clock reading: the music's own times, adjusted."""
+    start, end = self._range or (0.0, None)
+    return warped_clock(seconds, start, speed=self.speed_spin.value(),
+                        nudge_ms=self.nudge_spin.value(), end=end)
+
   def _refresh(self, seconds: Optional[float] = None) -> None:
     """Uncover up to the clock's position, or up to nothing if not playing."""
     if not self._playing:
@@ -233,7 +322,8 @@ class SyncPlayingPanel(QWidget):
     if seconds is None:
       seconds = self._last_seconds()
     self._seconds = seconds
-    measure, span = self._measure_at(seconds)
+    reveal_at = self._reveal_seconds(seconds)
+    measure, span = self._measure_at(reveal_at)
     if measure is None:
       return
     reveal = self._reveal_for(self.view.page_number)
@@ -250,16 +340,32 @@ class SyncPlayingPanel(QWidget):
     if self.unit_combo.currentText() == BY_BAR:
       unit = max(0, (reveal.units.get(measure) or 1) - 1)
     else:
-      unit = reveal.unit_of(measure, seconds, span)
+      unit = reveal.unit_of(measure, reveal_at, span)
     self.view.set_playhead_measure(measure)
     self.view.set_curtain(reveal.rects(measure, unit))
     if reveal.coarse and measure in reveal.coarse:
-      self.status.setText('bar %d · by the bar (its durations do not add up)'
-                          % measure)
+      note = ' · by the bar (its durations do not add up)'
     else:
-      self.status.setText('bar %d · beat %d of %d · %.1f s'
-                          % (measure, unit + 1, max(1, reveal.units.get(measure) or 1),
-                             seconds))
+      note = ' · beat %d of %d' % (unit + 1, max(1, reveal.units.get(measure) or 1))
+    self.status.setText('bar %d%s · %.1f s%s%s'
+                        % (measure, note, reveal_at, self._unsure_note(measure),
+                           self._settings_note()))
+
+  def _unsure_note(self, measure: int) -> str:
+    """Flag a bar the map is not sure of: this is where the page can slip."""
+    confidence = self._confidence.get(measure)
+    if confidence is None or confidence >= UNSURE_CONFIDENCE:
+      return ''
+    return ' · map unsure here (%.2f)' % confidence
+
+  def _settings_note(self) -> str:
+    """Say when the page is being nudged off the map, so a wrong setting is visible."""
+    speed = self.speed_spin.value()
+    nudge = self.nudge_spin.value()
+    if abs(speed - 1.0) < 0.001 and nudge == 0:
+      return ''
+    return ' · page %s%+.2f ms' % ('x%.2f' % speed if abs(speed - 1.0) > 0.001 else '',
+                                   nudge)
 
   def _last_seconds(self) -> float:
     return getattr(self, '_seconds', 0.0)

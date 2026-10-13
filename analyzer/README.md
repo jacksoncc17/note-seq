@@ -240,7 +240,7 @@ been reached yet is covered**, so it cannot be read off the screen in advance. I
 recall aid rather than a viewer: you have to know what comes next, at tempo.
 
 ```
-Sync playing   [▶ Play] [■] [loop]   reveal [every beat ▾]   ‹ page 2/9 ›
+Sync playing   [▶ Play] [■] [loop]  reveal [every beat ▾]  page speed [1.00 x] [0 ms]
                bar 40 · beat 2 of 3 · 62.9 s
 ```
 
@@ -272,6 +272,8 @@ Four things this cost, each of which was a wrong version first:
   can clip a notehead that has just been played: 54 of 78,258, five badly. That is the
   right way round — the feature exists so the next notes cannot be read.
 
+### When the page and the music disagree
+
 The clock is the **measure map's**: bars are timed by the recording, and the units
 inside a bar are taken as evenly spaced across the time the map gives that bar. That is
 the one estimate here — a performance does not announce its beats, so a fermata or a
@@ -279,6 +281,37 @@ big rallentando *inside* a bar can put the reveal a fraction of a beat out, whic
 what the every-bar mode is for. Worth knowing about this score: twelve of its bars hold
 three and a half quarters under a 3/4 signature (fermata bars — the MusicXML says so),
 so those bars have a fourth unit rather than the three the signature implies.
+
+**But the deeper limitation is the map, not the reveal.** A DTW map fits bar boundaries
+to a real performance, and it says so itself when it struggled: on this score it warns
+that the fit was erratic in **20 bars** (raw bar lengths ran 0.09–7.24 s) and that those
+markers were clamped to something plausible, and eleven bars come back with a
+confidence under 0.5 — bars 38, 46, 48, 67, 85, 107, 110, 115, 156, 188 and 204. The
+page follows the map, so **those are the places the page can slip**, by up to about a
+second, and no amount of care in the reveal can fix times that are themselves guesses.
+
+So the two clocks are separated and can be lined up by hand:
+
+* **page speed** (0.25–4.00×) scales how fast the page advances against the music — the
+  correction for a map that is uniformly too slow, which is what "the music is running
+  ahead of the page" looks like;
+* **nudge** (±3 s) shifts the page in time, for a constant lag — a map that is late
+  everywhere, or the small delay of a 40 ms position tick.
+
+Both are anchored at the start of the passage being played, so turning a dial mid-flight
+does not jump you to another bar, and the result is clamped to the passage: at 4× the
+page reaches the last bar and waits there rather than running off the end. The status
+line names the setting whenever it is not 1.00×/0 ms, and says **“map unsure here”** on
+the bars the map has no confidence in — which is the honest answer to "why did the page
+slip just there?".
+
+Measured on bars 40–43 of this score, 3.0 s into the passage: 1.00× shows bar 42 beat 3,
+1.15× shows bar 43 beat 1, and a −250 ms nudge pulls the same clock back to bar 42
+beat 2.
+
+The dial is a compensation, not a cure. Where the map is unsure the right fix is to drag
+those markers in the **Recording** tab (or re-align) — the tab now tells you which bars
+they are as you reach them.
 
 The covering is **painted**, not masked in the SVG, and that is not a shortcut: the
 cards need element masking because Verovio's own note box is too tight to hide a single
@@ -566,7 +599,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 383 tests, 381 of which run by default (two are
+**M1-M7 are implemented**, with 392 tests, 390 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
@@ -574,7 +607,8 @@ opt-in: one needs the speech server on the network, one needs an audio device).
 * **M6** storage behind ports a database can implement
 * **M7** Anki cards for a selected passage, exported as `.apkg`
 * practice tracks on the phone: the score whole, or one hand at a time
-* **Sync playing** in the window: the score revealed only as far as the music has got
+* **Sync playing** in the window: the score revealed only as far as the music has got,
+  with page speed and nudge dials for lining the page up with the recording
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads
