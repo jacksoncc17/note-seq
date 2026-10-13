@@ -517,12 +517,13 @@ rather than from a uniform grid. That is built: see below.
 ### The microphone, and the switch that removes it
 
 The Sync playing tab has a second row: **listen to me**. Off by default, and when it is off
-nothing about it exists -- no device, no timer, no reference. Ticked, the page is revealed
-from the position the follower finds in the incoming audio instead of from the recording's
-clock. It is one more clock into the *same* reveal: page turns, the line view, the curtain,
-and both dials behave exactly as they do when the recording drives it, and while it is
-listening the recording's own position is ignored (the recording being played may not even
-be audible -- though it can be, which is how you try this without a piano).
+there is nothing listening and nothing to listen with -- no device, no reference built, no
+clock running. Ticked, the page is revealed from the position the follower finds in the
+incoming audio instead of from the recording's clock. It is one more clock into the *same*
+reveal: page turns, the line view, the curtain, and both dials behave exactly as they do
+when the recording drives it, and while it is listening the recording's own position is
+ignored (the recording being played may not even be audible -- though it can be, which is
+how you try this without a piano).
 
 Three sources, because a feature that needs a piano in the room to be tried is a feature
 nobody tries:
@@ -530,8 +531,13 @@ nobody tries:
 | source | what it is for |
 |---|---|
 | **microphone** | the real thing: your piano, followed against the piece's recording |
-| **practice track** | the rendered track fed in at speed -- the pipeline, seen working, with no piano and no map to trust |
+| **practice track** | the rendered track fed in at speed -- heard by the follower, not played aloud -- so the pipeline can be seen working with no piano in the room |
 | **a file** | anything else you want to try, followed against the recording |
+
+The device list keeps the sound server's **monitors**, marked *(what is playing)*. Choose
+one and press ▶: the recording goes to the sound card, the follower hears what the card is
+playing, and the page turns itself -- the whole live path, with no piano and no microphone,
+which is how it was checked here.
 
 `capture.py` is where the blocks come from. The microphone shells out to `parecord`
 (PipeWire/PulseAudio), falling back to `arecord` and `pw-record`: no Python audio library,
@@ -845,7 +851,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 479 tests, 477 of which run here. The two that do not are
+**M1-M7 are implemented**, with 480 tests, 478 of which run here. The two that do not are
 network tests, switched on with `ANALYZER_NETWORK_TESTS=1` (one wants the speech server,
 one a live YouTube search); two more skip if there is no capture device.
 
