@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import pathlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]      # the note-seq checkout
@@ -20,6 +20,18 @@ ANALYZER_DIR = PACKAGE_DIR.parent                       # analyzer/
 def _path(env: str, default: pathlib.Path) -> pathlib.Path:
   raw = os.environ.get(env)
   return pathlib.Path(raw).expanduser() if raw else default
+
+
+def _flag(env: str, default: bool = True) -> bool:
+  """A boolean from the environment: anything but a clear no means yes.
+
+  Read when a config is built rather than when this module is imported, so a test
+  (or a shell that exports the variable late) gets what it asked for.
+  """
+  raw = os.environ.get(env)
+  if raw is None:
+    return default
+  return raw.strip().lower() not in ('0', 'no', 'off', 'false')
 
 
 @dataclass
@@ -40,6 +52,13 @@ class AnalyzerConfig:
   # Which storage adapter `store.open_repository` should build. Changing this to
   # 'sqlite' (or anything else registered there) is the whole of a database move.
   backend: str = os.environ.get('ANALYZER_BACKEND', 'filesystem')
+
+  # Listening to the piano and revealing the page from what is heard -- the online
+  # follower. It is an addition, not a foundation: with `ANALYZER_FOLLOW=0` the Sync
+  # tab simply has no such controls, nothing imports a microphone, and every other
+  # way of revealing the page (the timer, the map, the dials) is untouched. Set the
+  # variable to anything that reads as no: 0, no, off, false.
+  follow_enabled: bool = field(default_factory=lambda: _flag('ANALYZER_FOLLOW', True))
 
   # Audio is cached rather than streamed: yt-dlp is slow, and both alignment and
   # playback want random access to decoded samples.

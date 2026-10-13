@@ -243,6 +243,7 @@ recall aid rather than a viewer: you have to know what comes next, at tempo.
 Sync playing  [▶ Play] [■] [loop] [ ] bar outline   view [one line ▾]
               reveal [every beat ▾]  play speed [1.00 x] [1x]  page speed [1.00 x] [0 ms]
               page 2 / 9 · line 2 / 4      bar 40 · beat 2 of 3 · 62.9 s
+              [ ] listen to me  [microphone ▾] [default device ▾]   not listening
 ```
 
 Two things that look like boxes, and only one of them is drawn: Verovio's own bounding
@@ -507,11 +508,61 @@ candidates for the cause were measured and both were wrong, which is the interes
   of following (it tracked half of a 0.7x rendering and then stopped).
 
 Matching a real instrument needs a **real reference**. With the recording as its own
-reference the follower tracks it exactly -- 309.4 s reached against 309.5 s of audio -- so
-the features are capable; it is the render-versus-real pair that has no contrast. Following
-somebody at a piano therefore wants the piece's own recording as the reference, which means
-the bar timeline has to come from the measure map rather than from a uniform grid. That is
-the next piece of work, and the reason this one is not wired to a microphone.
+reference the follower tracks it exactly -- 309.4 s reached against 309.5 s of audio, the
+position within 0.09 s throughout -- so the features are capable; it is the
+render-versus-real pair that has no contrast. Following somebody at a piano therefore uses
+the piece's own recording as the reference, with the bar timeline from the measure map
+rather than from a uniform grid. That is built: see below.
+
+### The microphone, and the switch that removes it
+
+The Sync playing tab has a second row: **listen to me**. Off by default, and when it is off
+nothing about it exists -- no device, no timer, no reference. Ticked, the page is revealed
+from the position the follower finds in the incoming audio instead of from the recording's
+clock. It is one more clock into the *same* reveal: page turns, the line view, the curtain,
+and both dials behave exactly as they do when the recording drives it, and while it is
+listening the recording's own position is ignored (the recording being played may not even
+be audible -- though it can be, which is how you try this without a piano).
+
+Three sources, because a feature that needs a piano in the room to be tried is a feature
+nobody tries:
+
+| source | what it is for |
+|---|---|
+| **microphone** | the real thing: your piano, followed against the piece's recording |
+| **practice track** | the rendered track fed in at speed -- the pipeline, seen working, with no piano and no map to trust |
+| **a file** | anything else you want to try, followed against the recording |
+
+`capture.py` is where the blocks come from. The microphone shells out to `parecord`
+(PipeWire/PulseAudio), falling back to `arecord` and `pw-record`: no Python audio library,
+no build step, and the sound server does the resampling, so a 44.1 or 48 kHz microphone
+still arrives at 22050 Hz. The file source goes through the identical path -- same block
+size, same rate, same timestamps -- one block per 46 ms, which is why the tests need no
+microphone at all. A device that refuses to open is an error at the moment it is chosen,
+with what the tool said, rather than a page that never moves. `RecordSource` writes a
+session to a wav while it listens, so a rehearsal that went well can be replayed.
+
+**The switch.** `AnalyzerConfig.follow_enabled`, from `ANALYZER_FOLLOW` (0, no, off or false
+to disable). With it off the tab has no such controls, nothing imports a microphone, and
+every other way of revealing the page is untouched: the component is additive, and removing
+it takes one environment variable.
+
+What the microphone path was measured to do, without a pianist: the **recording itself,
+re-timed** to 0.85x and 1.15x -- a real piano, playing the piece slower or faster than the
+reference -- followed to 100% of bars within one bar, 93-97% of them exactly, worst lag
+0.31 s over 40 s. Twenty decibels of noise on top changed nothing; 10 dB lost it (it ended
+at 199 s of 309 s), which is the honest limit of a noisy room. The live path was also run
+end to end here: the recording played into the sound server and captured back through the
+sink's monitor, with the tab's own 40 ms timer -- bar 24 at 40 s, which is what the map
+says. That run is what found the bug that mattered: the pipe is unbuffered, so a read
+returns part of a block as often as a whole one, and the reader treated a short read as the
+end of the stream. It now accumulates a block before deciding anything.
+
+Two things this is *not*. It is not validated against a **different** piano from the one in
+the recording -- that needs the player's own instrument, and it is the one claim in this
+README that no test here can make. And `quality` is reported but never acted on: it is low
+on silence and does not always tell you when the position is wrong, so a page that slips is
+better explained by the two dials than by a refusal to move.
 
 ## Storage, and the way out to a database
 
@@ -784,7 +835,8 @@ analyzer/
     speech.py               Kokoro text-to-speech for a card's question
     synth.py                practice tracks: the score split by staff, rendered
     cyolo.py                export a piece for cyolo_score_following (see the README)
-    follow.py               streaming score following (online DTW against the score)
+    follow.py               streaming score following (online DTW against a reference)
+    capture.py              where the audio comes from: the microphone, or a file at speed
     server.py               the HTTP API for the phone client
   web/
     index.html              the phone client: one self-contained page
@@ -793,8 +845,9 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 434 tests, 432 of which run by default (two are
-opt-in: one needs the speech server on the network, one needs an audio device).
+**M1-M7 are implemented**, with 479 tests, 477 of which run here. The two that do not are
+network tests, switched on with `ANALYZER_NETWORK_TESTS=1` (one wants the speech server,
+one a live YouTube search); two more skip if there is no capture device.
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
 * **M4** the engraved score view · **M5a** the phone client
@@ -803,6 +856,9 @@ opt-in: one needs the speech server on the network, one needs an audio device).
 * practice tracks on the phone: the score whole, or one hand at a time
 * **Sync playing** in the window: the score revealed only as far as the music has got,
   with play speed (pitch-preserving) and page-speed/nudge dials
+* **listen to me** in that tab: the same reveal, driven by an online-DTW follower reading
+  the microphone -- or a file, at speed. Additive, off by default, and switchable off
+  wholesale with `ANALYZER_FOLLOW=0`
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads
@@ -835,3 +891,12 @@ then read back out of the package: a 19,821-byte MP3 (`ID3` header) in `media`,
   the dialog says which of these it was.
 * **Playback silent** — `player.py` needs a working audio device; the status bar
   reports what went wrong instead of failing quietly.
+* **"listen to me" does nothing** — the row says what it is doing: which device it opened,
+  which bar it hears, and how sure it is. A device that will not open is reported in that
+  row (try the other entry in the device list). It needs about a fifth of a second of audio
+  before the first position, and a quiet room: at 10 dB of noise the follower loses the
+  piece. `ANALYZER_FOLLOW=0` removes the whole row.
+* **The recording plays too fast** — check the sound card before blaming the player: on this
+  machine a 30 s file played back in 27.6 s (48000/44100 -- the sink reports one rate and
+  runs at another). `parecord` capture was separately verified real-time, 3 s of wall clock
+  giving 2.98 s of audio.

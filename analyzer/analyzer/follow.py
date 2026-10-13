@@ -303,6 +303,98 @@ def chroma_sequence(samples, rate: int = SAMPLE_RATE, hop: int = HOP,
 
 
 # ---------------------------------------------------------------------------
+# the bar grid
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class FollowGrid:
+  """Where a moment in the reference sits in the score: which bar, which beat.
+
+  Two shapes, because the two kinds of reference have different timelines. A *practice
+  track* is the score rendered at one tempo, so its bars are evenly spaced. A *recording*
+  is a real performance: its bars come from the measure map, and are as uneven as the
+  player made them. The follower only needs "given these seconds, which bar", so the two
+  are one interface.
+  """
+
+  spans: List[Tuple[int, float, float]] = dataclasses.field(default_factory=list)
+  beats_per_bar: int = 4
+  uniform: bool = True
+
+  @classmethod
+  def evenly(cls, seconds_per_bar: float, first_bar: int = 1, bars: int = 0,
+             beats: int = 4) -> 'FollowGrid':
+    if seconds_per_bar <= 0:
+      raise FollowError('a bar grid needs a positive length per bar')
+    spans = [(first_bar + index, index * seconds_per_bar, (index + 1) * seconds_per_bar)
+             for index in range(max(1, int(bars or 1)))]
+    return cls(spans=spans, beats_per_bar=max(1, int(beats)), uniform=True)
+
+  @classmethod
+  def from_map(cls, result, beats: int = 4, fallback_bar_seconds: float = 0.0) -> 'FollowGrid':
+    """The bars a performance actually took, from the measure map."""
+    spans = []
+    for measure in getattr(result, 'measures', []) or []:
+      start = float(measure.start_s)
+      end = float(measure.end_s)
+      if end <= start:
+        end = start + max(0.05, float(fallback_bar_seconds or 0.1))
+      spans.append((int(measure.measure), start, end))
+    if not spans:
+      raise FollowError('the map has no bars to follow')
+    spans.sort(key=lambda row: row[1])
+    return cls(spans=spans, beats_per_bar=max(1, int(beats)), uniform=False)
+
+  @classmethod
+  def from_dict(cls, grid: Dict[str, object], bars: int = 0) -> 'FollowGrid':
+    """`synth.grid`'s uniform description, for a practice track."""
+    seconds_per_bar = float(grid.get('seconds_per_bar') or 0.0)
+    return cls.evenly(seconds_per_bar, int(grid.get('first_bar') or 1), bars,
+                      int(grid.get('beats') or 4))
+
+  def __len__(self) -> int:
+    return len(self.spans)
+
+  @property
+  def first_bar(self) -> int:
+    return self.spans[0][0] if self.spans else 1
+
+  @property
+  def seconds_per_bar(self) -> float:
+    if self.uniform and self.spans:
+      return self.spans[0][2] - self.spans[0][1]
+    if not self.spans:
+      return 0.0
+    return (self.spans[-1][2] - self.spans[0][1]) / len(self.spans)
+
+  def start_of(self, bar: int) -> Optional[float]:
+    for number, start, _end in self.spans:
+      if number == bar:
+        return start
+    return None
+
+  def bar_at(self, seconds: float) -> Tuple[int, int, float, float]:
+    """(bar, beat, bar start, bar end) for a moment in the reference.
+
+    Past the end it holds the last bar, and before the beginning the first: a follower
+    that has run off either end should read as "still there", not as a wrong bar.
+    """
+    seconds = float(seconds)
+    chosen = self.spans[0]
+    for span in self.spans:
+      if seconds >= span[1]:
+        chosen = span
+      else:
+        break
+    number, start, end = chosen
+    length = max(1e-6, end - start)
+    within = min(max(0.0, seconds - start), length)
+    beat = 1 + int(within / length * self.beats_per_bar)
+    beat = max(1, min(self.beats_per_bar, beat))
+    return number, beat, start, end
+
+
+# ---------------------------------------------------------------------------
 # the follower
 # ---------------------------------------------------------------------------
 
@@ -341,10 +433,8 @@ class OnlineFollower:
     self.window = _window(n_fft)
     self.reference_frames = int(reference_chroma.shape[1])
 
-    self.seconds_per_bar = float(grid.get('seconds_per_bar') or 0.0)
-    self.first_bar = int(grid.get('first_bar') or 1)
-    self.beats_per_bar = max(1, int(grid.get('beats') or 4))
-    if self.seconds_per_bar <= 0:
+    self.grid = grid if isinstance(grid, FollowGrid) else FollowGrid.from_dict(grid)
+    if not len(self.grid):
       raise FollowError('the reference has no bar grid to follow')
 
     self.reset()
@@ -460,15 +550,10 @@ class OnlineFollower:
 
   def position(self) -> FollowPosition:
     seconds = self._position * self.hop / float(self.rate)
-    index = int(seconds / self.seconds_per_bar)
-    bar = self.first_bar + index
-    within = seconds - index * self.seconds_per_bar
-    beat = 1 + int(within / self.seconds_per_bar * self.beats_per_bar)
-    beat = max(1, min(self.beats_per_bar, beat))
+    bar, beat, start, end = self.grid.bar_at(seconds)
     return FollowPosition(
-        reference_s=seconds, bar=bar, beat=beat, beats_per_bar=self.beats_per_bar,
-        bar_start_s=index * self.seconds_per_bar,
-        bar_end_s=(index + 1) * self.seconds_per_bar,
+        reference_s=seconds, bar=bar, beat=beat, beats_per_bar=self.grid.beats_per_bar,
+        bar_start_s=start, bar_end_s=end,
         quality=self._quality, frames=self._frames)
 
   @property
@@ -487,37 +572,75 @@ def _track_stamp(path) -> str:
 
 
 def reference_for(cfg: AnalyzerConfig, piece, track: str = 'both',
-                  feature: str = DEFAULT_FEATURE, compress: Optional[bool] = None):
-  """(chroma, grid, track path) for a piece: the score, as audio to follow.
+                  feature: str = DEFAULT_FEATURE, compress: Optional[bool] = None,
+                  source: str = 'track'):
+  """(chroma, FollowGrid, path) -- the piece as something to follow.
 
-  The chroma is remembered on disk next to the track it came from, because it costs about
-  a second to compute and the following itself needs it instantly.
+  Two sources, and the choice is the whole point of this module's second half:
+
+  * `source='track'` -- the *practice track*, the score rendered by FluidSynth at one
+    tempo, with its own even bar grid. Chosen automatically when a piece has no recording.
+  * `source='recording'` -- the piece's cached recording, a real instrument with its own
+    tempo, whose bar timeline comes from the measure map. **This is what a person at a
+    piano should be followed against**: measured, a real instrument against a *rendering*
+    has no contrast to follow (see the module docstring), while a rendering against itself
+    is tracked to within 0.03 s.
+
+  `source='auto'` picks the recording when there is one (and a map to go with it), because
+  a real reference is the better one for listening to a real instrument.
+
+  Returns:
+    (chroma, grid, path). The chroma is cached on disk next to the audio it came from:
+    about a second to compute, and following needs it immediately.
   """
   import numpy as np
   import soundfile as sf
 
   from . import synth
 
-  if piece is None or piece.musicxml is None:
-    raise FollowError('this piece has no score to follow')
-  path = pathlib.Path(synth.build_track(cfg, piece, track))
-  grid = synth.grid(cfg, piece)
-  if not grid:
-    raise FollowError('this piece has no bar grid: build its practice track first')
+  if piece is None:
+    raise FollowError('no piece to follow')
+
+  if source == 'auto':
+    source = 'recording' if (piece.has_audio and piece.sync is not None) else 'track'
+  if source not in ('track', 'recording'):
+    raise FollowError('unknown reference source %r' % (source,))
+
+  # the bar grid the score is counted in comes from the piece's reference MIDI either way
+  meters = synth.grid(cfg, piece) or {}
+  beats = max(1, int(meters.get('beats') or 4))
+
+  if source == 'recording':
+    if not piece.has_audio:
+      raise FollowError('this piece has no recording to follow against')
+    if piece.sync is None or not piece.sync.result.measures:
+      raise FollowError('no measure map: align the piece first, so its bars have times')
+    audio = pathlib.Path(piece.audio.path)
+    grid = FollowGrid.from_map(piece.sync.result, beats=beats,
+                               fallback_bar_seconds=float(meters.get('seconds_per_bar') or 0.0))
+  else:
+    if piece.musicxml is None:
+      raise FollowError('this piece has no score to follow')
+    audio = pathlib.Path(synth.build_track(cfg, piece, track))
+    grid = FollowGrid.evenly(float(meters.get('seconds_per_bar') or 0.0),
+                             int(meters.get('first_bar') or 1), bars=piece.bars or 0,
+                             beats=beats)
 
   cache_dir = cfg.cache_dir / 'follow'
   cache_dir.mkdir(parents=True, exist_ok=True)
-  compress = SPECTRUM_COMPRESSION if compress is None else compress
-  cache = cache_dir / ('%s-%s-%s-%s-%s.npz' % (piece.slug, track, feature,
-                                               int(bool(compress)), _track_stamp(path)))
+  cache = cache_dir / ('%s-%s-%s-%s-%s-%s.npz'
+                       % (piece.slug, source, track, feature,
+                          int(bool(SPECTRUM_COMPRESSION if compress is None else compress)),
+                          _track_stamp(audio)))
   if cache.is_file():
     try:
       stored = np.load(str(cache))
-      return stored['chroma'], grid, path
+      if int(stored['frames']) and float(stored['rate']) == float(SAMPLE_RATE):
+        return stored['chroma'], grid, audio
     except Exception:
       pass
 
-  data, rate = sf.read(str(path), dtype='float32', always_2d=False)
+  data, rate = sf.read(str(audio), dtype='float32', always_2d=False)
   if getattr(data, 'ndim', 1) > 1:
     data = data.mean(axis=1)
   if rate != SAMPLE_RATE:
@@ -525,10 +648,11 @@ def reference_for(cfg: AnalyzerConfig, piece, track: str = 'both',
     data = _resample(data, rate, SAMPLE_RATE)
   chroma = chroma_sequence(data, SAMPLE_RATE, feature=feature, compress=compress)
   try:
-    np.savez_compressed(str(cache), chroma=chroma)
+    np.savez_compressed(str(cache), chroma=chroma, frames=np.array(chroma.shape[1]),
+                        rate=np.array(SAMPLE_RATE))
   except OSError:
     pass                    # a cache that cannot be written is not a failure
-  return chroma, grid, path
+  return chroma, grid, audio
 
 
 # ---------------------------------------------------------------------------

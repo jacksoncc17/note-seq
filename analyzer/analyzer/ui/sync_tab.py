@@ -5,7 +5,7 @@ that has not been reached yet is covered -- you cannot read the next bar off the
 screen, which is the whole point: it forces the piece to be recalled at tempo rather
 than sight-read in advance.
 
-Two things make it work:
+Three things make it work:
 
 * **The reveal unit is the score's own.** `scoreview.page_reveal` knows which metrical
   unit each notehead begins at -- quarters in 3/4, eighths in 6/8, straight from the
@@ -16,6 +16,13 @@ Two things make it work:
   in the feature: a performance does not announce its beats, so a fermata or a big
   rallentando inside a bar can put the reveal a fraction of a beat out. Whole-bar
   reveal is the honest fallback and is one click away.
+* **Or the clock is the player's own, following what it hears.** With "listen to me"
+  ticked the page is revealed from the position an online DTW estimates in the incoming
+  audio -- a microphone in the room, or a file replayed at speed -- instead of from the
+  recording's clock. It is one more clock into the same reveal, not a second code path:
+  everything below (page turns, the line view, the curtain, the dials) is unchanged, and
+  with the box unticked nothing about it is used. See `follow` for what that estimator
+  was measured to do, and `capture` for where the audio comes from.
 
 The player is the window's, not a second one: one thing plays at a time, and the
 transport here is the transport there.
@@ -23,13 +30,15 @@ transport here is the transport there.
 
 from __future__ import annotations
 
+import pathlib
 from typing import Dict, Optional, Tuple
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel,
-                             QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+                             QFileDialog, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+                             QSpinBox, QVBoxLayout, QWidget)
 
-from .. import library, scoreview, syncmap
+from .. import capture, follow, library, scoreview, syncmap
 from ..config import AnalyzerConfig
 from ..scoreview import ScoreRender
 from .score_widget import ScoreView
@@ -57,6 +66,16 @@ SPEED_STEP = 0.05
 NUDGE_MIN_MS, NUDGE_MAX_MS = -3000, 3000
 NUDGE_STEP_MS = 25
 PLAY_STEP = 0.05
+
+# Listening to the piano. The follower reads one position per hop (46 ms) and costs
+# about 0.3 ms a frame, so a 40 ms tick keeps up with room to spare -- and it runs on
+# the GUI thread, which is why the sources hand blocks over rather than blocking.
+FOLLOW_TICK_MS = 40
+FOLLOW_DRAIN = 4                 # blocks per tick: a slow tick must not fall behind
+
+MIC = 'microphone'
+TRACK = 'the practice track'
+FILE = 'a file…'
 
 
 def warped_clock(seconds: float, start: float, speed: float = 1.0, nudge_ms: float = 0.0,
@@ -107,9 +126,26 @@ class SyncPlayingPanel(QWidget):
     self._seconds = 0.0
     self._confidence: Dict[int, Optional[float]] = {}
 
+    # Listening to the piano: off unless the box is ticked, and not even built when
+    # the feature is switched off in the config (see `AnalyzerConfig.follow_enabled`).
+    self._following = False
+    self._follower: Optional[follow.OnlineFollower] = None
+    self._source: Optional[capture.AudioSource] = None
+    self.follow_file: Optional[pathlib.Path] = None
+    self._choosing_file = False
+    self.follow_check: Optional[QCheckBox] = None
+    self.follow_source: Optional[QComboBox] = None
+    self.follow_device: Optional[QComboBox] = None
+    self.follow_status: Optional[QLabel] = None
+    self._follow_timer = QTimer(self)
+    self._follow_timer.setInterval(FOLLOW_TICK_MS)
+    self._follow_timer.timeout.connect(self._follow_tick)
+
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.addLayout(self._controls())
+    if self.cfg.follow_enabled:
+      layout.addLayout(self._follow_controls())
 
     self.view = ScoreView()
     self.view.set_curtain([])
@@ -223,11 +259,218 @@ class SyncPlayingPanel(QWidget):
     row.addWidget(self.status, 1)
     return row
 
+  # ------------------------------------------------------------------ listening
+
+  def _follow_controls(self) -> QHBoxLayout:
+    """The second row: what to listen to, and whether the page believes it.
+
+    Built only when `AnalyzerConfig.follow_enabled`; with the feature switched off
+    there is no box to tick, no device to open, and no timer behind any of it.
+    """
+    row = QHBoxLayout()
+    self.follow_check = QCheckBox('listen to me')
+    self.follow_check.setToolTip(
+      'reveal the page from the position heard in the incoming audio -- your piano '
+      'through the microphone -- instead of from the recording\'s clock')
+    self.follow_check.toggled.connect(self._follow_toggled)
+    row.addWidget(self.follow_check)
+
+    self.follow_source = QComboBox()
+    self.follow_source.addItems([MIC, TRACK, FILE])
+    self.follow_source.setToolTip(
+      'what to listen to. The microphone is the real thing and is followed against '
+      'the piece\'s recording. The practice track is that same pipeline fed a file, '
+      'so it can be seen working with no piano in the room. A file is anything else '
+      'you want to try, followed against the recording.')
+    self.follow_source.currentTextChanged.connect(self._follow_source_changed)
+    row.addWidget(self.follow_source)
+
+    # Which microphone. Only meaningful for the live source, so it is hidden for the
+    # others rather than left there looking as if it did something.
+    self.follow_device = QComboBox()
+    self.follow_device.addItem('the default device', None)
+    for name in capture.microphones():
+      self.follow_device.addItem(capture.device_label(name), name)
+    self.follow_device.setToolTip('which capture device to listen to')
+    self.follow_device.setVisible(False)
+    row.addWidget(self.follow_device)
+
+    self.follow_status = QLabel('not listening')
+    self.follow_status.setStyleSheet('color: #8a8a8a;')
+    row.addWidget(self.follow_status, 1)
+    return row
+
+  def _follow_source_changed(self, text: str) -> None:
+    """A file source needs a file; choosing one is the act of selecting it."""
+    if self.follow_device is not None:
+      self.follow_device.setVisible(text == MIC)
+    if text != FILE or self._choosing_file or self._following:
+      return
+    self._choosing_file = True
+    try:
+      start = self.follow_file
+      if start is None and self.piece is not None and self.piece.has_audio:
+        start = self.cfg.audio_path(self.piece.slug)
+      chosen, _filter = QFileDialog.getOpenFileName(
+        self, 'follow this file', str(start.parent if start else pathlib.Path.home()),
+        'audio (*.wav *.flac *.mp3 *.ogg *.m4a);;everything (*)')
+    finally:
+      self._choosing_file = False
+    if chosen:
+      self.follow_file = pathlib.Path(chosen)
+      return
+    # nothing chosen: go back to what was selected before rather than sit on a
+    # source that cannot start
+    self.follow_source.blockSignals(True)
+    self.follow_source.setCurrentText(MIC)
+    self.follow_source.blockSignals(False)
+    if self.follow_device is not None:
+      self.follow_device.setVisible(True)
+    if self.follow_status is not None:
+      self.follow_status.setText('not listening')
+
+  def _follow_toggled(self, on: bool) -> None:
+    if on:
+      if not self.start_following():
+        self.follow_check.blockSignals(True)      # it did not start: say so, don't lie
+        self.follow_check.setChecked(False)
+        self.follow_check.blockSignals(False)
+    else:
+      self.stop_following()
+
+  def start_following(self, source: Optional[capture.AudioSource] = None,
+                      reference: Optional[str] = None) -> bool:
+    """Reveal the page from what is heard, rather than from the recording's clock.
+
+    The reference is the piece's own recording for anything a real piano might play,
+    and the rendered practice track when the practice track is what is being fed in --
+    the one case where a rendering is the right thing to compare against. `source` and
+    `reference` are there so tests (and a script) can hand over work already done.
+    """
+    if not self.cfg.follow_enabled:
+      if self.follow_status is not None:
+        self.follow_status.setText('listening is switched off (ANALYZER_FOLLOW)')
+      return False
+    if not (self.piece and self.render and self.result and self.result.measures):
+      if self.follow_status is not None:
+        self.follow_status.setText('nothing to follow: %s' % self.status.text())
+      return False
+    kind = self.follow_source.currentText() if self.follow_source is not None else MIC
+    if reference is None:
+      reference = 'track' if kind == TRACK else 'recording'
+    if self.follow_status is not None:
+      self.follow_status.setText('building the reference (%s)…' % reference)
+      QApplication.processEvents()          # a first-time render takes seconds
+    try:
+      chroma, grid, path = follow.reference_for(self.cfg, self.piece, source=reference)
+    except Exception as e:                  # no map, no audio, no cache: all the same
+      self.follow_status.setText('could not listen: %s' % e)
+      return False
+    try:
+      if source is None:
+        source = self._follow_source_for(kind, path)
+      self._follower = follow.OnlineFollower(chroma, grid, feature=follow.DEFAULT_FEATURE)
+      # Somebody practising bars 40-43 does not start at bar 1, and the follower's band
+      # only extends forwards, so the passage start is where it is told to look.
+      self._follower.reset(grid.start_of(self.first_bar) or 0.0)
+      source.start()
+    except (capture.CaptureError, follow.FollowError) as e:
+      self._follower = None
+      if self.follow_status is not None:
+        self.follow_status.setText(str(e))
+      return False
+    self._source = source
+    self._following = True
+    self._follow_timer.start()
+    # What is being listened to cannot change mid-listen: the reference and the audio
+    # are matched by the choice, so it is made again by stopping and starting.
+    if self.follow_source is not None:
+      self.follow_source.setEnabled(False)
+    if self.follow_device is not None:
+      self.follow_device.setEnabled(False)
+    if self.follow_status is not None:
+      self.follow_status.setText('listening to %s' % source.describe())
+    return True
+
+  def _follow_source_for(self, kind: str, reference_path) -> capture.AudioSource:
+    """The source the controls describe: a microphone, or a file replayed at speed."""
+    if kind == MIC:
+      device = self.follow_device.currentData() if self.follow_device is not None else None
+      return capture.MicSource(device=device)
+    if kind == TRACK:
+      return capture.FileSource(reference_path)   # what the reference was built from
+    if self.follow_file is None:
+      raise capture.CaptureError('no file chosen to follow')
+    return capture.FileSource(self.follow_file)
+
+  def _follow_tick(self) -> None:
+    """One timer tick: hand over the audio, take the position, reveal the page.
+
+    The reveal is the same `_refresh` the player drives, so page turns, the line view,
+    the curtain and the dials all behave exactly as they do when the clock is the
+    recording's -- the only difference is where the clock reading comes from.
+    """
+    if not self._following or self._source is None or self._follower is None:
+      return
+    position = None
+    for _ in range(FOLLOW_DRAIN):
+      block = self._source.read()
+      if block is None:
+        break
+      position = self._follower.feed(block)
+    if position is None:
+      position = self._follower.position()
+    self._seconds = position.reference_s
+    self._refresh(position.reference_s)
+    if self.follow_status is not None:
+      self.follow_status.setText(self._follow_note(position))
+    if self._source.error:
+      self.stop_following(self._source.error)
+    elif position.bar > self.last_bar:
+      self.stop_following('the page has reached the end of the passage')
+
+  def _follow_note(self, position: follow.FollowPosition) -> str:
+    """What is being listened to, where it thinks it is, and how sure it is.
+
+    The certainty is reported rather than acted on: it is low on silence and on
+    unpitched noise, and it is not always low where the position is wrong, so a page
+    that slips is better explained by the two dials than by a refusal to move.
+    """
+    bits = [self._source.describe() if self._source is not None else 'listening',
+            'bar %d · beat %d' % (position.bar, position.beat),
+            '%.1f s in' % position.reference_s,
+            'certainty %.2f' % position.quality]
+    if position.unsure:
+      bits.append('not sure of this bar')
+    return ' · '.join(bits)
+
+  def stop_following(self, note: str = '') -> None:
+    """Stop listening; the page stays where it was revealed to."""
+    self._follow_timer.stop()
+    source, self._source = self._source, None
+    if source is not None:
+      source.stop()
+    self._follower = None
+    self._following = False
+    if self.follow_source is not None:
+      self.follow_source.setEnabled(True)
+    if self.follow_device is not None:
+      self.follow_device.setEnabled(True)
+    if self.follow_check is not None and self.follow_check.isChecked():
+      self.follow_check.blockSignals(True)
+      self.follow_check.setChecked(False)
+      self.follow_check.blockSignals(False)
+    if self.follow_status is not None:
+      self.follow_status.setText(note or 'not listening')
+    self._update_ready()
+
   # ------------------------------------------------------------------ content
 
   def set_piece(self, piece: Optional[library.Piece], render: Optional[ScoreRender],
                 result: Optional[syncmap.SyncResult]) -> None:
     """Hand over the piece, its engraving and its map; this is all it needs."""
+    if self._following:                       # a new piece is not what was being heard
+      self.stop_following()
     self.piece = piece
     self.render = render
     self.result = result
@@ -256,6 +499,11 @@ class SyncPlayingPanel(QWidget):
              'The page follows the measure map, which is an estimate: if the music '
              'runs ahead of the page, raise “page speed”; if the page is ahead of the '
              'music, lower it. “nudge” shifts the page in time.']
+    if self.cfg.follow_enabled:
+      lines.append('Or tick “listen to me” and the page is revealed from what is heard '
+                   'instead: your piano through the microphone (followed against the '
+                   'recording), or a file fed in at speed. The dials still work, and '
+                   '■ stops listening.')
     if self.result is not None:
       lines.extend(self.result.warnings[:1])
     self.hint.setText('\n'.join(lines))
@@ -299,6 +547,8 @@ class SyncPlayingPanel(QWidget):
       self._playing = False
 
   def stop(self) -> None:
+    if self._following:
+      self.stop_following()
     self._playing = False
     self.player.stop()
     self.view.set_playhead_measure(None)
@@ -306,13 +556,18 @@ class SyncPlayingPanel(QWidget):
     self._update_ready()
 
   def on_position(self, seconds: float) -> None:
-    """The clock moved: uncover exactly as far as it has got."""
-    if not self._playing:
+    """The clock moved: uncover exactly as far as it has got.
+
+    While listening, this is the recording's clock -- and the recording being played
+    is not necessarily being heard (though it may be, through the speakers). The
+    follower's reading is then the one that means something, so this does nothing.
+    """
+    if not self._playing or self._following:
       return
     self._refresh(seconds)
 
   def on_finished(self) -> None:
-    if not self._playing:
+    if not self._playing or self._following:
       return
     if self.loop_check.isChecked():
       self.play()
@@ -359,7 +614,7 @@ class SyncPlayingPanel(QWidget):
 
   def _refresh(self, seconds: Optional[float] = None) -> None:
     """Uncover up to the clock's position, or up to nothing if not playing."""
-    if not self._playing:
+    if not (self._playing or self._following):
       self._update_ready()
       return
     if seconds is None:
@@ -501,6 +756,12 @@ class SyncPlayingPanel(QWidget):
     return getattr(self, '_seconds', 0.0)
 
   def unfollow(self) -> None:
-    """Leaving the tab: keep playing, but stop covering the page."""
+    """Leaving the tab: keep playing, but stop covering the page -- and stop listening.
+
+    A microphone left open is not a small thing, so this is where it is closed whether
+    the transport was running or not.
+    """
+    if self._following:
+      self.stop_following()
     self._playing = False
     self.view.set_curtain([])
