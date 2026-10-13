@@ -240,9 +240,33 @@ been reached yet is covered**, so it cannot be read off the screen in advance. I
 recall aid rather than a viewer: you have to know what comes next, at tempo.
 
 ```
-Sync playing   [▶ Play] [■] [loop]  reveal [every beat ▾]  page speed [1.00 x] [0 ms]
-               bar 40 · beat 2 of 3 · 62.9 s
+Sync playing  [▶ Play] [■] [loop]  reveal [every beat ▾]  play speed [1.00 x] [1x]
+              page speed [1.00 x] [0 ms]                    ‹ page 2/9 ›
+              bar 40 · beat 2 of 3 · 62.9 s
 ```
+
+**Play speed** (0.40–2.00×) slows the *recording* down, next to the dial that lines the
+*page* up with it. Pitch is preserved — a phase vocoder, `librosa.effects.time_stretch`
+— because the point of practising slowly is to hear the same notes go by more slowly,
+not transposed ones. Verified: a 440 Hz tone stays 440 Hz at 0.5×, 0.75× and 1.25×, and
+on the real recording the same three seconds of music took **2.84 s of wall time at
+1.00× and 5.60 s at 0.50×**.
+
+Two things make it safe to use everywhere rather than only in this tab:
+
+* **The rest of the app keeps counting in the recording's own seconds.** Only the buffer
+  and the wall clock are stretched, and `_tick` multiplies the elapsed wall time back
+  into recording time — so the measure map, the waveform playhead, the bar reveal and
+  the whole-bar boundaries all keep working untouched. At 0.5×, 0.5 s of wall time is
+  0.25 s of music, and the page follows the music.
+* **It is a phase vocoder, so it is not free.** About 150× faster than real time: a
+  passage is instant, a whole 300-second piece at 0.5× takes ~2 s to prepare (and
+  ~55 MB in memory), so the status bar says *"preparing a 0.50x version…"* rather than
+  looking hung. Stretched audio is remembered, so a loop pays for it once.
+* Changing the speed mid-passage does not stop the music: it carries on from where it
+  had got to, at the new pace. The setting is the player's, so the Recording and Score
+  tabs play at it too — and say so in the status bar (`playing bars 40-43 at 0.75x`),
+  since the dial itself lives here.
 
 **The reveal unit is the score's own.** `scoreview.page_reveal` works out which
 metrical unit every notehead begins at — quarters in 3/4, eighths in 6/8, taken from
@@ -599,7 +623,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 392 tests, 390 of which run by default (two are
+**M1-M7 are implemented**, with 404 tests, 402 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
@@ -608,7 +632,7 @@ opt-in: one needs the speech server on the network, one needs an audio device).
 * **M7** Anki cards for a selected passage, exported as `.apkg`
 * practice tracks on the phone: the score whole, or one hand at a time
 * **Sync playing** in the window: the score revealed only as far as the music has got,
-  with page speed and nudge dials for lining the page up with the recording
+  with play speed (pitch-preserving) and page-speed/nudge dials
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads

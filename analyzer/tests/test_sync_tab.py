@@ -40,12 +40,19 @@ def qapp():
 
 
 class SilentPlayer:
-  """Stands in for RangePlayer: records what it was asked to play, plays nothing."""
+  """Stands in for RangePlayer: records what it was asked to play, plays nothing.
+
+  It carries the same surface the tab uses, `set_speed` included -- an AttributeError
+  raised inside a Qt slot aborts the process rather than failing a test, which is
+  exactly how this stub first broke.
+  """
 
   def __init__(self):
     self.duration = 400.0
     self.range = None
     self.stopped = 0
+    self.speed = 1.0
+    self.speeds = []
 
   def play_range(self, start, end):
     self.range = (start, end)
@@ -53,6 +60,13 @@ class SilentPlayer:
 
   def stop(self):
     self.stopped += 1
+
+  def set_speed(self, factor):
+    self.speed = float(factor)
+    self.speeds.append(float(factor))
+
+  def current_position(self):
+    return None
 
 
 @pytest.fixture
@@ -344,3 +358,29 @@ def test_the_tab_says_when_the_map_is_unsure_of_a_bar(panel):
 
   assert 'map unsure' in status_for(unsure[0]), status_for(unsure[0])
   assert 'map unsure' not in status_for(sure[0]), status_for(sure[0])
+
+
+@needs_real
+def test_the_play_speed_dial_drives_the_player(panel):
+  """The music's own speed, next to the page's: this is the one that slows the music."""
+  tab, player, _piece, _render, _cfg = panel
+  assert tab.play_speed_spin.value() == pytest.approx(1.0)
+  tab.play_speed_spin.setValue(0.7)
+  assert player.speed == pytest.approx(0.7), 'the dial must reach the player'
+  tab.reset_speed_btn.click()
+  assert player.speed == pytest.approx(1.0)
+  assert tab.play_speed_spin.value() == pytest.approx(1.0)
+
+
+@needs_real
+def test_the_status_names_a_speed_that_is_not_the_recordings_own(panel):
+  tab, _player, _piece, _render, _cfg = panel
+  tab.set_range(40, 43)
+  tab.play()
+  span = next(m for m in tab.result.measures if m.measure == 40)
+  tab._playing = True
+  tab.on_position(span.start_s + 0.2)
+  assert 'play x' not in tab.status.text()
+  tab.play_speed_spin.setValue(0.75)
+  tab.on_position(span.start_s + 0.2)
+  assert 'play x0.75' in tab.status.text(), tab.status.text()

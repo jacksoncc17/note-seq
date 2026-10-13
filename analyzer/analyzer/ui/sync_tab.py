@@ -33,7 +33,7 @@ from .. import library, scoreview, syncmap
 from ..config import AnalyzerConfig
 from ..scoreview import ScoreRender
 from .score_widget import ScoreView
-from .player import RangePlayer
+from .player import MAX_SPEED, MIN_SPEED, RangePlayer
 
 # The same rolls the rest of the app uses when it plays a passage: starting exactly on
 # the downbeat clips the piano's attack.
@@ -53,6 +53,7 @@ SPEED_MIN, SPEED_MAX = 0.25, 4.0
 SPEED_STEP = 0.05
 NUDGE_MIN_MS, NUDGE_MAX_MS = -3000, 3000
 NUDGE_STEP_MS = 25
+PLAY_STEP = 0.05
 
 
 def warped_clock(seconds: float, start: float, speed: float = 1.0, nudge_ms: float = 0.0,
@@ -145,6 +146,27 @@ class SyncPlayingPanel(QWidget):
 
     # The map is an estimate, so the page can run behind the music or ahead of it. These
     # two line the page up with what is actually heard; see `warped_clock`.
+    # The music's own speed, which is the other half of practising slowly: the page
+    # dial lines the page up with the music, this one slows the music down. Pitch is
+    # preserved, and the map and the reveal both stay in the recording's seconds.
+    row.addSpacing(12)
+    row.addWidget(QLabel('play speed'))
+    self.play_speed_spin = QDoubleSpinBox()
+    self.play_speed_spin.setRange(MIN_SPEED, MAX_SPEED)
+    self.play_speed_spin.setSingleStep(PLAY_STEP)
+    self.play_speed_spin.setDecimals(2)
+    self.play_speed_spin.setValue(1.0)
+    self.play_speed_spin.setSuffix('x')
+    self.play_speed_spin.setToolTip('play the recording slower (or faster) without '
+                                    'changing the pitch; the page follows at the same pace')
+    self.play_speed_spin.valueChanged.connect(self._play_speed_changed)
+    row.addWidget(self.play_speed_spin)
+    self.reset_speed_btn = QPushButton('1x')
+    self.reset_speed_btn.setFixedWidth(34)
+    self.reset_speed_btn.setToolTip('back to the recording\'s own pace')
+    self.reset_speed_btn.clicked.connect(lambda: self.play_speed_spin.setValue(1.0))
+    row.addWidget(self.reset_speed_btn)
+
     row.addSpacing(12)
     row.addWidget(QLabel('page speed'))
     self.speed_spin = QDoubleSpinBox()
@@ -358,14 +380,23 @@ class SyncPlayingPanel(QWidget):
       return ''
     return ' · map unsure here (%.2f)' % confidence
 
+  def _play_speed_changed(self, value: float) -> None:
+    """Hand the speed to the player, which carries on from where it is."""
+    self.player.set_speed(value)
+    self._refresh()
+
   def _settings_note(self) -> str:
     """Say when the page is being nudged off the map, so a wrong setting is visible."""
     speed = self.speed_spin.value()
     nudge = self.nudge_spin.value()
-    if abs(speed - 1.0) < 0.001 and nudge == 0:
-      return ''
-    return ' · page %s%+.2f ms' % ('x%.2f' % speed if abs(speed - 1.0) > 0.001 else '',
-                                   nudge)
+    playing = self.play_speed_spin.value()
+    note = ''
+    if abs(playing - 1.0) > 0.001:
+      note += ' · play x%.2f' % playing
+    if abs(speed - 1.0) > 0.001 or nudge:
+      note += ' · page %s%+.0f ms' % ('x%.2f ' % speed if abs(speed - 1.0) > 0.001 else '',
+                                      nudge)
+    return note
 
   def _last_seconds(self) -> float:
     return getattr(self, '_seconds', 0.0)

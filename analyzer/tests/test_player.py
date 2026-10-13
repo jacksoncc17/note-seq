@@ -203,3 +203,175 @@ def test_cancellation_is_not_swallowed_by_the_progress_helpers():
     def broken(percent, message):
       raise RuntimeError('the window went away')
     helper(broken, 50.0, 'ignored')
+
+
+# ---------------------------------------------------------------------------
+# playing at a different speed
+# ---------------------------------------------------------------------------
+
+class _Clock:
+  """A wall clock the test drives by hand."""
+
+  def __init__(self):
+    self.ms = 0.0
+
+  def start(self):
+    self.ms = 0.0
+
+  def elapsed(self):
+    return self.ms
+
+
+class _Output:
+  """Enough of a QAudioOutput for the tick to run, with no device involved."""
+
+  def __init__(self):
+    self.state_value = None
+    self.stopped = 0
+
+  def state(self):
+    if self.state_value is None:
+      from PyQt5.QtMultimedia import QAudio
+      return QAudio.ActiveState
+    return self.state_value
+
+  def stop(self):
+    self.stopped += 1
+
+  def deleteLater(self):
+    pass
+
+
+def test_speed_is_clamped_to_something_musical(player):
+  player.set_speed(0.01)
+  assert player.speed == pytest.approx(0.4)
+  player.set_speed(9.0)
+  assert player.speed == pytest.approx(2.0)
+
+
+def test_the_stretch_keeps_the_pitch_and_changes_the_length(player, tone):
+  """Slowing a passage down is for hearing the same notes go by more slowly -- a
+  transposed version would be useless for practising the notes."""
+  import librosa
+  player.load(tone)
+  samples = player.samples
+  for speed in (0.5, 0.75, 1.25):
+    player.set_speed(speed)
+    stretched = player._stretched(0, len(samples))
+    assert len(stretched) / len(samples) == pytest.approx(1.0 / speed, rel=0.02)
+    f0 = librosa.yin(np.ascontiguousarray(stretched), fmin=200, fmax=900,
+                     sr=player.sample_rate)
+    f0 = f0[np.isfinite(f0)]
+    assert float(np.median(f0)) == pytest.approx(440.0, rel=0.03), \
+        'a 440 Hz tone must still be 440 Hz at %sx' % speed
+
+
+def test_the_speed_does_not_touch_the_recording_itself(player, tone):
+  player.load(tone)
+  before = player.duration
+  player.set_speed(0.5)
+  player._stretched(0, len(player.samples))
+  assert player.duration == pytest.approx(before, abs=1e-6)
+  assert player.samples is not None and len(player.samples) == int(before * player.sample_rate)
+
+
+def test_a_stretch_is_remembered_for_the_next_loop(player, tone):
+  player.load(tone)
+  player.set_speed(0.6)
+  first = player._stretched(0, len(player.samples))
+  again = player._stretched(0, len(player.samples))
+  assert again is first, 'the same range at the same speed must not be stretched twice'
+
+
+def test_a_new_recording_forgets_the_old_stretches(player, tone, tmp_path):
+  import soundfile as sf
+  player.load(tone)
+  player.set_speed(0.6)
+  player._stretched(0, len(player.samples))
+  assert player._stretch_cache
+  other = tmp_path / 'other.wav'
+  sf.write(str(other), np.zeros(1000, dtype='float32'), 22050)
+  player.load(other)
+  assert player._stretch_cache == {}, 'another recording must not reuse the stretch'
+
+
+def test_positions_stay_in_the_recordings_own_seconds(player, tone):
+  """Everything outside the player counts in recording seconds: the map, the reveal,
+  the waveform. Only the wall clock is stretched."""
+  player.load(tone)
+  player.set_speed(0.5)
+  player._output = _Output()
+  player._clock = _Clock()
+  player._range = (0.5, 1.5)
+  heard = []
+  player.positionChanged.connect(heard.append)
+
+  player._tick()
+  assert heard[-1] == pytest.approx(0.5), 'nothing has elapsed yet'
+
+  player._clock.ms = 500.0                      # half a second of wall time
+  player._tick()
+  assert heard[-1] == pytest.approx(0.75), \
+      'at half speed, 0.5 s of wall time is 0.25 s of music'
+  player.stop()
+
+
+def test_the_position_stops_at_the_end_of_the_range_however_slow(player, tone):
+  player.load(tone)
+  player.set_speed(0.5)
+  player._output = _Output()
+  player._clock = _Clock()
+  player._range = (0.0, 0.2)
+  heard = []
+  player.positionChanged.connect(heard.append)
+  player._clock.ms = 60_000.0                   # far past the end
+  player._tick()
+  assert heard[-1] == pytest.approx(0.2)
+
+
+def test_a_speed_change_mid_playback_keeps_the_place(player, tone, monkeypatch):
+  player.load(tone)
+  player._output = _Output()
+  player._clock = _Clock()
+  player._range = (0.2, 1.8)
+  player._clock.ms = 400.0                      # 0.4 s in
+
+  started = []
+  monkeypatch.setattr(player, 'play_range',
+                      lambda start, end: started.append((start, end)) or True)
+  player.set_speed(0.5)
+  assert player.speed == pytest.approx(0.5)
+  assert started and started[0][0] == pytest.approx(0.6), \
+      'it should carry on from where it had got to, at the new speed'
+  assert started[0][1] == pytest.approx(1.8)
+  player._output = None
+
+
+def test_a_tiny_range_is_played_unstretched_rather_than_failing(player, tone):
+  """Half a second of music is not a passage anybody slows down, and a stretch of it
+  would be all edge effects."""
+  player.load(tone)
+  player.set_speed(0.5)
+  tiny = player._stretched(0, 100)
+  assert len(tiny) == 100
+
+
+def test_a_long_stretch_says_so_before_it_starts(player, tmp_path):
+  """Two seconds of silence before the first note looks like a hang, so the player
+  announces the work it is about to do."""
+  import soundfile as sf
+  from analyzer.ui import player as player_module
+  rate = 22050
+  long_path = tmp_path / 'long.wav'
+  sf.write(str(long_path), np.zeros(rate * 200, dtype='float32'), rate)
+  player.load(long_path)
+  announced = []
+  player.preparing.connect(announced.append)
+  player.set_speed(0.5)
+  player._stretched(0, rate * 200)
+  assert announced == [pytest.approx(0.5)], announced
+
+  announced.clear()
+  player._stretch_cache.clear()
+  player._stretched(0, rate * 30)                 # short enough to be instant
+  assert announced == [], 'a short passage must not interrupt with a message'

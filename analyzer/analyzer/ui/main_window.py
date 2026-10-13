@@ -19,8 +19,9 @@ from typing import List, Optional
 
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QKeySequence
-from PyQt5.QtWidgets import (QAction, QCheckBox, QComboBox, QFileDialog, QFormLayout,
-                             QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+from PyQt5.QtWidgets import (QAction, QApplication, QCheckBox, QComboBox, QFileDialog,
+                             QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                             QListWidget,
                              QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
                              QPushButton, QScrollArea, QSpinBox, QSplitter, QTabWidget,
                              QVBoxLayout, QWidget)
@@ -66,6 +67,7 @@ class MainWindow(QMainWindow):
     self.player.positionChanged.connect(self._on_position)
     self.player.finished.connect(self._on_playback_finished)
     self.player.errorOccurred.connect(self._on_player_error)
+    self.player.preparing.connect(self._on_player_preparing)
 
     self._build_ui()
     self._build_menus()
@@ -855,7 +857,9 @@ class MainWindow(QMainWindow):
     if not self.player.play_range(start, end):
       self.status.showMessage('could not play that range')
       return
-    self.status.showMessage('playing bars %d-%d' % (self.first_spin.value(), self.last_spin.value()))
+    self.status.showMessage('playing bars %d-%d%s'
+                            % (self.first_spin.value(), self.last_spin.value(),
+                               self._speed_note()))
 
   def _on_position(self, seconds: float) -> None:
     self.waveform.set_playhead(seconds)
@@ -883,6 +887,12 @@ class MainWindow(QMainWindow):
 
   def _on_player_error(self, message: str) -> None:
     self.status.showMessage(message)
+
+  def _on_player_preparing(self, speed: float) -> None:
+    """Say what the pause is for, and let it be seen: the stretch happens on this
+    thread, so without flushing the message would only appear afterwards."""
+    self.status.showMessage('preparing a %.2fx version of the recording…' % speed)
+    QApplication.processEvents()
 
   # ------------------------------------------------------------------ misc
 
@@ -1054,6 +1064,12 @@ class MainWindow(QMainWindow):
   def show_measure_in_score(self, measure: int) -> None:
     if self.score_view.render is not None:
       self.score_view.show_measure(measure)
+
+  def _speed_note(self) -> str:
+    """The playback speed, when it is not the recording's own: it is set in the Sync
+    playing tab but applies to every play button in the window."""
+    speed = self.player.speed
+    return '' if abs(speed - 1.0) < 0.001 else ' at %.2fx' % speed
 
   def _measure_at_time(self, seconds: float):
     """Which measure the recording is inside at `seconds`."""
