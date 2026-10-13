@@ -62,6 +62,7 @@ class ScoreView(QWidget):
     self._hover_glyph: Optional[str] = None
     self._curtain: List[Tuple[float, float, float, float]] = []
     self._line: Optional[Tuple[float, float]] = None      # one system, in page pixels
+    self._outline = True                 # the box drawn around the bar being played
 
   # ------------------------------------------------------------------ content
 
@@ -220,6 +221,24 @@ class ScoreView(QWidget):
     self._playhead = measure
     self.update()
 
+  def set_playhead_outline(self, on: bool) -> None:
+    """Whether to draw a box around the bar being played.
+
+    The box is the measure's *staff* box, which is smaller than the music -- dynamics
+    and low ledger notes are drawn below it -- so its edges run through the notes. On a
+    page with several lines that is a useful marker; in a one-line view, where the
+    curtain already shows exactly where the music has got to, it reads as the bottom of
+    the music being cut off.
+    """
+    on = bool(on)
+    if on == self._outline:
+      return
+    self._outline = on
+    self.update()
+
+  def playhead_outline(self) -> bool:
+    return self._outline
+
   def set_line(self, top: Optional[float], bottom: Optional[float] = None) -> None:
     """Show one system only: page-pixel `top`..`bottom`, or None for the whole page.
 
@@ -332,7 +351,7 @@ class ScoreView(QWidget):
           painter.drawRect(rect_of(box))
       painter.setBrush(Qt.NoBrush)
 
-    if self._playhead is not None:
+    if self._playhead is not None and self._outline:
       found = self.render.box_of(self._playhead) if self.render else None
       if found and found[0].number == page.number:
         painter.setPen(QPen(QColor('#e0a020'), 2))

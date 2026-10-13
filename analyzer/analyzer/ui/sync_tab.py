@@ -113,6 +113,7 @@ class SyncPlayingPanel(QWidget):
 
     self.view = ScoreView()
     self.view.set_curtain([])
+    self.view.set_playhead_outline(self.outline_check.isChecked())
     self.scroll = QScrollArea()
     self.scroll.setWidget(self.view)
     self.scroll.setWidgetResizable(True)
@@ -139,6 +140,13 @@ class SyncPlayingPanel(QWidget):
 
     self.loop_check = QCheckBox('loop')
     row.addWidget(self.loop_check)
+
+    # Off by default: the box traces the staves, not the music, so its lower edge runs
+    # through the dynamics -- and the curtain already marks where the music has got to.
+    self.outline_check = QCheckBox('bar outline')
+    self.outline_check.setToolTip('draw a box around the bar being played')
+    self.outline_check.toggled.connect(lambda on: self.view.set_playhead_outline(on))
+    row.addWidget(self.outline_check)
 
     row.addSpacing(12)
     row.addWidget(QLabel('view'))

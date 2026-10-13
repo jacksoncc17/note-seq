@@ -240,10 +240,20 @@ been reached yet is covered**, so it cannot be read off the screen in advance. I
 recall aid rather than a viewer: you have to know what comes next, at tempo.
 
 ```
-Sync playing  [▶ Play] [■] [loop]  view [one line ▾]  reveal [every beat ▾]
-              play speed [1.00 x] [1x]  page speed [1.00 x] [0 ms]
+Sync playing  [▶ Play] [■] [loop] [ ] bar outline   view [one line ▾]
+              reveal [every beat ▾]  play speed [1.00 x] [1x]  page speed [1.00 x] [0 ms]
               page 2 / 9 · line 2 / 4      bar 40 · beat 2 of 3 · 62.9 s
 ```
+
+Two things that look like boxes, and only one of them is drawn: Verovio's own bounding
+boxes are in the SVG (`svgBoundingBoxes` is how the measure rectangles and note hit
+areas are measured) but they are emitted `fill="transparent" stroke-width="0"`, so
+nothing of them reaches the page — checked on a bar's border row: 8–42 inked pixels out
+of 165–196, which is music, not a box. The box you *can* see is the **playhead
+outline**, and it traces the bar's *staff* box, which is smaller than the music: its
+lower edge runs through the dynamics and the low ledger notes, which is why the bottom
+of the line looked cut. The **bar outline** tick turns it off — the default in this tab,
+where the curtain edge already says exactly where the music has got to.
 
 **One line at a time** is the default view, and it is not only tidier. On a whole page
 the curtain had to reach up into the bottom of the line above to keep the next line out
@@ -646,7 +656,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 410 tests, 408 of which run by default (two are
+**M1-M7 are implemented**, with 412 tests, 410 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map

@@ -564,3 +564,36 @@ def test_the_shown_band_is_the_measured_line(panel):
     staff = reveal.systems[index]
     assert tab.view.line()[1] - tab.view.line()[0] > 1.4 * (staff[1] - staff[0]), \
         'the band should be taller than the staves alone'
+
+
+def _orange_pixels(image):
+  """How many pixels are the playhead's orange, without looping in Python."""
+  import numpy as np
+  buffer = image.constBits().asstring(image.width() * image.height() * 4)
+  pixels = np.frombuffer(buffer, dtype=np.uint8).reshape(image.height(), image.width(), 4)
+  red, green, blue = pixels[:, :, 2], pixels[:, :, 1], pixels[:, :, 0]
+  return int(((red > 200) & (green > 140) & (green < 190) & (blue < 80)).sum())
+
+
+@needs_real
+def test_the_bar_outline_can_be_turned_off(panel):
+  """It traces the *staff* box, which is smaller than the music -- dynamics and low
+  ledger notes are drawn below it -- so its lower edge runs through the notes and reads
+  as the music being cut off. The curtain already shows where the music has got to."""
+  tab, _player, _piece, _render, _cfg = panel
+  assert not tab.outline_check.isChecked(), 'off by default in this tab'
+  tab.view.set_page(2)
+  span = next(m for m in tab.result.measures if m.measure == 40)
+  tab._playing = True
+  tab.on_position(span.start_s + 0.05)
+
+  tab.view.resize(700, 400)
+  without = _orange_pixels(tab.view.grab().toImage())
+  tab.outline_check.setChecked(True)
+  with_outline = _orange_pixels(tab.view.grab().toImage())
+  tab.outline_check.setChecked(False)
+  again = _orange_pixels(tab.view.grab().toImage())
+
+  assert with_outline > 100, 'ticking it should draw the box, got %d px' % with_outline
+  assert without == 0, 'the box must not be drawn when it is off (%d px)' % without
+  assert again == 0
