@@ -144,3 +144,83 @@ def test_renaming_a_worker_does_not_lose_the_job(store):
   assert store.renew(job.id, claimed.token)
   assert store.holds(job.id, claimed.token)
   assert not store.holds(job.id, 'somebody-else')
+
+
+# ---------------------------------------------------------------------------
+# two writers, one database
+# ---------------------------------------------------------------------------
+
+def test_the_store_can_be_written_from_several_threads_at_once(store):
+  """The API serves requests while the worker reports progress, so this is the normal
+  case rather than an exotic one.
+
+  It used to fail, and the failure is worth spelling out because the symptom was so far
+  from the cause: both threads shared one SQLite connection, so their transactions
+  interleaved on it and SQLite refused with `cannot start a transaction within a
+  transaction` (or `cannot commit - no transaction is active`). Measured then: four
+  threads produced four errors within a few hundred writes. The worker thread died on
+  one of them, and the queue sat at "queued" forever with nothing said anywhere a person
+  would look. Each thread now opens its own connection to the same WAL database.
+  """
+  import threading
+
+  job = make(store)
+  claimed = store.claim('worker')
+  errors: list = []
+
+  def write(name: str) -> None:
+    try:
+      for index in range(200):
+        store.progress(job.id, claimed.token, index % 100, 'x' * 40, log='line %d' % index)
+    except Exception as e:                      # noqa: BLE001 - the assertion is the point
+      errors.append('%s: %s: %s' % (name, type(e).__name__, e))
+
+  threads = [threading.Thread(target=write, args=('t%d' % n,)) for n in range(4)]
+  for thread in threads:
+    thread.start()
+  for thread in threads:
+    thread.join()
+  assert not errors, errors[:3]
+  assert store.get(job.id).row['progress'] == 99.0
+  assert 'line 199' in store.get(job.id).row['log'], 'every writer got its lines in'
+
+
+def test_a_failure_in_the_store_does_not_stop_the_worker(store, monkeypatch):
+  """A worker that exits on one transient error silently stops taking work."""
+  from service.app.worker import Worker
+
+  worker = Worker(store.settings, store=store)
+  calls = {'n': 0}
+
+  def flaky_reap():
+    calls['n'] += 1
+    if calls['n'] == 1:
+      raise RuntimeError('database is locked')
+    return []
+
+  monkeypatch.setattr(store, 'reap', flaky_reap)
+  worker.loop(idle_seconds=0.2)                 # returns; does not raise
+  assert calls['n'] > 1, 'the loop carried on after the failure'
+
+
+def test_each_thread_gets_its_own_connection(store):
+  """The reads and the writes must agree about which connection they are using.
+
+  `JobStore.connection` used to be an attribute captured in `__init__`, so every thread
+  was handed the one connection the store was built on -- which is the same bug as the
+  test above, just moved from the transactions to the reads. Here it is asserted
+  directly: the object a caller gets has to depend on who is asking.
+  """
+  import threading
+
+  seen = {}
+
+  def look(name: str) -> None:
+    seen[name] = store.connection
+
+  seen['main'] = store.connection
+  thread = threading.Thread(target=look, args=('other',))
+  thread.start()
+  thread.join()
+  assert seen['other'] is not seen['main'], 'one connection per thread, not one per store'
+  assert store.connection is seen['main'], 'and the main thread keeps its own'

@@ -71,7 +71,17 @@ class JobStore:
   def __init__(self, settings: Settings, database: Optional[db.Database] = None):
     self.settings = settings
     self.database = database or db.Database(settings.database)
-    self.connection = self.database.connection
+
+  @property
+  def connection(self):
+    """The calling thread's connection; see `db.Database`.
+
+    A property rather than the attribute this used to capture in `__init__`, which pinned
+    whichever thread built the store and handed that one connection to every other. The
+    transactions were the part that broke loudly -- the reads looked fine only because
+    WAL lets a reader work while somebody else writes.
+    """
+    return self.database.connection
 
   # ------------------------------------------------------------------ creating
 

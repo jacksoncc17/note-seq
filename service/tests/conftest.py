@@ -28,6 +28,14 @@ for path in (str(REPO), str(REPO / 'analyzer'), str(SERVICE)):
   if path not in sys.path:
     sys.path.insert(0, path)
 
+# The broker plugin lives in its own directory, exactly as the reference worker loads
+# it. Importing it by name here means a test and the loader get the *same* module
+# object: two copies would give two distinct NoteSeqError classes, and `pytest.raises`
+# would then fail on an exception that looks identical.
+PLUGIN_DIR = SERVICE / 'broker'
+if str(PLUGIN_DIR) not in sys.path:
+  sys.path.insert(0, str(PLUGIN_DIR))
+
 # The score and recording the analyzer's own tests use: 204 bars, nine engraved pages, a
 # real piano performance of 309.7 s. Small enough to align inside a test, real enough
 # that everything about it is the real thing.

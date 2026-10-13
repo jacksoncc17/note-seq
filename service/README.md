@@ -110,6 +110,15 @@ back and overwrite a finished result with a stale one. `reap()` returns jobs who
 died to the queue, and fails the ones that have killed `SERVICE_JOB_ATTEMPTS` workers,
 because a job that fails every time is not going to work on the fourth.
 
+**One connection per thread.** The API serves requests while the worker reports progress,
+so both write to the same SQLite file — on *one* shared connection their transactions
+interleave and SQLite refuses (`cannot start a transaction within a transaction`), which
+killed the worker thread mid-job and left the queue at "queued" for as long as anyone
+waited. Measured: four threads on one shared connection produced four errors in a few
+hundred writes, and none on their own connections. The worker's loop also steps over a
+failure and says so on stderr rather than exiting, because a worker that dies on one
+transient error stops taking work silently.
+
 The worker runs **inside the API process** by default, so one command starts everything.
 For a busy machine, or to keep FluidSynth and DTW out of the web server's process:
 
@@ -180,10 +189,74 @@ the downbeat clips the piano's attack.
   replaces that piece (matched by the score's sha256); a different score with the same
   name gets `-2`. The uploads stay in `data/jobs/`.
 
+## Registering with the broker in `selfCommentary` (a plugin service)
+
+The reference stack in `/home/wei/playground/goGames/selfCommentary/full-stack-fastapi-template`
+is a *broker* and a *worker*: a service is a plugin that declares a parameter schema,
+runs one job, and returns artifacts. That is a different contract from the web app above
+— there, a plugin's output is files, and the jobs page shows a download button per file —
+but it is the same analysis underneath, so `service/broker/note_seq_align/` implements it
+by calling `pipeline.analyse`, the function this service's own jobs call.
+
+Registering it is one command and no change to their repository:
+
+```bash
+cd /home/wei/playground/goGames/selfCommentary/full-stack-fastapi-template
+WORKER_KEY=... python3 worker.py \
+    --plugin-dir /home/wei/music_gen/note-seq/service/broker \
+    --service note_seq_align \
+    --broker $BROKER_URL --key $WORKER_KEY --name lan-note-seq
+```
+
+The worker publishes the contract at startup (`POST /worker/services`) — that *is* the
+whole registration: the service appears in their web app's submit form, rendered from
+`param_schema`, with a file picker for the score and the recording. Run it with the
+interpreter that has this repository's dependencies, not their worker's Python: the
+plugin imports the analyzer, and the worker itself is deliberately stdlib-only.
+
+**The service is called `note_seq_align` for a reason.** Their loader imports a plugin by
+its directory name, and this repository already contains a package called `note_seq` (the
+melody library `memorization/` uses). A service named `note_seq` would shadow it, or be
+shadowed by it, depending on `sys.path` order — and the failure reads as "no plugin
+found", which says nothing about the cause.
+
+### What one job produces
+
+Measured on the Chopin waltz (204 bars, 309.7 s of audio): **8.6 s**, six artifacts,
+3.36 MB.
+
+| artifact kind | file | measured |
+|---|---|---|
+| `measure_map` | `measure_map.json` (77.7 KB) | every bar with its start and end, the per-bar confidence, the fit's own numbers, **and the measure boxes of all nine pages** — so a consumer can pair the map with the page image without engraving anything |
+| `range_audio` | `bars_40-83.wav` (2.63 MB) | 60.98 s: the passage plus the same 0.12 s run-in and 0.25 s run-out the desktop app plays it with |
+| `score_page`, `score_page_2`, … | `score_page_2.png` (237 KB) | 1260×1382 px, one per page the passage touches, with the selected bars washed in colour |
+| `report` | `report.json` (1.7 KB) | what to distrust: `"20 bars had to be clamped: the fit was erratic there, so their times are a plausible guess rather than a measurement."` |
+
+The wash is drawn *into* the SVG before rasterising, at the box the engraving itself
+reported — the same boxes the browser puts its click targets on. Where it lands is
+tested, not assumed: one test renders the page and checks that the middle of a selected
+bar is tinted and the middle of a bar outside the passage is not, and that test was
+mutation-checked (placing the wash one SVG level too high makes it fail, which is what
+would happen to a highlight drawn in Verovio's outer pixel space instead of the
+engraving's units).
+
+`--fake-pipeline` works too: the plugin has a `fake_run` that writes the same kinds of
+file without touching audio, which is how the broker's queue plumbing can be exercised.
+
+### What the two front doors share, and what they do not
+
+Both call `pipeline.analyse`: same alignment, same map, same geometry. They differ in
+what a *result* is. The broker hands a person files, so the plugin returns files. This
+service's own page is interactive — click bar 40, click bar 83, hear it — and an
+interactive page is not an artifact, which is the one thing the broker model cannot
+express. If you want both, run both: they are the same repository, the same code, and
+they do not interfere (the broker plugin writes into the worker's scratch directory and
+into this service's cache, never into its pieces).
+
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 47 tests, ~10 s
+.venv/bin/python -m pytest service/tests -q          # 64 tests, ~45 s
 cd service/frontend && npm run check:browser         # the whole flow in headless Chrome
 ```
 
@@ -200,6 +273,14 @@ ANALYZER_NETWORK_TESTS=1 .venv/bin/python -m pytest service/tests -q
 `npm run check:browser` starts the service on a spare port with its own data directory,
 drives Chrome through upload → job → score page → range → playback, and prints what it
 measured; it exits non-zero if the click targets, the clip or the playhead are wrong.
+
+The broker plugin is tested against the *reference implementation's own code* rather than
+against a description of it: `worker_plugins.loader.load_plugins` loads it, the broker's
+`app.param_schema` validates its schema (a schema the broker cannot enforce is refused at
+registration, so this decides whether the service can be published at all), and
+`worker.process_one` — their dispatch, staging and artifact-upload path — runs a real job
+with a broker that records instead of posting. Those tests skip when that checkout is not
+on the machine; everything else runs regardless.
 
 ## Troubleshooting
 

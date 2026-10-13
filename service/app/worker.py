@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -110,13 +111,27 @@ class Worker:
            idle_seconds: float = 0.0) -> None:
     """Work until stopped; `idle_seconds` ends the loop once the queue stays empty.
 
-    Reaping runs before every claim, so a job whose worker died is picked up by the
-    next worker to come past rather than waiting for a human to notice.
+    Reaping runs before every claim, so a job whose worker died is picked up by the next
+    worker to come past rather than waiting for a human to notice.
+
+    Every iteration is guarded, and a failure is reported and stepped over rather than
+    ending the loop. A worker that exits on one transient error is worse than useless: it
+    silently stops taking work, and the queue looks stalled for no visible reason. That
+    is not hypothetical -- a shared database connection used to raise here under load,
+    and the symptom was a job sitting at "queued" for as long as anyone cared to wait.
     """
     idle_since: Optional[float] = None
     while stop is None or not stop.is_set():
-      self.store.reap()
-      if self.run_once():
+      try:
+        self.store.reap()
+        ran = self.run_once()
+      except Exception as e:                  # noqa: BLE001 - the loop must outlive it
+        print('[worker %s] %s: %s' % (self.name, type(e).__name__, e), file=sys.stderr,
+              flush=True)
+        traceback.print_exc()
+        time.sleep(max(1.0, self.settings.poll_seconds))
+        continue
+      if ran:
         idle_since = None
         continue
       idle_since = idle_since or time.monotonic()

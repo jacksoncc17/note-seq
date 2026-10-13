@@ -85,12 +85,16 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
     params: `{'score': path, 'audio': path|None, 'youtube_url': str|None, 'title': str}`.
     report: `(percent, message)` for the job's progress.
     log: `(line)` for the job's log -- what was run, and what it said.
+
+  Returns:
+    `{'slug': ..., 'meta': {...}}` for the piece it stored.
+
+  The work itself is in `analyse`, below: this function is the front door that fetches
+  the recording and stores the result, and it is the only part that knows about jobs.
   """
   if not analyzer_importable():
     raise PipelineError('the analyzer package could not be imported; run the service '
                         'from the note-seq checkout (see service/README.md)')
-  from analyzer import align, measures, scoreview
-  from analyzer.config import AnalyzerConfig
 
   # The job directory is this run's working space. The API creates it before the upload
   # lands, but a worker started against a job made another way (a script, a retry after
@@ -103,20 +107,137 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
     raise PipelineError('the uploaded score is missing from the job directory')
   audio_source = params.get('audio')
   url = (params.get('youtube_url') or '').strip()
+  if not audio_source and not url:
+    raise PipelineError('give either an audio file or a YouTube URL')
 
-  # The analyzer's own config, pointed at this service's data directory: the alignment
-  # and the engraving cache their intermediate work, and none of it should land in the
-  # desktop app's cache or need a desktop app to exist.
-  cfg = AnalyzerConfig(cache_dir=settings.data_dir / 'cache',
-                       output_dir=settings.data_dir / 'output')
+  # 1. the recording ---------------------------------------------------------
+  audio = audio_path(settings, job_dir, audio_source, url, Progress(report, 'audio'),
+                     log)
+
+  # 2-5. the analysis --------------------------------------------------------
+  analysis = analyse(settings, job_dir, score, audio, report, log)
+
+  # 6. store -----------------------------------------------------------------
+  step = Progress(report, 'store')
+  step(30.0, 'saving the piece')
+  result, pages = analysis.result, analysis.pages
+  title = (params.get('title') or '').strip() or analysis.score_meta.get('title') or \
+      score.stem.replace('_', ' ')
+  audio_meta = read_audio_meta(audio) if audio.is_file() else {}
+  slug = store.claim_slug(slugify(title), fingerprint(score))
+  map_dict = result.to_dict()
+  geometry = {'slug': slug,
+              'pages': [page.to_dict() for page in pages],
+              'warnings': list(analysis.page_warnings)}
+  meta = {
+      'slug': slug,
+      'title': title,
+      'composer': analysis.score_meta.get('composer') or '',
+      'bars': len({m.measure for m in result.measures}),
+      'duration_s': round(result.audio_duration_s, 3),
+      'method': result.method,
+      'seconds_per_measure': round(result.seconds_per_measure, 4),
+      'pages': len(pages),
+      'created_at': time.time(),
+      'job_id': params.get('job_id') or '',
+      'score': dict(analysis.score_meta, name=score.name, sha256=fingerprint(score)),
+      'audio': dict(audio_meta, name=audio.name,
+                    source='youtube' if url else 'upload',
+                    url=url, uploaded=pathlib.Path(audio_source).name if audio_source else ''),
+      'quality': result.quality,
+      'warnings': list(result.warnings) + list(analysis.page_warnings),
+  }
+  store.write(slug, score=score, reference_midi=analysis.reference_midi, audio=audio,
+              map_dict=map_dict, geometry=geometry, pages=pages, meta=meta)
+  log('stored as %s: %d page(s), %d bars, %.1f s of audio'
+      % (slug, len(pages), meta['bars'], meta['duration_s']))
+  step(100.0, 'done')
+  return {'slug': slug, 'meta': meta}
+
+
+def analysis_config(settings: Settings):
+  """The analyzer's config, pointed at this service's data directory.
+
+  The alignment and the engraving cache their intermediate work; none of it should land
+  in the desktop app's cache, and none of it should need a desktop app to exist.
+  """
+  from analyzer.config import AnalyzerConfig
+  return AnalyzerConfig(cache_dir=settings.data_dir / 'cache',
+                        output_dir=settings.data_dir / 'output')
+
+
+class Analysis:
+  """Everything the analysis produced, before any of it is stored anywhere.
+
+  Split out from `analyze` because there are two front doors to the same work: this
+  service's own job, which stores a piece and serves a page, and the broker plugin in
+  `service/broker/note_seq`, which hands files back to another system. Both want the
+  same alignment and the same engraving, and neither wants a second copy of the code.
+  """
+
+  def __init__(self, *, slug: str, score_meta: Dict[str, Any], played: List[int],
+               expansion: str, result, pages: List[Any], page_warnings: List[str],
+               reference_midi: pathlib.Path, audio: pathlib.Path):
+    self.slug = slug
+    self.score_meta = score_meta
+    self.played = played
+    self.expansion = expansion
+    self.result = result                 # analyzer.schema.SyncResult
+    self.pages = pages                   # analyzer.scoreview.SvgPage
+    self.page_warnings = page_warnings
+    self.reference_midi = reference_midi
+    self.audio = audio
+
+  @property
+  def warnings(self) -> List[str]:
+    return list(self.result.warnings) + list(self.page_warnings)
+
+  def page_for_bar(self, bar: int):
+    """The engraved page a bar is on, or None."""
+    for page in self.pages:
+      if any(box.number == bar for box in page.measures):
+        return page
+    return None
+
+  def pages_for_bars(self, first: int, last: int) -> List[Any]:
+    """The pages a range of bars touches, in order, without duplicates."""
+    out = []
+    for bar in range(min(first, last), max(first, last) + 1):
+      page = self.page_for_bar(bar)
+      if page is not None and (not out or out[-1].number != page.number):
+        out.append(page)
+    seen = set()
+    unique = []
+    for page in out:
+      if page.number not in seen:
+        seen.add(page.number)
+        unique.append(page)
+    return unique
+
+
+def analyse(settings: Settings, job_dir: pathlib.Path, score: pathlib.Path,
+            audio: pathlib.Path, report: Report,
+            log: Callable[[str], None]) -> Analysis:
+  """Everything after the recording is in hand: reference MIDI, alignment, engraving.
+
+  Steps 2 to 5 of the pipeline, usable on its own -- which is what the broker plugin
+  does, since a file staged by another system's worker is just as good a recording as
+  one this service uploaded.
+  """
+  from analyzer import measures, scoreview
+
+  score = pathlib.Path(score)
+  audio = pathlib.Path(audio)
+  if not score.is_file():
+    raise PipelineError('no score to analyse: %s' % score)
+  if not audio.is_file():
+    raise PipelineError('no recording to analyse: %s' % audio)
+  job_dir.mkdir(parents=True, exist_ok=True)
+  cfg = analysis_config(settings)
 
   score_meta = read_score_meta(score)
   log('score: %s (%d bytes)' % (score.name, score.stat().st_size))
   log('score says: %s' % json.dumps(score_meta, sort_keys=True))
-
-  # 1. the recording ---------------------------------------------------------
-  audio = audio_path(settings, job_dir, audio_source, url, cfg,
-                     Progress(report, 'audio'), log)
 
   # 2. the reference MIDI ----------------------------------------------------
   reference = build_reference_midi(settings, score, job_dir,
@@ -140,8 +261,9 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
   step(1.0, 'aligning the recording to the score')
   started = time.monotonic()
   try:
-    result = align.align_to_audio(played, str(audio), str(reference), cfg=cfg,
-                                  progress=step)
+    result = align_result = _align(played, audio, reference, cfg, step)
+  except PipelineError:
+    raise
   except Exception as e:
     raise PipelineError('the alignment failed: %s' % e)
   log('aligned in %.1f s: method=%s, %.3f s a bar, %d measures, %d warning(s)'
@@ -153,46 +275,21 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
   # 5. the engraving ---------------------------------------------------------
   step = Progress(report, 'engrave')
   try:
-    pages, warnings = scoreview.render_svg_pages(cfg, score, progress=step)
+    pages, page_warnings = scoreview.render_svg_pages(cfg, score, progress=step)
   except Exception as e:
     raise PipelineError('the score could not be engraved: %s' % e)
   log('engraved %d page(s) to SVG' % len(pages))
 
-  # 6. store -----------------------------------------------------------------
-  step = Progress(report, 'store')
-  step(30.0, 'saving the piece')
-  title = (params.get('title') or '').strip() or score_meta.get('title') or \
-      score.stem.replace('_', ' ')
-  audio_meta = read_audio_meta(audio) if audio.is_file() else {}
-  slug = store.claim_slug(slugify(title), fingerprint(score))
-  map_dict = result.to_dict()
-  geometry = {'slug': slug,
-              'pages': [page.to_dict() for page in pages],
-              'warnings': list(warnings)}
-  meta = {
-      'slug': slug,
-      'title': title,
-      'composer': score_meta.get('composer') or '',
-      'bars': len({m.measure for m in result.measures}),
-      'duration_s': round(result.audio_duration_s, 3),
-      'method': result.method,
-      'seconds_per_measure': round(result.seconds_per_measure, 4),
-      'pages': len(pages),
-      'created_at': time.time(),
-      'job_id': params.get('job_id') or '',
-      'score': dict(score_meta, name=score.name, sha256=fingerprint(score)),
-      'audio': dict(audio_meta, name=audio.name,
-                    source='youtube' if url else 'upload',
-                    url=url, uploaded=pathlib.Path(audio_source).name if audio_source else ''),
-      'quality': result.quality,
-      'warnings': list(result.warnings) + list(warnings),
-  }
-  store.write(slug, score=score, reference_midi=reference, audio=audio,
-              map_dict=map_dict, geometry=geometry, pages=pages, meta=meta)
-  log('stored as %s: %d page(s), %d bars, %.1f s of audio'
-      % (slug, len(pages), meta['bars'], meta['duration_s']))
-  step(100.0, 'done')
-  return {'slug': slug, 'meta': meta}
+  return Analysis(slug=slugify(score.stem), score_meta=score_meta, played=played,
+                  expansion=expansion.summary(), result=align_result, pages=pages,
+                  page_warnings=page_warnings, reference_midi=reference, audio=audio)
+
+
+def _align(played, audio, reference, cfg, progress):
+  """`align.align_to_audio`, imported here so this module lists without the stack."""
+  from analyzer import align
+  return align.align_to_audio(played, str(audio), str(reference), cfg=cfg,
+                              progress=progress)
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +297,7 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def audio_path(settings: Settings, job_dir: pathlib.Path, uploaded: Optional[str],
-               url: str, cfg, report: Report, log: Callable[[str], None]) -> pathlib.Path:
+               url: str, report: Report, log: Callable[[str], None]) -> pathlib.Path:
   """The recording, as 22050 Hz mono PCM in the job directory."""
   dest = job_dir / 'audio.wav'
   if url and not uploaded:

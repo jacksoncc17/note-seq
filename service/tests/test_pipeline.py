@@ -35,7 +35,7 @@ def test_the_recording_is_converted_to_the_one_format_everything_assumes(setting
   def report(percent, message=''):
     messages.append((percent, message))
 
-  wav = audio_path(settings, job_dir, str(saved), '', object(), report, lambda line: None)
+  wav = audio_path(settings, job_dir, str(saved), '', report, lambda line: None)
   meta = read_audio_meta(wav)
   assert meta['sample_rate'] == 22050, 'the analyzer aligns at 22050 Hz and only that'
   assert meta['channels'] == 1
@@ -51,7 +51,7 @@ def test_an_upload_that_is_not_audio_fails_with_a_readable_message(settings, tmp
   junk = job_dir / 'upload.mp3'
   junk.write_bytes(b'this is not an mp3, whatever the extension says')
   with pytest.raises(PipelineError) as caught:
-    audio_path(settings, job_dir, str(junk), '', object(), lambda *a: None, lambda line: None)
+    audio_path(settings, job_dir, str(junk), '', lambda *a: None, lambda line: None)
   assert 'could not read that audio file' in str(caught.value)
 
 

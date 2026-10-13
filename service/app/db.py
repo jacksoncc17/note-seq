@@ -14,14 +14,24 @@ Two details matter for correctness rather than taste:
 * **`BEGIN IMMEDIATE` for claiming.** SQLite has no `SKIP LOCKED`, but it does have a
   single writer: taking the write lock *before* selecting the candidate makes claiming
   atomic between processes, which is the whole point of the exercise.
+* **One connection per thread.** The API serves requests on a thread pool while the
+  worker writes progress on its own thread, so a single shared connection has two
+  threads interleaving their transactions on it -- and SQLite refuses, with
+  `cannot start a transaction within a transaction`, `cannot commit - no transaction is
+  active`, or `bad parameter or other API misuse`. Measured: four threads writing to one
+  shared connection produced four errors in a few hundred writes, and the error killed
+  the worker thread, which left the queue stalled with nothing said anywhere a person
+  would look. Each thread now opens its own connection to the same WAL database, which
+  is what WAL is for.
 """
 
 from __future__ import annotations
 
 import pathlib
 import sqlite3
+import threading
 import time
-from typing import Optional
+from typing import List, Optional
 
 # The schema, applied on every start. `CREATE TABLE IF NOT EXISTS` is enough here: this
 # database holds jobs that can be re-run and pieces that can be re-analysed, so there is
@@ -88,12 +98,31 @@ def now() -> float:
 
 
 class Database:
-  """A connection with the small amount of transaction handling this needs."""
+  """The database, with one connection per thread and the transactions this needs.
+
+  `connection` is a property rather than an attribute on purpose: an attribute captured
+  one thread's connection and handed it to every other, which is the bug described at the
+  top of this file.
+  """
 
   def __init__(self, path: pathlib.Path):
     self.path = pathlib.Path(path)
-    self.connection = connect(self.path)
-    initialize(self.connection)
+    self._local = threading.local()
+    self._connections: List[sqlite3.Connection] = []
+    self._lock = threading.Lock()
+    initialize(self.connection)          # creates the schema, once, on this thread
+
+  @property
+  def connection(self) -> sqlite3.Connection:
+    """This thread's connection, opened on first use."""
+    existing = getattr(self._local, 'connection', None)
+    if existing is not None:
+      return existing
+    opened = connect(self.path)
+    with self._lock:
+      self._connections.append(opened)
+    self._local.connection = opened
+    return opened
 
   def immediate(self):
     """A context manager holding the write lock for the block.
@@ -105,10 +134,15 @@ class Database:
     return _Immediate(self.connection)
 
   def close(self) -> None:
-    try:
-      self.connection.close()
-    except sqlite3.Error:
-      pass
+    """Close every connection this process opened, whoever's thread opened it."""
+    with self._lock:
+      opened, self._connections = self._connections, []
+    for connection in opened:
+      try:
+        connection.close()
+      except sqlite3.Error:
+        pass
+    self._local = threading.local()
 
 
 class _Immediate:

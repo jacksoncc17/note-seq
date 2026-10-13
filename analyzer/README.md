@@ -872,7 +872,9 @@ suites together are 527 passed, 4 skipped in about four minutes.
 * **a web service** beside the app (`service/`, its own README): upload a score and a
   recording -- or a YouTube URL -- and get a page with the engraved score where any range
   of bars can be selected and heard. It runs this package's alignment, engraving and
-  measure map unchanged; measured, its map is identical to the desktop app's, bar for bar
+  measure map unchanged; measured, its map is identical to the desktop app's, bar for
+  bar. The same analysis is also published as a service for the broker in
+  `selfCommentary/full-stack-fastapi-template` (`service/broker/note_seq_align/`)
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads
