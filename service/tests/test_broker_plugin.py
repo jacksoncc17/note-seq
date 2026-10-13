@@ -39,13 +39,19 @@ needs_reference = pytest.mark.skipif(
 
 
 @pytest.fixture
-def plugin():
-  """The plugin as the worker would get it, loaded from its directory by name."""
+def plugin(settings):
+  """The plugin as the worker would get it, loaded from its directory by name.
+
+  It is handed the test's `settings`, so a piece it publishes lands in this test's
+  temporary data directory. `plugin()` with no arguments -- what the worker does -- uses
+  `SERVICE_DATA` or `service/data`, which is right in a deployment and wrong in a test:
+  without this, running the suite wrote pieces into the service's real store.
+  """
   sys.path.insert(0, str(PLUGIN_DIR))
   try:
     import importlib
     module = importlib.import_module('note_seq_align')
-    return module.plugin()
+    return module.plugin(settings=settings)
   finally:
     sys.path.remove(str(PLUGIN_DIR))
 
@@ -376,3 +382,104 @@ def _tinted_at(png: pathlib.Path, page: dict, bar: int) -> bool:
   # The wash is the highlight colour at 18% over white paper: bluer than it is red, and
   # not the paper, which is a very light warm grey.
   return blue > red + 10 and blue > 140 and blue >= green
+
+
+# ---------------------------------------------------------------------------
+# the page the artifacts come with
+# ---------------------------------------------------------------------------
+
+@have_material
+def test_a_job_publishes_a_piece_its_own_page_can_serve(plugin, settings, tmp_path):
+  """A broker job leaves more than a folder of downloads: the piece goes into the
+  standalone service's store, and this is that store's API answering for it.
+
+  `settings` points at a temporary data directory, so this exercises the real writing and
+  the real reading without touching the service's own data.
+  """
+  from fastapi.testclient import TestClient
+
+  from service.app.api import create_app
+
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  out = tmp_path / 'out'
+  produced = plugin.run({'first_bar': 40, 'last_bar': 83, 'title': 'Chopin, from the broker'},
+                        tmp_path / 'work', out, lambda *a: None, staged)
+  report = json.loads((out / 'report.json').read_text())
+  assert report['viewer']['published'] is True, report['viewer']
+  slug = report['viewer']['slug']
+  assert slug == 'chopin-from-the-broker'
+  assert report['viewer']['url'].endswith('/pieces/%s' % slug)
+
+  # The piece is on disk, and the API serves it exactly as it serves its own.
+  assert (settings.piece_dir(slug) / 'map.json').is_file()
+  assert (settings.piece_dir(slug) / 'audio.wav').is_file()
+  assert len(list((settings.piece_dir(slug) / 'pages').glob('*.svg'))) == 9
+
+  client = TestClient(create_app(settings))
+  piece = client.get('/api/v1/pieces/%s' % slug).json()
+  assert piece['meta']['title'] == 'Chopin, from the broker'
+  assert len(piece['map']['measures']) == 204
+  assert len(piece['geometry']['pages']) == 9
+  bar40 = next(m for m in piece['map']['measures'] if m['measure'] == 40)
+  assert bar40['start_s'] == pytest.approx(62.38, abs=0.1)
+
+  page = client.get('/api/v1/pieces/%s/pages/1.svg' % slug)
+  assert page.status_code == 200 and 'class="measure">' in page.text
+
+  clip = client.get('/api/v1/pieces/%s/audio' % slug, params={'first_bar': 40, 'last_bar': 83})
+  assert clip.status_code == 200
+  assert len(clip.content) / (22050 * 2.0) == pytest.approx(60.98, abs=0.05)
+  assert client.get('/api/v1/pieces').json()['pieces'][0]['slug'] == slug
+
+
+@have_material
+def test_the_switch_turns_the_page_off_and_the_job_still_works(plugin, settings, tmp_path):
+  """A machine that only runs broker workers should be able to say no."""
+  import note_seq_align
+
+  off = note_seq_align.plugin(settings=settings, viewer=False)
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  out = tmp_path / 'out'
+  produced = off.run({'first_bar': 40, 'last_bar': 41}, tmp_path / 'work', out,
+                     lambda *a: None, staged)
+  report = json.loads((out / 'report.json').read_text())
+  assert report['viewer']['published'] is False
+  assert 'NOTE_SEQ_VIEWER' in report['viewer']['reason']
+  assert {a['kind'] for a in produced} >= {'measure_map', 'range_audio', 'score_page'}
+  assert not (settings.piece_dir('chopin-waltz-in-a-minor-op-34-no-2')).exists()
+
+
+@have_material
+def test_publishing_that_fails_does_not_fail_the_job(plugin, settings, tmp_path, monkeypatch):
+  """The artifacts are the contract; the page is a bonus. A read-only data directory
+  must cost you the link, not the job."""
+  from service.app import pieces as pieces_module
+
+  def explode(*args, **kwargs):
+    raise OSError('read-only file system')
+
+  monkeypatch.setattr(pieces_module.PieceStore, 'write', explode)
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  out = tmp_path / 'out'
+  produced = plugin.run({}, tmp_path / 'work', out, lambda *a: None, staged)
+  report = json.loads((out / 'report.json').read_text())
+  assert report['viewer']['published'] is False
+  assert 'read-only file system' in report['viewer']['reason']
+  assert {a['kind'] for a in produced} >= {'measure_map', 'score_page', 'report'}
+  for artifact in produced:
+    assert pathlib.Path(artifact['path']).is_file()
+
+
+def test_the_viewer_url_can_be_configured(monkeypatch, tmp_path):
+  """The worker and the page need not be on the same machine."""
+  import importlib
+
+  monkeypatch.setenv('NOTE_SEQ_VIEWER_URL', 'http://piano.local:9000/')
+  import note_seq_align.service as service_module
+  reloaded = importlib.reload(service_module)
+  try:
+    made = reloaded.plugin()
+    assert made.viewer_url == 'http://piano.local:9000'
+  finally:
+    monkeypatch.undo()
+    importlib.reload(service_module)

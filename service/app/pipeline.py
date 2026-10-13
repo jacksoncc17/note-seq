@@ -101,7 +101,6 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
   # somebody cleaned up) must not fail on a missing directory halfway through.
   job_dir.mkdir(parents=True, exist_ok=True)
 
-  store = PieceStore(settings)
   score = pathlib.Path(params['score'])
   if not score.is_file():
     raise PipelineError('the uploaded score is missing from the job directory')
@@ -120,12 +119,35 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
   # 6. store -----------------------------------------------------------------
   step = Progress(report, 'store')
   step(30.0, 'saving the piece')
+  slug, meta = publish_piece(
+      settings, analysis, score=score,
+      title=(params.get('title') or '').strip(),
+      audio_source_name=pathlib.Path(audio_source).name if audio_source else '',
+      url=url, job_id=params.get('job_id') or '')
+  log('stored as %s: %d page(s), %d bars, %.1f s of audio'
+      % (slug, meta['pages'], meta['bars'], meta['duration_s']))
+  step(100.0, 'done')
+  return {'slug': slug, 'meta': meta}
+
+
+def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
+                  title: str = '', audio_source_name: str = '', url: str = '',
+                  job_id: str = '') -> Tuple[str, Dict[str, Any]]:
+  """Store an analysis as a piece the web page can serve. Returns (slug, meta).
+
+  Both front doors end here: this service's own job, and the broker plugin in
+  `service/broker/note_seq_align`, which publishes the piece so a job that ran through
+  another system's worker still leaves a page you can open. Everything the page reads is
+  written -- score, reference MIDI, recording, map, geometry and every page SVG -- so it
+  is the same store, the same API and the same page either way round.
+  """
+  store = PieceStore(settings)
+  score = pathlib.Path(score)
+  audio = pathlib.Path(analysis.audio)
   result, pages = analysis.result, analysis.pages
-  title = (params.get('title') or '').strip() or analysis.score_meta.get('title') or \
-      score.stem.replace('_', ' ')
+  title = title or analysis.score_meta.get('title') or score.stem.replace('_', ' ')
   audio_meta = read_audio_meta(audio) if audio.is_file() else {}
   slug = store.claim_slug(slugify(title), fingerprint(score))
-  map_dict = result.to_dict()
   geometry = {'slug': slug,
               'pages': [page.to_dict() for page in pages],
               'warnings': list(analysis.page_warnings)}
@@ -139,20 +161,17 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
       'seconds_per_measure': round(result.seconds_per_measure, 4),
       'pages': len(pages),
       'created_at': time.time(),
-      'job_id': params.get('job_id') or '',
+      'job_id': job_id,
       'score': dict(analysis.score_meta, name=score.name, sha256=fingerprint(score)),
       'audio': dict(audio_meta, name=audio.name,
                     source='youtube' if url else 'upload',
-                    url=url, uploaded=pathlib.Path(audio_source).name if audio_source else ''),
+                    url=url, uploaded=audio_source_name),
       'quality': result.quality,
       'warnings': list(result.warnings) + list(analysis.page_warnings),
   }
   store.write(slug, score=score, reference_midi=analysis.reference_midi, audio=audio,
-              map_dict=map_dict, geometry=geometry, pages=pages, meta=meta)
-  log('stored as %s: %d page(s), %d bars, %.1f s of audio'
-      % (slug, len(pages), meta['bars'], meta['duration_s']))
-  step(100.0, 'done')
-  return {'slug': slug, 'meta': meta}
+              map_dict=result.to_dict(), geometry=geometry, pages=pages, meta=meta)
+  return slug, meta
 
 
 def analysis_config(settings: Settings):

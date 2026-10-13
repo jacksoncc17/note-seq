@@ -22,9 +22,10 @@ the real cause. The extra word costs nothing and cannot collide.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 HERE = pathlib.Path(__file__).resolve()
 REPO = HERE.parents[3]                       # the note-seq checkout
@@ -36,7 +37,8 @@ for _path in (str(REPO), str(REPO / 'analyzer')):
     sys.path.append(_path)
 
 from service.app.config import Settings                   # noqa: E402
-from service.app.pipeline import Progress, analyse, audio_path           # noqa: E402
+from service.app.pipeline import (Progress, analyse, audio_path,        # noqa: E402
+                                  publish_piece)
 
 # The passage a range is cut with, in seconds, either side: the same run-in and run-out
 # the desktop app uses, because starting exactly on the downbeat clips the piano's
@@ -50,6 +52,11 @@ POST_ROLL_S = 0.25
 # instead of guessing where the ink is.
 HIGHLIGHT = '#2f7ed8'
 HIGHLIGHT_OPACITY = 0.18
+
+# Where this service's own page is, for the link a job hands back. The default is the
+# port `service/run.sh` serves on; the deployment that runs a broker worker may well be
+# somewhere else, so it is configurable.
+VIEWER_URL = os.environ.get('NOTE_SEQ_VIEWER_URL', 'http://localhost:8100').rstrip('/')
 
 KIND_MAP = 'measure_map'
 KIND_AUDIO = 'range_audio'
@@ -136,11 +143,18 @@ class NoteSeqAlign:
       'additionalProperties': False,
   }
 
-  def __init__(self, settings: Optional[Settings] = None, **kwargs):
+  def __init__(self, settings: Optional[Settings] = None, viewer: Optional[bool] = None,
+               viewer_url: Optional[str] = None, **kwargs):
     # Configuration a deployment may want to pass through `plugin(**kwargs)`; ignored
     # keys are accepted so the worker can pass its own flags to every plugin.
     self.settings = settings
     self.options = kwargs
+    # Publishing the piece into the standalone service is on by default -- it is the
+    # difference between a folder of downloads and something you can listen in -- and
+    # switchable, because a machine that only runs a broker worker should not have a
+    # data directory quietly filling up. NOTE_SEQ_VIEWER=0 turns it off.
+    self.viewer_enabled = _flag('NOTE_SEQ_VIEWER', True) if viewer is None else bool(viewer)
+    self.viewer_url = (viewer_url or VIEWER_URL)
 
   # ------------------------------------------------------------------ running
 
@@ -229,16 +243,53 @@ class NoteSeqAlign:
       image_path.write_bytes(png)
       produced.append({'kind': kind, 'path': image_path})
 
-    # 4. a short report: what was asked for, what came out, and what to distrust.
+    # 4. the piece, in the standalone service's store, so the artifacts come with a page
+    #    you can actually listen in. Failing to publish must not fail the job: the
+    #    artifacts are the contract, this is a bonus.
+    viewer = self.publish(analysis, score=score, params=params, url=url)
+
+    # 5. a short report: what was asked for, what came out, and what to distrust.
     report_path = outdir / 'report.json'
-    report_path.write_text(json.dumps(_report(analysis, first, last, url, produced),
+    report_path.write_text(json.dumps(_report(analysis, first, last, url, produced, viewer),
                                       indent=2, sort_keys=True), encoding='utf-8')
     produced.append({'kind': KIND_REPORT, 'path': report_path})
 
-    report(100.0, '%d bars at %.2f s a bar; %d artifact(s)'
-           % (len(map_dict['measures']), analysis.result.seconds_per_measure,
-              len(produced)))
+    if viewer.get('published'):
+      report(100.0, '%d bars at %.2f s a bar; %d artifact(s); the page is at %s'
+             % (len(map_dict['measures']), analysis.result.seconds_per_measure,
+                len(produced), viewer['url']))
+    else:
+      report(100.0, '%d bars at %.2f s a bar; %d artifact(s)'
+             % (len(map_dict['measures']), analysis.result.seconds_per_measure,
+                len(produced)))
     return produced
+
+  def publish(self, analysis, *, score: pathlib.Path, params: Dict[str, Any],
+              url: str) -> Dict[str, Any]:
+    """Store the piece where this service's own page can serve it.
+
+    The artifacts are files a person downloads; the page is where you click bar 40, click
+    bar 83 and hear it. Same analysis, two front doors -- so a job that ran through
+    another system's worker still leaves something interactive behind.
+
+    Returns a small dict for the report:
+      `{'published': True, 'url': ..., 'slug': ...}` or
+      `{'published': False, 'reason': ...}` -- never raises, because a job whose
+    artifacts are complete should not fail over a link.
+    """
+    if not self.viewer_enabled:
+      return {'published': False, 'reason': 'switched off (NOTE_SEQ_VIEWER)'}
+    try:
+      settings = self.settings or Settings()
+      settings.ensure_dirs()
+      slug, meta = publish_piece(
+          settings, analysis, score=score,
+          title=str(params.get('title') or '').strip(),
+          audio_source_name='', url=url, job_id=str(params.get('job_id') or ''))
+    except Exception as e:                     # noqa: BLE001 - see the docstring
+      return {'published': False, 'reason': '%s: %s' % (type(e).__name__, e)}
+    return {'published': True, 'slug': slug, 'url': '%s/pieces/%s' % (self.viewer_url, slug),
+            'title': meta.get('title') or slug, 'bars': meta.get('bars')}
 
   def fake_run(self, params: Dict[str, Any], workdir: pathlib.Path, outdir: pathlib.Path,
                progress, inputs=None) -> List[dict]:
@@ -412,7 +463,7 @@ def _drawing_close(svg: str) -> int:
       return closing
 
 
-def _report(analysis, first, last, url, produced) -> Dict[str, Any]:
+def _report(analysis, first, last, url, produced, viewer=None) -> Dict[str, Any]:
   """What a person should know before trusting the numbers.
 
   `artifacts` lists what the job produced *besides this file*: the report is written
@@ -436,6 +487,9 @@ def _report(analysis, first, last, url, produced) -> Dict[str, Any]:
       'reading': _reading(clamped),
       'artifacts': [{'kind': a['kind'], 'name': pathlib.Path(a['path']).name}
                     for a in produced],
+      # Where the interactive page is, if it was published: click a bar, hear it. The
+      # artifacts above are the same analysis as files.
+      'viewer': dict(viewer or {'published': False, 'reason': 'not attempted'}),
   }
 
 
@@ -463,6 +517,14 @@ def _tiny_png() -> bytes:
   return base64.b64decode(
       b'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAF0lEQVQI12P8//8/AzbAxIAH'
       b'HDUKAGCgAwGvRQpbAAAAAElFTkSuQmCC')
+
+
+def _flag(env: str, default: bool = True) -> bool:
+  """A boolean from the environment: anything but a clear no means yes."""
+  raw = os.environ.get(env)
+  if raw is None:
+    return default
+  return raw.strip().lower() not in ('0', 'no', 'off', 'false')
 
 
 def plugin(**kwargs) -> NoteSeqAlign:

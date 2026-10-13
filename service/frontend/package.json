@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b",
-    "check:browser": "node tools/browser_check.mjs"
+    "check:browser": "node tools/browser_check.mjs",
+    "check:page": "node tools/page_check.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

@@ -243,21 +243,55 @@ engraving's units).
 `--fake-pipeline` works too: the plugin has a `fake_run` that writes the same kinds of
 file without touching audio, which is how the broker's queue plumbing can be exercised.
 
+### The artifacts come with a page
+
+A job that returns only downloads answers "what did it produce?" but not "what does it
+sound like?" — so when the plugin finishes it also **publishes the piece into this
+service's own store** (`pipeline.publish_piece`, the same function this service's own
+jobs call), and puts the link in `report.json`:
+
+```json
+"viewer": {"published": true, "slug": "chopin-from-the-broker", "bars": 204,
+           "title": "Chopin, from the broker",
+           "url": "http://localhost:8100/pieces/chopin-from-the-broker"}
+```
+
+Bring up this service (`./service/run.sh`) and that link is the interactive page: bar
+40, bar 83, the clip, the playhead. Measured end to end just now — one broker job
+(8.6 s, six artifacts) published `chopin-from-the-broker`, and the running service served
+it: 204 bars in the map, bar 40 at 62.38 s, nine pages, a 60.98 s clip for bars 40–83.
+`npm run check:page -- http://localhost:8100/pieces/chopin-from-the-broker` then drove it
+in Chrome: 31 click targets within 0.016 px of the bars, the range set, the clip playing.
+
+Two things follow from where the piece is stored, and both are deliberate:
+
+* **The switch.** `NOTE_SEQ_VIEWER=0` turns publishing off, and `NOTE_SEQ_VIEWER_URL`
+  (default `http://localhost:8100`) says where the page will be, for a worker and a page
+  that are not on the same machine. A machine that only runs broker workers should not
+  have a data directory quietly filling up.
+* **Publishing can never fail a job.** The artifacts are the contract; the page is a
+  bonus. If the store is unwritable the job still succeeds, `report.json` says
+  `{"published": false, "reason": "OSError: read-only file system"}`, and everything else
+  is exactly where it was. Tested.
+
+A broker-published piece carries no `job_id` in its meta: the job lives in the broker,
+and the worker does not pass its id into the plugin's parameters.
+
 ### What the two front doors share, and what they do not
 
-Both call `pipeline.analyse`: same alignment, same map, same geometry. They differ in
-what a *result* is. The broker hands a person files, so the plugin returns files. This
-service's own page is interactive — click bar 40, click bar 83, hear it — and an
-interactive page is not an artifact, which is the one thing the broker model cannot
-express. If you want both, run both: they are the same repository, the same code, and
-they do not interfere (the broker plugin writes into the worker's scratch directory and
-into this service's cache, never into its pieces).
+Both call the same analysis and end in the same store, so the map, the geometry and the
+page are identical either way. What differs is what a *result* is: the broker hands a
+person files, so the plugin returns files — and now also leaves the page behind for what
+files cannot express. The two run independently: the plugin writes into the worker's
+scratch directory, into this service's cache, and (unless switched off) into its pieces.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 64 tests, ~45 s
-cd service/frontend && npm run check:browser         # the whole flow in headless Chrome
+.venv/bin/python -m pytest service/tests -q          # 68 tests, ~55 s
+cd service/frontend && npm run check:browser         # the whole flow, from an upload
+cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
+                                                     # ... or a page that already exists
 ```
 
 The pytest suite runs the real pipeline — real Verovio, real DTW, real ffmpeg — on real
