@@ -336,6 +336,19 @@ def test_the_repeat_on_the_back_is_a_checkbox(qapp, real):
 # the dialog has to keep up with typing
 # ---------------------------------------------------------------------------
 
+def _quiet(qapp):
+  """Wait out any picture timer still armed by an earlier test's dialog.
+
+  A CardDialog that is dropped without being closed keeps its 120 ms timer armed until
+  Python collects it, and that timer engraves a page when it fires. Run this file after
+  a slow one and it fires *during* the next test -- which is how the engraving counter
+  below failed once with `[2]`, a page this test never asked for.
+  """
+  from PyQt5.QtTest import QTest
+  QTest.qWait(200)
+  qapp.processEvents()
+
+
 def _engraving_counter(monkeypatch):
   """Count engravings: they are the slow part of the preview (~300 ms a page)."""
   from analyzer import scoreview
@@ -358,6 +371,7 @@ def test_typing_a_question_does_not_run_the_preview(qapp, real, monkeypatch):
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
   dialog.flush_pictures()
+  _quiet(qapp)
   counted = _engraving_counter(monkeypatch)
   previews = []
   monkeypatch.setattr(dialog, '_preview', lambda: previews.append(1))
@@ -366,7 +380,7 @@ def test_typing_a_question_does_not_run_the_preview(qapp, real, monkeypatch):
     qapp.processEvents()
   dialog.flush_pictures()
   assert previews == [], 'a question is text: it must not go through the preview'
-  assert counted == [], 'and so must not engrave anything'
+  assert counted == [], 'typing engraved page(s) %s' % counted
 
 
 @needs_real
@@ -409,6 +423,7 @@ def test_text_only_choices_do_not_run_the_preview(qapp, real, monkeypatch):
   dialog = CardDialog(cfg, piece, render, None, first_bar=40, last_bar=43)
   dialog.rule_boxes['everything'].setChecked(True)   # draw once, with a mask
   dialog.flush_pictures()
+  _quiet(qapp)
   counted = _engraving_counter(monkeypatch)
   previews = []
   monkeypatch.setattr(dialog, '_preview', lambda: previews.append(1))
@@ -428,6 +443,7 @@ def test_the_same_state_is_not_drawn_twice(qapp, real, monkeypatch):
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
   dialog.flush_pictures()
+  _quiet(qapp)
   counted = _engraving_counter(monkeypatch)
   key = dialog._notes()[0].key
   dialog.toggle_note(key)
@@ -456,6 +472,7 @@ def test_an_unwanted_burst_is_one_drawing(qapp, real, monkeypatch):
   cfg, piece, render = real
   dialog = CardDialog(cfg, piece, render, None, first_bar=53, last_bar=53)
   dialog.flush_pictures()
+  _quiet(qapp)
   drawn = []
   real_draw = dialog._draw_pictures
 

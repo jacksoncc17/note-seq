@@ -298,7 +298,8 @@ def synthetic_render(tmp_path, pages=2, per_page=3):
 
 
 def test_the_window_has_a_score_tab(window):
-  assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ['Recording', 'Score']
+  assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == \
+      ['Recording', 'Score', 'Sync playing']
 
 
 def test_loading_a_piece_with_a_score_starts_engraving(window, cfg):
@@ -663,3 +664,51 @@ print("exited cleanly")
   assert result.returncode == 0, (
       'the process died (rc=%s):\n%s' % (result.returncode, result.stderr[-600:]))
   assert 'exited cleanly' in result.stdout, result.stdout + result.stderr[-300:]
+
+
+# ---------------------------------------------------------------------------
+# the Sync playing tab
+# ---------------------------------------------------------------------------
+
+def test_the_window_has_a_sync_playing_tab(window):
+  titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+  assert 'Sync playing' in titles, titles
+  assert window.tabs.widget(titles.index('Sync playing')) is window.sync_panel
+
+
+def test_the_sync_tab_is_told_what_to_play(window, cfg):
+  """It needs the piece, its engraving and its map -- and says so when one is missing."""
+  make_piece(cfg, bars=6, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(SyncResult(
+      method=SyncResult.METHOD_DTW, seconds_per_measure=2.0, audio_duration_s=12.0,
+      offset_s=0.0,
+      measures=[MeasureTime(measure=n, play_index=n - 1, start_s=(n - 1) * 2.0,
+                            end_s=n * 2.0) for n in range(1, 7)],
+      warnings=[]), source='test')
+  # no engraving in this fixture, so it can play nothing yet -- but it knows the map
+  assert not window.sync_panel.play_btn.isEnabled()
+  assert 'score' in window.sync_panel.status.text().lower()
+
+
+def test_a_position_reaches_the_sync_tab(window, cfg):
+  make_piece(cfg, bars=6, with_audio=True)
+  window.refresh_pieces('demo')
+  window._apply_result(SyncResult(
+      method=SyncResult.METHOD_DTW, seconds_per_measure=2.0, audio_duration_s=12.0,
+      offset_s=0.0,
+      measures=[MeasureTime(measure=n, play_index=n - 1, start_s=(n - 1) * 2.0,
+                            end_s=n * 2.0) for n in range(1, 7)],
+      warnings=[]), source='test')
+  window.sync_panel._playing = True                 # as if Play had been pressed
+  window._on_position(4.5)                          # bar 3
+  assert window.sync_panel._seconds == 4.5, 'the clock must reach the tab'
+
+
+def test_leaving_the_sync_tab_stops_covering_the_page(window, cfg):
+  make_piece(cfg, bars=6, with_audio=True)
+  window.refresh_pieces('demo')
+  window.sync_panel._playing = True
+  window.sync_panel.view.set_curtain([(0.0, 0.0, 10.0, 10.0)])
+  window.tabs.setCurrentIndex(1)                    # back to the Score tab
+  assert window.sync_panel.view.curtain() == []

@@ -119,7 +119,6 @@ MusicXML --verovio--> SVG per page --cairosvg--> PNG --Qt--> the tab
                             |
                             +--> a page and a rectangle for every measure
 ```
-
 Verovio is used because it hands back *structure*: with `svgBoundingBoxes` every
 element gets a bounding box, so each measure's exact rectangle is known (the
 *number* comes from the matching MEI `xml:id`). Those rectangles are what a click
@@ -233,6 +232,61 @@ is new, and it is what makes "whole piece playback" one of the three choices rat
 than a separate control. A recording that was never aligned stays a dead end — but
 the score tracks carry their own grid, so the phone falls back to one of those and
 says which, instead of showing a greyed-out button.
+
+## Sync playing: the score at the pace of the music
+
+A third tab. The recording plays and the page keeps up — but **the music that has not
+been reached yet is covered**, so it cannot be read off the screen in advance. It is a
+recall aid rather than a viewer: you have to know what comes next, at tempo.
+
+```
+Sync playing   [▶ Play] [■] [loop]   reveal [every beat ▾]   ‹ page 2/9 ›
+               bar 40 · beat 2 of 3 · 62.9 s
+```
+
+**The reveal unit is the score's own.** `scoreview.page_reveal` works out which
+metrical unit every notehead begins at — quarters in 3/4, eighths in 6/8, taken from
+the score's durations, not guessed from the picture — so the curtain moves note group
+by note group as the bar plays. The combo switches it to **every bar**, which is the
+honest fallback and what happens on its own where a bar's durations do not add up.
+Measured: **624 bar-and-beat positions across all 9 pages leave zero future noteheads
+visible**, and the curtain only ever moves rightwards.
+
+Four things this cost, each of which was a wrong version first:
+
+* **A `<chord>` in MEI is an event, not a stack.** Reading it the way MusicXML's
+  `<chord/>` works — "same onset as the note before" — gave every chord in a bar the
+  same beat. Chords advance the clock; the notes *inside* one share its onset.
+* **A note's unit is `floor`, not `round`.** The last third of a triplet in the third
+  beat of a 3/4 bar begins at 2.67 quarters, which rounds to beat 4 — a beat that does
+  not exist, and which let a note past the end of every such bar stay visible.
+* **Notes belong to a system through their measure, not through their ink.** A high
+  note is drawn above the staff box and a low one below it, so testing ink against the
+  band drops precisely the ledger-line notes: 319 future noteheads stayed visible on
+  four pages that way.
+* **Covering wins over clipping.** The two hands disagree about x order — in bar 7 the
+  left hand reaches beat 3 at x=203 while the right hand is still on beat 2 at x=188 —
+  so a boundary placed after the last *played* note lets a future note show. The
+  boundary is put a fixed distance before the next note instead (1.25 notehead heights,
+  measured: that is how far left of a notehead its own accidentals are engraved), which
+  can clip a notehead that has just been played: 54 of 78,258, five badly. That is the
+  right way round — the feature exists so the next notes cannot be read.
+
+The clock is the **measure map's**: bars are timed by the recording, and the units
+inside a bar are taken as evenly spaced across the time the map gives that bar. That is
+the one estimate here — a performance does not announce its beats, so a fermata or a
+big rallentando *inside* a bar can put the reveal a fraction of a beat out, which is
+what the every-bar mode is for. Worth knowing about this score: twelve of its bars hold
+three and a half quarters under a 3/4 signature (fermata bars — the MusicXML says so),
+so those bars have a fourth unit rather than the three the signature implies.
+
+The covering is **painted**, not masked in the SVG, and that is not a shortcut: the
+cards need element masking because Verovio's own note box is too tight to hide a single
+note with, while the question here is a *region* — everything after the playhead — and
+a rectangle of paper is exactly that. It goes on last, over the bar highlight, so a
+highlighted bar cannot give away how much music is coming. Stopping uncovers the page
+again so it can be browsed, and leaving the tab stops covering but keeps the music
+playing.
 
 ## Storage, and the way out to a database
 
@@ -491,11 +545,13 @@ analyzer/
     syncmap.py              the sidecar JSON: save, load, staleness
     store.py                the storage ports, and the filesystem + memory adapters
     library.py              the domain view: a record plus paths, a map, warnings
-    scoreview.py            MusicXML -> page images with a rectangle per measure
+    scoreview.py            MusicXML -> page images with a rectangle per measure,
+                            and where each notehead begins for the reveal
     ui/
       main_window.py        the window
       waveform.py           envelope + draggable measure markers
-      score_widget.py       the engraved score: click a bar, mask a note
+      score_widget.py       the engraved score: click a bar, mask a note, curtain
+      sync_tab.py           Sync playing: reveal the score at the pace of the music
       card_dialog.py        author cards: rules, taps, questions, preview, export
       player.py             sample-accurate playback of a bar range
       workers.py            download, alignment and engraving on background threads
@@ -510,7 +566,7 @@ analyzer/
 
 ## Status
 
-**M1-M7 are implemented**, with 358 tests, 356 of which run by default (two are
+**M1-M7 are implemented**, with 383 tests, 381 of which run by default (two are
 opt-in: one needs the speech server on the network, one needs an audio device).
 
 * **M1** the window · **M2** the cached recording · **M3** the measure map
@@ -518,6 +574,7 @@ opt-in: one needs the speech server on the network, one needs an audio device).
 * **M6** storage behind ports a database can implement
 * **M7** Anki cards for a selected passage, exported as `.apkg`
 * practice tracks on the phone: the score whole, or one hand at a time
+* **Sync playing** in the window: the score revealed only as far as the music has got
 
 Verified beyond the unit tests: a live YouTube search and download (309.7 s
 recording, served from cache); a full align run through the real Qt worker threads

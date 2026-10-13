@@ -31,6 +31,7 @@ from ..schema import MeasureTime, SyncResult
 from .card_dialog import CardDialog
 from .player import RangePlayer
 from .score_widget import ScoreView
+from .sync_tab import SyncPlayingPanel
 from .waveform import WaveformView
 from .workers import AlignWorker, DownloadWorker, RenderWorker
 
@@ -86,6 +87,9 @@ class MainWindow(QMainWindow):
     self.tabs = QTabWidget()
     self.tabs.addTab(self._waveform_panel(), 'Recording')
     self.tabs.addTab(self._score_panel(), 'Score')
+    self.sync_panel = SyncPlayingPanel(self.cfg, self.player)
+    self.tabs.addTab(self.sync_panel, 'Sync playing')
+    self.tabs.currentChanged.connect(self._on_tab_changed)
     splitter.addWidget(self.tabs)
     splitter.setStretchFactor(0, 0)
     splitter.setStretchFactor(1, 1)
@@ -432,6 +436,7 @@ class MainWindow(QMainWindow):
     self.stored = None
     self.expansion = None
     self.dirty = False
+    self.sync_panel.set_piece(piece, None, None)
     self.measure_list.clear()
     self.waveform.set_ticks([], [])
     self.waveform.set_selection(None, None)
@@ -710,6 +715,7 @@ class MainWindow(QMainWindow):
       if problem not in result.warnings:
         result.warnings.append(problem)
 
+    self._feed_sync_panel(result)
     if source:
       warning = (' · ' + '; '.join(result.warnings[:2])) if result.warnings else ''
       if self.map_label.text().startswith('average-tempo') and source == 'average-tempo estimate':
@@ -784,6 +790,7 @@ class MainWindow(QMainWindow):
     syncmap.delete(self.cfg, self.piece.slug)
     self.result = None
     self.stored = None
+    self.sync_panel.set_piece(self.piece, self.score_view.render, None)
     self.waveform.set_ticks([], [])
     self.waveform.set_selection(None, None)
     self.map_label.setText('no map yet')
@@ -852,11 +859,17 @@ class MainWindow(QMainWindow):
 
   def _on_position(self, seconds: float) -> None:
     self.waveform.set_playhead(seconds)
+    self.sync_panel.on_position(seconds)
     measure = self._measure_at_time(seconds)
     if measure is not None:
       self.score_view.set_playhead_measure(measure)
       if self.follow_check.isChecked() and not self._measure_on_shown_page(measure):
         self.score_view.show_measure(measure)
+
+  def _on_tab_changed(self, index: int) -> None:
+    """Only the tab being looked at covers the page: leaving keeps the music playing."""
+    if self.tabs.widget(index) is not self.sync_panel:
+      self.sync_panel.unfollow()
 
   def _measure_on_shown_page(self, measure: int) -> bool:
     page = self.score_view.page()
@@ -864,6 +877,7 @@ class MainWindow(QMainWindow):
 
   def _on_playback_finished(self) -> None:
     self.waveform.set_playhead(None)
+    self.sync_panel.on_finished()
     if self._loop and self.result is not None and self.result.measures:
       self.play_range()
 
@@ -968,9 +982,15 @@ class MainWindow(QMainWindow):
     if message:
       self.score_status.setText('%s (%.0f%%)' % (message, percent))
 
+  def _feed_sync_panel(self, result=None) -> None:
+    """The sync tab needs the piece, its engraving and its map -- whichever arrived."""
+    self.sync_panel.set_piece(self.piece, self.score_view.render,
+                              self.result if result is None else result)
+
   def _on_rendered(self, render) -> None:
     self.rerender_btn.setEnabled(True)
     self.score_view.set_render(render)
+    self._feed_sync_panel()
     pages = len(render.pages)
     measures = render.measure_count
     note = ''

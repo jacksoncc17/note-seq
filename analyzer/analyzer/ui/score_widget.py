@@ -9,7 +9,7 @@ makes the click behaviour testable without a display.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
@@ -54,6 +54,7 @@ class ScoreView(QWidget):
     self._masked: set = set()
     self._range_open = False            # a click has started a range, not finished it
     self._hover_glyph: Optional[str] = None
+    self._curtain: List[Tuple[float, float, float, float]] = []
 
   # ------------------------------------------------------------------ content
 
@@ -209,6 +210,24 @@ class ScoreView(QWidget):
     self._playhead = measure
     self.update()
 
+  def set_curtain(self, rects) -> None:
+    """Cover these page-pixel rectangles, hiding what has not been played yet.
+
+    Painted rather than masked in the SVG, and that is not the shortcut it looks like:
+    masking by elements is what the *cards* need, because a note's element can be
+    suppressed exactly, while the question here is a region -- everything after the
+    playhead. Verovio's own note boxes are too tight to hide a note with (that is why
+    masking is done in the SVG at all), but a rectangle over the paper is exactly what
+    this wants. The fill is the colour the widget already paints the page against, so
+    the concealed part simply looks like blank paper.
+    """
+    self._curtain = [tuple(float(v) for v in r) for r in (rects or [])]
+    self.update()
+
+  def curtain(self):
+    """The rectangles currently covered, in page pixels."""
+    return list(self._curtain)
+
   def measure_at(self, point: QPoint) -> Optional[int]:
     """The measure under a widget-space point, or None."""
     page = self.page()
@@ -252,6 +271,15 @@ class ScoreView(QWidget):
     page = self.page()
     if page is not None:
       self._paint_highlight(painter, page, target)
+
+    # The curtain goes on last, so it covers the highlight of bars that have not been
+    # reached as well: a highlighted bar would give away how much music is coming.
+    if self._curtain:
+      painter.setPen(Qt.NoPen)
+      painter.setBrush(QColor('#f6f4ef'))
+      for x0, y0, x1, y1 in self._curtain:
+        painter.drawRect(QRect(int(x0 * self._zoom), int(y0 * self._zoom),
+                               int((x1 - x0) * self._zoom), int((y1 - y0) * self._zoom)))
     painter.end()
 
   def _paint_highlight(self, painter: QPainter, page: ScorePage, target: QRect) -> None:

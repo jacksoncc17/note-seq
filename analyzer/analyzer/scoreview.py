@@ -31,8 +31,10 @@ import collections
 import dataclasses
 import hashlib
 import json
+import math
 import pathlib
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -47,12 +49,17 @@ CACHE_VERSION = 4      # 4 adds each bar's full ink extent, for cropping cards
 RASTER_SCALE = 1.5          # PNG pixels per SVG pixel; ~1260 px wide pages
 ENGRAVING_CACHE_SIZE = 8    # page engravings kept in memory; see page_svg_and_ids
 
+# Verovio's internal ticks per quarter note. Durations in the MEI are given in these
+# (`dur.ppq`), already scaled for tuplets: a triplet of eighths on this score is three
+# 160s, which is 480, which is one quarter.
+QUARTER_PPQ = 480
+
 # Engraving a page is the slow part of both drawing the score and making a card, and
-# the same page is asked for repeatedly -- so the last few are kept. Masking edits the
-# SVG string, so one engraving serves every set of masks.
-_PAGE_ENGRAVINGS: "collections.OrderedDict[str, Tuple[str, Dict[str, str]]]" = \
-    collections.OrderedDict()
-MEI_NS = '{http://www.musicxml.org/ns/musicxml}'
+# the same page is asked for repeatedly -- so the last few are kept, with the musical
+# positions of what they drew (which is only knowable at engraving time, when the MEI
+# is in hand). Masking edits the SVG string, so one engraving serves every set of masks.
+_Engraving = Tuple[str, Dict[str, str], 'PageReveal']
+_PAGE_ENGRAVINGS: "collections.OrderedDict[str, _Engraving]" = collections.OrderedDict()
 
 
 class ScoreRenderError(RuntimeError):
@@ -521,11 +528,12 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
   that match nothing and the mask silently does nothing at all.
 
   Engraving is the slowest step in making a card (about 300 ms a page on this score),
-  and the same page is asked for again and again -- both sides of a card, and every
-  keystroke in the card dialog. The result is therefore kept: the engraving depends
-  only on the score and the page, since masking is done by editing the returned SVG.
-  Callers must treat what they get back as read-only; `hide_elements` and
-  `hide_classes` both return a new string rather than changing this one.
+  and the same page is asked for again and again -- both sides of a card, the score
+  view, and every keystroke in the card dialog. The result is therefore kept, along
+  with the musical position of everything it drew (see `page_reveal`), since the MEI
+  that says where the notes are only exists during the engraving. Callers must treat
+  what they get back as read-only; `hide_elements` and `hide_classes` both return a
+  new string rather than changing this one.
 
   `scale` is accepted and ignored: Verovio's own scale is pinned at 40 so every
   engraving lays the score out identically, and size comes from the rasteriser. It
@@ -534,6 +542,13 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
   Returns:
     (svg, {glyph key: element id}) for that page.
   """
+  svg, ids, _reveal = _engraved_page(cfg, musicxml, page_number, xml_text)
+  return svg, ids
+
+
+def _engraved_page(cfg: AnalyzerConfig, musicxml, page_number: int,
+                   xml_text: Optional[str] = None):
+  """(svg, ids, reveal) for one page, engraving it only if it is not remembered."""
   # `xml_text` lets a caller engrave a modified score (fingerings added) without any
   # file existing: Verovio takes the document as a string
   text = xml_text if xml_text is not None else _score_xml(pathlib.Path(musicxml))
@@ -552,11 +567,385 @@ def page_svg_and_ids(cfg: AnalyzerConfig, musicxml, page_number: int,
                      'header': 'none', 'footer': 'none'})
   engine.loadData(text)
   svg = engine.renderToSVG(page_number)
-  drawn = (svg, element_ids(svg, measure_ids(engine.getMEI())))
+  mei = engine.getMEI()
+  numbers = measure_ids(mei)                      # MEI id -> measure number
+  ids = element_ids(svg, numbers)                 # glyph key -> element id
+  reveal = _reveal_of(svg, numbers, mei, page_number)
+  drawn = (svg, ids, reveal)
   _PAGE_ENGRAVINGS[key] = drawn
   while len(_PAGE_ENGRAVINGS) > ENGRAVING_CACHE_SIZE:
     _PAGE_ENGRAVINGS.popitem(last=False)
   return drawn
+
+
+# ---------------------------------------------------------------------------
+# what has not been played yet
+# ---------------------------------------------------------------------------
+
+# The concealment margins are measured in notehead heights, which is the one distance
+# an engraving keeps about the same on any instrument (a notehead is about one staff
+# space tall). On this score the median notehead is 11.5 px at the render's scale, and
+# a bar's staff box is 15 noteheads tall.
+#
+# How far left of a notehead its own accidentals and dots reach -- measured on this
+# score: median 0.96 noteheads, largest 1.19. Anything smaller than this leaks a sharp
+# or a flat into the concealed part of the page, which is the one thing the
+# concealment exists to prevent.
+REVEAL_ACCIDENTALS = 1.25
+# ... and how much clear space to leave after the last thing played, so the boundary
+# does not look like a note was sliced in half.
+REVEAL_GAP = 0.35
+
+
+@dataclass
+class BeatMark:
+  """One drawn element that begins at a musical position.
+
+  `unit` counts in the time signature's own denominator -- quarters in 3/4, eighths in
+  6/8 -- which is the finest thing a player reads by. It comes from the score's own
+  durations, not from anything guessed off the picture.
+  """
+
+  measure: int
+  unit: int
+  x0: float
+  y0: float
+  x1: float
+  y1: float
+  kind: str = 'note'
+
+
+@dataclass
+class PageReveal:
+  """Where the music on one page begins, for concealing what has not been reached.
+
+  Everything is in the page image's own pixels, so a caller can paint over it.
+
+  `coarse` lists the measures whose durations did not add up to their own bar -- odd
+  tuplets, a damaged measure -- where only the bar itself can be trusted as a position.
+  That is the fallback the feature falls back to: a whole-measure reveal.
+  """
+
+  page: int
+  width: float
+  height: float
+  unit: int = 4                                          # the meter's denominator
+  space: float = 0.0                                     # a notehead's height, in pixels
+  marks: List[BeatMark] = field(default_factory=list)
+  systems: List[Tuple[float, float]] = field(default_factory=list)
+  units: Dict[int, int] = field(default_factory=dict)     # measure -> units in the bar
+  coarse: List[int] = field(default_factory=list)
+
+  def unit_of(self, measure: int, seconds: float, span: Tuple[float, float]) -> int:
+    """How far into a bar the clock is, from that bar's own [start, end).
+
+    A performance does not announce its beats, so the units inside a bar are taken to
+    be evenly spaced across the time the map gives that bar. That is the one estimate
+    in this feature, and it is why the reveal can be switched to whole bars.
+    """
+    count = self.units.get(measure) or 0
+    start, end = span
+    if count <= 1 or end <= start:
+      return 0
+    fraction = (float(seconds) - start) / (end - start)
+    return max(0, min(count - 1, int(fraction * count)))
+
+  def rects(self, measure: Optional[int], unit: int) -> List[Tuple[float, float, float, float]]:
+    """The rectangles to paint over: the rest of this line, and every line below it.
+
+    Reading order is what makes this concealment rather than filtering. Within the
+    system being played, everything from the next unplayed note onwards goes; and
+    everything below that system goes entirely, down to the foot of the page. Music
+    already played is left exactly as it is -- it is the future that must not be
+    readable.
+
+    The horizontal boundary sits between two rules, whichever is further right, so
+    that it neither shows the next note nor slices the last one:
+
+      * never left of `REVEAL_GAP` past the last thing reached;
+      * never right of `REVEAL_ACCIDENTALS` before the next thing, so the sharps and
+        flats that belong to it -- engraved well to its left -- go with it.
+
+    Vertically a curtain reaches from the bottom of the system *above* (so nothing
+    that belongs to the line being played is left sticking out) down to the top of the
+    next one, and the remaining systems are covered outright.
+    """
+    whole = [(0.0, 0.0, self.width, self.height)]
+    if measure is None or not self.systems or not self.marks:
+      return whole
+    index = self._system_index(measure)
+    if index is None:
+      return whole
+    top, bottom = self.systems[index]
+    # Which line a mark is on is decided by its *measure*, not by where its ink falls:
+    # a high note is drawn above the staff box and a low one below, so testing the ink
+    # against the band drops exactly the ledger-line notes -- which is how a future
+    # notehead stayed visible in the first version of this.
+    on_line = [m for m in self.marks if self._system_index(m.measure) == index]
+    played = [m for m in on_line if (m.measure, m.unit) <= (measure, unit)]
+    ahead = [m for m in on_line if (m.measure, m.unit) > (measure, unit)]
+
+    height = self.space or (bottom - top) / 15.0
+    # One boundary per line, and it covers the future rather than protecting the past:
+    # the two hands do not agree about x order -- in bar 7 of this score the left hand
+    # reaches beat 3 at x=203 while the right hand is still on beat 2 at x=188 -- so a
+    # boundary placed after the last *played* note lets a future note show. It is put
+    # `REVEAL_ACCIDENTALS` before the next thing instead, which can clip the right edge
+    # of a notehead that has just been played, and that is the right way round: the
+    # feature exists so the next notes cannot be read.
+    if ahead:
+      edge = min(m.x0 for m in ahead) - REVEAL_ACCIDENTALS * height
+    elif played:
+      edge = max(m.x1 for m in played) + REVEAL_GAP * height
+    else:
+      edge = 0.0
+    edge = max(0.0, min(edge, self.width))
+
+    # Vertically the curtain is drawn between the *ink*, not the staff boxes: a high
+    # note of the next system is written above its staves, so a curtain ending at the
+    # next staff box lets it stick out into view -- measured on this score, 319 of the
+    # noteheads on four pages did exactly that.
+    ink = self._system_ink()
+    above = ink[index - 1][1] if index > 0 else 0.0
+    if index + 1 < len(self.systems):
+      below = ink[index + 1][0] - 1.5 * height
+      # never so high that it eats the line being played
+      below = max(below, ink[index][1] + 0.5 * height)
+    else:
+      below = self.height
+    below = min(max(below, 0.0), self.height)
+    out = [(edge, max(0.0, above), self.width, below)]
+    if index + 1 < len(self.systems):
+      out.append((0.0, below, self.width, self.height))
+    return out
+
+  def _system_ink(self) -> List[Tuple[float, float]]:
+    """The topmost and bottommost drawn music of each system, in page pixels."""
+    ink = [[self.height, 0.0] for _ in self.systems]
+    for mark in self.marks:
+      index = self._system_index(mark.measure)
+      if index is None:
+        continue
+      ink[index][0] = min(ink[index][0], mark.y0)
+      ink[index][1] = max(ink[index][1], mark.y1)
+    return [(top, bottom if bottom > 0 else top) for top, bottom in ink]
+
+  def _system_index(self, measure: int) -> Optional[int]:
+    """Which line of the page this measure is written on."""
+    bounds = self._measure_bounds(measure)
+    if bounds is None:
+      return None
+    for index, (top, bottom) in enumerate(self.systems):
+      if bounds[1] >= top - 1 and bounds[3] <= bottom + 1:
+        return index
+    # a measure whose marks sit outside every band still belongs to the nearest one
+    return min(range(len(self.systems)),
+               key=lambda i: abs(self.systems[i][0] - bounds[1])) if self.systems else None
+
+  def _measure_bounds(self, measure: int):
+    xs = [(m.x0, m.y0, m.x1, m.y1) for m in self.marks if m.measure == measure]
+    if not xs:
+      return None
+    return (min(b[0] for b in xs), min(b[1] for b in xs),
+            max(b[2] for b in xs), max(b[3] for b in xs))
+
+
+def _systems_of(boxes: List[MeasureBox], height: int) -> List[Tuple[float, float]]:
+  """The horizontal bands of a page: the staves a reader takes in one line at a time.
+
+  Clustered on the *staff* boxes, not the full extents. A system's bars share a staff
+  box, and the next system's is clearly below it; but the full extents of neighbouring
+  bars overlap freely -- bar 34 of this score reports one reaching to y=0, the top of
+  the page -- which would merge every system into one band and hide the whole page.
+  """
+  if not boxes:
+    return [(0.0, float(height))]
+  bands: List[List[float]] = []
+  for box in sorted(boxes, key=lambda b: b.y0):
+    if bands and box.y0 <= bands[-1][1] - 1:
+      bands[-1][1] = max(bands[-1][1], box.y1)
+    else:
+      bands.append([box.y0, box.y1])
+  return [(max(0.0, top), min(float(height), bottom)) for top, bottom in bands]
+
+
+def _reveal_of(svg: str, numbers: Dict[str, int], mei: str, page_number: int) -> PageReveal:
+  """Where every drawn note on this page begins, musically and on paper.
+
+  The MEI is only in hand during the engraving, so this is worked out then and kept
+  with the engraving: the join between the two -- SVG element id to musical position --
+  cannot be made afterwards, because Verovio regenerates ids on every engraving.
+  """
+  unit_ppq, denominator = _meter_of(mei)
+  positions, units, coarse = _positions_of(mei, numbers, unit_ppq)
+  boxes, _warnings = _measure_geometry(svg, numbers)
+  marks: List[BeatMark] = []
+  for glyph, element_id in glyph_elements(svg, numbers):
+    if glyph.kind not in ('note', 'rest'):
+      continue
+    where = positions.get(element_id)
+    if where is None:
+      continue
+    number, unit = where
+    marks.append(BeatMark(measure=number, unit=unit, x0=glyph.x0, y0=glyph.y0,
+                          x1=glyph.x1, y1=glyph.y1, kind=glyph.kind))
+  # A notehead is about one staff space tall whatever the instrument, so its height is
+  # the unit the concealment margins are measured in.
+  heads = sorted(m.y1 - m.y0 for m in marks if m.kind == 'note' and m.y1 > m.y0)
+  space = heads[len(heads) // 2] if heads else 0.0
+  return PageReveal(page=page_number, width=0.0, height=_viewbox_height(svg),
+                    unit=denominator, space=space, marks=marks,
+                    systems=_systems_of(boxes, int(_viewbox_height(svg))),
+                    units=units, coarse=coarse)
+
+
+def _meter_of(mei: str) -> Tuple[float, int]:
+  """(ticks per denominator unit, the denominator) from the score's meter.
+
+  The denominator is what the feature reveals by: the note value the bar is counted in.
+  """
+  for match in re.finditer(r'<meterSig\b[^>]*>', mei):
+    unit = re.search(r'unit="(\d+)"', match.group(0))
+    if unit:
+      denominator = max(1, int(unit.group(1)))
+      return (QUARTER_PPQ * 4.0 / denominator, denominator)
+  return (float(QUARTER_PPQ), 4)
+
+
+def _positions_of(mei: str, ids: Dict[str, int], unit_ppq: float):
+  """{element id: (measure, unit)} for everything with a duration, plus what is odd.
+
+  Two things about MEI that this has to get right, both of which were wrong first time
+  and both of which are silent if you get them wrong:
+
+  * **Durations are sounding values**, already scaled for tuplets: three eighths of a
+    triplet are 160 ticks each, so onsets are a plain running sum. (480 ticks to the
+    quarter -- Verovio's internal resolution.)
+  * **A `<chord>` is an event, not a container of simultaneous notes**, and its notes
+    are drawn from *their own* ids, not the chord's. So the chord advances the clock
+    once by its duration, and every note inside it takes that same onset -- reading it
+    as "stack on the previous note" (which is what MusicXML's `<chord/>` means) gives
+    every chord in a bar the same position.
+
+  Each layer is clocked separately, since layers are simultaneous, not successive.
+  """
+  positions: Dict[str, Tuple[int, int]] = {}
+  units: Dict[int, int] = {}
+  coarse: List[int] = []
+  XML_ID = '{http://www.w3.org/XML/1998/namespace}id'
+  try:
+    root = ET.fromstring(mei)
+  except ET.ParseError:
+    return positions, units, coarse
+  for measure in root.iter():
+    if _local_name(measure.tag) != 'measure':
+      continue
+    number = ids.get(measure.get(XML_ID) or '')
+    if number is None:
+      continue
+    longest = 0.0
+
+    def unit_at(onset: float) -> int:
+      """The unit a note *begins* in -- floor, not nearest.
+
+      Rounding looks harmless and is not: the last third of a triplet in the third beat
+      of a 3/4 bar sits at 2.67 quarters, which rounds to unit 3 -- a beat that does not
+      exist, and which left a future notehead visible past the end of every such bar.
+      """
+      return max(0, int(onset // unit_ppq))
+
+    def record(element, onset: float, clock: list):
+      """One sounding event: give it a position and let time pass."""
+      element_id = element.get(XML_ID)
+      if element_id:
+        positions[element_id] = (number, unit_at(onset))
+      clock[0] = onset + _ppq(element)
+
+    def walk(container, clock: list):
+      for child in container:
+        tag = _local_name(child.tag)
+        if tag == 'chord':
+          onset = clock[0]
+          for note in child:
+            if _local_name(note.tag) == 'note':
+              record(note, onset, clock)
+          clock[0] = onset + _ppq(child)
+          element_id = child.get(XML_ID)
+          if element_id:
+            positions[element_id] = (number, unit_at(onset))
+        elif tag == 'note':
+          record(child, clock[0], clock)
+        elif tag in ('rest', 'space', 'mRest'):
+          record(child, clock[0], clock)
+        elif tag in ('beam', 'tuplet', 'ftrem', 'btrem', 'graceGrp'):
+          walk(child, clock)
+        # clefs, keys, directions and dynamics take no time
+
+    for staff in measure:
+      if _local_name(staff.tag) != 'staff':
+        continue
+      for layer in staff:
+        if _local_name(layer.tag) != 'layer':
+          continue
+        clock = [0.0]
+        walk(layer, clock)
+        longest = max(longest, clock[0])
+    # The bar's length is the longer of what its layers add up to and what its notes
+    # actually use, so no note can sit past the end of its own bar however odd the
+    # measure is -- which is what keeps the concealment total.
+    used = max((unit for (measure, unit) in positions.values() if measure == number),
+               default=-1)
+    span = max(1, int(math.ceil(longest / unit_ppq - 1e-6)), used + 1)
+    units[number] = span
+    if longest <= 0:
+      coarse.append(number)
+  return positions, units, coarse
+
+
+def _ppq(element) -> float:
+  """An element's sounding duration in ticks; 0 when it has none."""
+  raw = element.get('dur.ppq')
+  if raw is None:
+    return 0.0
+  try:
+    return max(0.0, float(raw))
+  except ValueError:
+    return 0.0
+
+
+def _local_name(tag: str) -> str:
+  return tag.split('}')[-1]
+
+
+def page_reveal(cfg: AnalyzerConfig, musicxml, page_number: int, width: int,
+                xml_text: Optional[str] = None) -> PageReveal:
+  """What this page would reveal, and what it must keep hidden, at `width` pixels.
+
+  The marks are scaled from the engraving into the page image's own pixels with the
+  same factor the render cache used, so a caller can paint straight onto the image.
+  """
+  svg, _ids, reveal = _engraved_page(cfg, musicxml, page_number, xml_text)
+  factor = _viewbox_scale(svg, width)
+  return dataclasses.replace(
+      reveal,
+      width=float(width), height=reveal.height * factor, space=reveal.space * factor,
+      marks=[dataclasses.replace(m, x0=m.x0 * factor, y0=m.y0 * factor,
+                                 x1=m.x1 * factor, y1=m.y1 * factor)
+             for m in reveal.marks],
+      systems=[(top * factor, bottom * factor) for top, bottom in reveal.systems])
+
+
+def _viewbox_height(svg: str) -> float:
+  """The engraving's own height, in SVG user units."""
+  match = re.search(r'viewBox="([-\d.eE ]+)"', svg)
+  if match:
+    parts = match.group(1).split()
+    if len(parts) >= 4:
+      try:
+        return float(parts[3])
+      except ValueError:
+        pass
+  return 0.0
 
 
 def element_ids(svg: str, ids: Dict[str, int]) -> Dict[str, str]:
