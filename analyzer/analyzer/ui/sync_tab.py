@@ -286,11 +286,21 @@ class SyncPlayingPanel(QWidget):
     row.addWidget(self.follow_source)
 
     # Which microphone. Only meaningful for the live source, so it is hidden for the
-    # others rather than left there looking as if it did something.
+    # others rather than left there looking as if it did something. Device names are long
+    # and mostly boilerplate, so the box is capped and elides its text; the whole name is
+    # on the entries themselves, which is where it is read from.
     self.follow_device = QComboBox()
-    self.follow_device.addItem('the default device', None)
+    self.follow_device.setMaximumWidth(320)
+    self.follow_device.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+    self.follow_device.setMinimumContentsLength(18)
+    default = capture.default_microphone()
+    self.follow_device.addItem('the default device' + (' (%s)' % capture.device_label(default)
+                                                       if default else ''), None)
+    self.follow_device.setItemData(0, default or 'the system default capture device',
+                                   Qt.ToolTipRole)
     for name in capture.microphones():
       self.follow_device.addItem(capture.device_label(name), name)
+      self.follow_device.setItemData(self.follow_device.count() - 1, name, Qt.ToolTipRole)
     self.follow_device.setToolTip('which capture device to listen to')
     self.follow_device.setVisible(False)
     row.addWidget(self.follow_device)
@@ -298,6 +308,9 @@ class SyncPlayingPanel(QWidget):
     self.follow_status = QLabel('not listening')
     self.follow_status.setStyleSheet('color: #8a8a8a;')
     row.addWidget(self.follow_status, 1)
+    # The signal only fires on a change, and the source has already been set by now: the
+    # device box was built hidden for the file sources and must be shown for this one.
+    self._follow_source_changed(self.follow_source.currentText())
     return row
 
   def _follow_source_changed(self, text: str) -> None:

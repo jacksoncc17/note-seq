@@ -117,14 +117,17 @@ def device_label(name: str) -> str:
 def _short_device(name: str) -> str:
   """`alsa_input.usb-0c76_USB_PnP_Audio_Device-00.mono-fallback` -> something short.
 
-  Device names are long and mostly boilerplate. The tail is what tells two of them
-  apart, so the tail is what is kept.
+  Device names are long and mostly boilerplate: the card's name is what tells two of them
+  apart, so that is what is kept, with the trailing index dropped. The hex prefix is kept
+  too -- two identical devices differ only in it.
   """
   parts = [p for p in name.split('.') if p]
   if len(parts) >= 2:
     tail = parts[-1]
     if tail in ('analog-stereo', 'mono-fallback', 'analog-mono', 'default'):
       tail = parts[-2] if len(parts) > 2 else tail
+    if tail.endswith('-00'):
+      tail = tail[:-3]
     return tail.replace('_', ' ')
   return name
 

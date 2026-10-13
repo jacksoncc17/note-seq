@@ -257,3 +257,12 @@ def test_a_session_can_be_written_down_while_it_is_listened_to(tmp_path):
   assert rate == RATE
   assert len(written) == 4 * BLOCK, 'everything listened to is on disk (%d)' % len(written)
   assert np.allclose(written[:BLOCK], got[0], atol=1e-3)
+
+
+def test_a_monitor_is_marked_as_what_is_playing():
+  """The distinction that matters when picking a device: hearing the room, or hearing
+  what the machine is playing -- the second is how this is tried without a piano."""
+  label = capture.device_label('alsa_output.usb-0b0e_Jabra-00.analog-stereo.monitor')
+  assert '(what is playing)' in label
+  assert 'alsa_output' not in label and not label.endswith('-00')
+  assert capture.device_label('alsa_input.usb-0c76_USB-00.mono-fallback') != ''
