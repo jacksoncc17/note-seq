@@ -770,6 +770,54 @@ class PageReveal:
             max(b[2] for b in xs), max(b[3] for b in xs))
 
 
+def line_bands(reveal: PageReveal, image_path, pad: float = 4.0):
+  """The band to show for each system: all of its music, and none of the neighbours'.
+
+  A staff box is not the music. Measured on this score, the ink reaches 73 px above the
+  staves and 82 px below them -- tempo marks and slurs above, dynamics and low ledger
+  notes below -- so a band cut to the staves (plus a couple of notehead heights, which is
+  what this first did) clips real music off the top and the bottom of every line.
+
+  The page's rows are therefore divided between the lines *first*, at the midpoint
+  between each pair of staff boxes, and each line's band is the ink inside its own
+  share. Dividing first is what makes the result trustworthy: a row of ink belongs to the
+  line whose staves are nearer to it, every inked row lands in exactly one band, and no
+  band can reach into the next line's share however far a slur or a dynamic hangs. The
+  line below is the future, and showing it is the one thing this must not do.
+
+  Returns:
+    One `(top, bottom)` per system in `reveal.systems`, in page pixels, in the same
+    order -- and non-overlapping, with every inked row of the page inside one of them.
+  """
+  import numpy as np
+  from PIL import Image
+
+  systems = reveal.systems
+  if not systems:
+    return []
+  with Image.open(image_path) as drawn:
+    grey = np.asarray(drawn.convert('L'))
+  inked = np.where((grey < 200).any(axis=1))[0]
+  height = grey.shape[0]
+  if not len(inked):
+    return [(top, bottom) for top, bottom in systems]
+
+  def middle(a: float, b: float) -> int:
+    return int(max(0.0, min(float(height - 1), (a + b) / 2.0)))
+
+  bands = []
+  for index, (top, bottom) in enumerate(systems):
+    ceiling = middle(systems[index - 1][1], top) if index > 0 else 0
+    floor = middle(bottom, systems[index + 1][0]) if index + 1 < len(systems) else height - 1
+    mine = inked[(inked >= ceiling) & (inked <= floor)]
+    if not len(mine):
+      bands.append((float(ceiling), float(floor)))
+      continue
+    bands.append((max(float(ceiling), float(mine[0]) - pad),
+                  min(float(floor), float(mine[-1]) + pad)))
+  return bands
+
+
 def _systems_of(boxes: List[MeasureBox], height: int) -> List[Tuple[float, float]]:
   """The horizontal bands of a page: the staves a reader takes in one line at a time.
 

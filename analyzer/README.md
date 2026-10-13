@@ -254,11 +254,19 @@ there is no line above or below — to cover, or to be revealed. The curtain is 
 line being shown, the label says `page 2 / 9 · line 2 / 4`, and the view moves down the
 page line by line as the music does. `view: whole page` puts the page back.
 
-The line is shown with air above and below for those ledger lines and dynamics — two
-notehead heights, 23 px on this score — but *bounded by the neighbouring line's ink*:
-on page 2 the next line's music starts 133–169 px below, so the air never reaches it,
-and on a tightly-set score where it would, the air is reduced instead. The line below is
-the future, and the one thing this view must never do is show it.
+**A staff box is not the music, and this is where it bit.** The first version showed the
+line's staves plus two notehead heights — 23 px each way — which *cut the music short*:
+measured on this score, a line's ink reaches **73 px above** its staves and **82 px
+below** them (tempo marks and slurs above, dynamics and low ledger notes below), so every
+line lost about 55 px of real music off its bottom edge.
+
+So the band comes from the page's own pixels. The page's rows are divided between the
+lines *first*, at the midpoint between each pair of staff boxes, and each line's band is
+the ink inside its own share — 329–389 px tall rather than 220. Dividing first is what
+makes it trustworthy, and it is checked as a property rather than by eye: **every inked
+row of the page lands inside the band of the line whose staves are nearest to it**, so no
+music is cut, no band can reach into the line below however far a slur or a dynamic
+hangs, and the line below — the future — stays hidden.
 
 **Play speed** (0.40–2.00×) slows the *recording* down, next to the dial that lines the
 *page* up with it. Pitch is preserved — a phase vocoder, `librosa.effects.time_stretch`

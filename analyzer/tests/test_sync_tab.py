@@ -498,27 +498,69 @@ def test_switching_to_the_whole_page_shows_the_whole_page(panel):
 
 
 @needs_real
-def test_the_line_shows_air_for_ledger_lines_but_never_the_next_line(panel):
-  """Ledger lines and dynamics sit outside the staves, so a band cut exactly to them
-  clips music -- but the air may not reach the neighbouring line's ink, because the
-  line below is the future and must not be readable."""
+def test_the_line_shows_all_of_its_music(panel):
+  """The complaint this answers: the bottom of the line was cut short. A staff box is
+  not the music -- measured on this score the ink reaches 73 px above the staves and
+  82 px below, so the band has to come from the page's own pixels.
+
+  The property pinned here is the one that makes it trustworthy: **every inked row of
+  the page is inside some line's band**, so no music is lost; and each row is in the
+  band of the line whose staves are nearest to it, so no line shows another's.
+  """
+  import numpy as np
+  from PIL import Image
+
+  tab, _player, _piece, _render, cfg = panel
+  for page_number in (1, 2, 3, 5):
+    page = next(p for p in tab.render.pages if p.number == page_number)
+    reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, page_number, page.width)
+    bands = scoreview.line_bands(reveal, page.image)
+    with Image.open(page.image) as drawn:
+      inked = np.where((np.asarray(drawn.convert('L')) < 200).any(axis=1))[0]
+    assert len(inked) > 500, 'page %d should have music on it' % page_number
+
+    for row in inked:
+      owner = min(range(len(reveal.systems)),
+                  key=lambda i: 0 if reveal.systems[i][0] <= row <= reveal.systems[i][1]
+                  else min(abs(row - reveal.systems[i][0]), abs(row - reveal.systems[i][1])))
+      top, bottom = bands[owner]
+      assert top <= row <= bottom, \
+          'page %d: inked row %d belongs to line %d (%s) but its band is %.0f-%.0f' \
+          % (page_number, row, owner + 1, reveal.systems[owner], top, bottom)
+    tallest = max(b - a for a, b in reveal.systems)
+    assert all(b - a > tallest for a, b in bands), \
+        'every band should be taller than the tallest staff box'
+
+
+@needs_real
+def test_the_line_does_not_reach_into_the_neighbouring_music(panel):
+  """More of the line, but never the line below: that one is the future."""
   tab, _player, _piece, _render, cfg = panel
   page = next(p for p in tab.render.pages if p.number == 2)
   reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
-  ink = reveal.system_ink()
+  bands = scoreview.line_bands(reveal, page.image)
+  for index in range(len(bands) - 1):
+    assert bands[index][1] <= bands[index + 1][0] + 0.5, \
+        'line %d and line %d overlap' % (index + 1, index + 2)
+  for index, (top, bottom) in enumerate(reveal.systems):
+    assert bands[index][0] <= top and bands[index][1] >= bottom, \
+        'the staves themselves must be inside the band'
+
+
+@needs_real
+def test_the_shown_band_is_the_measured_line(panel):
+  """And the view is actually given it, not the staff box."""
+  tab, _player, _piece, _render, cfg = panel
+  page = next(p for p in tab.render.pages if p.number == 2)
+  reveal = scoreview.page_reveal(cfg, tab.piece.musicxml, 2, page.width)
+  bands = scoreview.line_bands(reveal, page.image)
   for index in (0, 1, 2):
     bars = _bars_in_system(reveal, index)
     span = next(m for m in tab.result.measures if m.measure == bars[0])
     tab._playing = True
     tab.on_position(span.start_s + 0.02)
-    top, bottom = tab.view.line()
-    band = reveal.systems[index]
-    assert top <= band[0] and bottom >= band[1], 'the staves themselves must be shown'
-    if index > 0:
-      assert top >= ink[index - 1][1], \
-          'the line above reaches into view (its ink ends at %.0f, view starts at %.0f)' \
-          % (ink[index - 1][1], top)
-    if index + 1 < len(reveal.systems):
-      assert bottom <= ink[index + 1][0], \
-          'the line below (the future) reaches into view: its ink starts at %.0f, ' \
-          'the view ends at %.0f' % (ink[index + 1][0], bottom)
+    assert tab.view.line() == pytest.approx(bands[index]), \
+        'line %d: view shows %s, measured band is %s' % (index + 1, tab.view.line(), bands[index])
+    staff = reveal.systems[index]
+    assert tab.view.line()[1] - tab.view.line()[0] > 1.4 * (staff[1] - staff[0]), \
+        'the band should be taller than the staves alone'

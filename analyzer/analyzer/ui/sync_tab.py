@@ -57,10 +57,6 @@ SPEED_STEP = 0.05
 NUDGE_MIN_MS, NUDGE_MAX_MS = -3000, 3000
 NUDGE_STEP_MS = 25
 PLAY_STEP = 0.05
-# How much air to show above and below the staves of the line being played, in notehead
-# heights (about a staff space each): two is enough for ledger lines and dynamics, and
-# the neighbouring line's ink has the final say.
-LINE_AIR_SPACES = 2.0
 
 
 def warped_clock(seconds: float, start: float, speed: float = 1.0, nudge_ms: float = 0.0,
@@ -105,6 +101,7 @@ class SyncPlayingPanel(QWidget):
     self.first_bar = 1
     self.last_bar = 1
     self._reveals: Dict[int, scoreview.PageReveal] = {}
+    self._bands: Dict[int, list] = {}
     self._playing = False
     self._range: Optional[Tuple[float, Optional[float]]] = None
     self._seconds = 0.0
@@ -227,6 +224,7 @@ class SyncPlayingPanel(QWidget):
     self.render = render
     self.result = result
     self._reveals = {}
+    self._bands = {}
     self._playing = False
     self._range = None
     self._confidence = {m.measure: m.confidence for m in (result.measures if result else [])}
@@ -403,6 +401,22 @@ class SyncPlayingPanel(QWidget):
     measure, _span = self._measure_at(self._reveal_seconds(self._seconds))
     return measure
 
+  def _line_bands(self, reveal: scoreview.PageReveal, page_number: int):
+    """The band to show for each line of this page, measured from the page's own ink.
+
+    A staff box is not the music: on this score the ink reaches 73 px above the staves
+    and 82 px below them, so cutting the band to the staves (plus a couple of notehead
+    heights, as this first did) clips real music off every line.
+    """
+    cached = self._bands.get(page_number)
+    if cached is None:
+      page = next((p for p in self.render.pages if p.number == page_number), None)
+      if page is None:
+        return []
+      cached = scoreview.line_bands(reveal, page.image)
+      self._bands[page_number] = cached
+    return cached
+
   def _show_line(self, measure: Optional[int]) -> Optional[scoreview.PageReveal]:
     """Put the system holding `measure` on screen, and say what the reveal is.
 
@@ -421,7 +435,10 @@ class SyncPlayingPanel(QWidget):
     if band is None:
       return reveal
     if self._line_view():
-      self.view.set_line(*self._padded_band(reveal, measure, band))
+      bands = self._line_bands(reveal, self.view.page_number)
+      number = reveal.system_number(measure) or 1
+      shown = bands[number - 1] if 0 < number <= len(bands) else band
+      self.view.set_line(*shown)
       number = reveal.system_number(measure)
       total = len(reveal.systems)
       self.page_label.setText('page %d / %d · line %s / %d'
@@ -432,24 +449,6 @@ class SyncPlayingPanel(QWidget):
       self.page_label.setText('page %d / %d'
                               % (self.view.page_number, len(self.render.pages)))
     return reveal
-
-  def _padded_band(self, reveal: scoreview.PageReveal, measure: int, band):
-    """The line, with as much air above and below as the neighbours allow.
-
-    Ledger lines and dynamics are drawn outside the staves, so a band cut exactly to
-    them clips the music. The air is bounded by where the line above and the line below
-    actually have ink -- showing more than that would put another line's music on screen,
-    and the line below is the future, which must not be readable.
-    """
-    index = reveal.system_number(measure)
-    ink = reveal.system_ink()
-    top_room = bottom_room = LINE_AIR_SPACES * max(1.0, reveal.space)
-    if index is not None and 1 <= index <= len(ink):
-      if index >= 2:
-        top_room = min(top_room, max(0.0, band[0] - ink[index - 2][1] - 1.0))
-      if index < len(ink):
-        bottom_room = min(bottom_room, max(0.0, ink[index][0] - band[1] - 1.0))
-    return (max(0.0, band[0] - top_room), min(reveal.height, band[1] + bottom_room))
 
   def curtain_rects(self, reveal: scoreview.PageReveal, measure: int, unit: int):
     """What to cover, cut down to the line being shown when only one is on screen."""
