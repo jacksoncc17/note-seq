@@ -6,6 +6,10 @@ import tailwindcss from '@tailwindcss/vite'
 // `npm run dev` and the built page behave the same way. In production FastAPI serves
 // `dist/` itself and there is no proxy in the path at all.
 export default defineConfig({
+  // The page can be served at the root (its own host, or a tunnel) or under a path on
+  // someone else's origin -- `VITE_BASE=/note-seq/` for the latter, which is what makes
+  // it share that origin's login instead of needing one of its own.
+  base: process.env.VITE_BASE ?? '/',
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,

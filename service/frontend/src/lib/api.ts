@@ -101,9 +101,53 @@ export type ServiceStatus = {
   database: string
   frontend_built: boolean
   capabilities: Record<string, boolean>
+  /** How this deployment is reached: `open`, or `token` when it shares the broker's
+   *  login. `login_url` is where to send a browser that has no token. */
+  auth?: { mode: 'open' | 'token'; login_url: string | null; restricted: boolean }
+  /** True when this deployment only serves finished pieces: no form, no queue. */
+  read_only?: boolean
 }
 
-const API = '/api/v1'
+// `/api/v1` when this service is the whole origin; under a path prefix it is that
+// prefix plus the same path, because the proxy strips the prefix on the way through.
+const API = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1'
+
+/**
+ * The broker's access token, read from the key its own frontend uses
+ * (`hooks/useAuth.ts`: `localStorage.access_token`).
+ *
+ * This only works because the page is served on the *broker's* origin: localStorage is
+ * per-origin, so a page on a subdomain sees nothing. Serving here under a path prefix is
+ * what makes "sign in to the broker" also mean "signed in to the scores", with no second
+ * password anywhere.
+ */
+export const TOKEN_KEY = 'access_token'
+
+export function token(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+let signInUrl: string | null = null
+
+/** Told by the status call: where to send a browser whose token is missing or stale. */
+export function rememberSignIn(url: string | null | undefined) {
+  signInUrl = url ?? null
+}
+
+export function goToSignIn(): boolean {
+  if (!signInUrl) return false
+  window.location.assign(signInUrl)
+  return true
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const value = token()
+  return value ? { ...extra, Authorization: `Bearer ${value}` } : extra
+}
 
 class ApiError extends Error {
   status: number
@@ -114,7 +158,15 @@ class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(API + path, init)
+  const response = await fetch(API + path, {
+    ...init,
+    headers: authHeaders((init?.headers as Record<string, string>) ?? {}),
+  })
+  if (response.status === 401 || response.status === 403) {
+    // the token is missing, expired (the broker's last 8 days) or belongs to an account
+    // this service does not allow -- signing in again is the only useful next step
+    if (goToSignIn()) throw new ApiError(response.status, 'signing in')
+  }
   if (!response.ok) {
     // FastAPI puts the reason in `detail`; anything else is the status line.
     let detail = response.statusText
@@ -127,6 +179,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, detail)
   }
   return (await response.json()) as T
+}
+
+/**
+ * A fetch that carries the broker's token, for the calls that are not JSON.
+ *
+ * The page's SVG and the audio clip are fetched directly rather than through `request`,
+ * so they need this: without it they were the only two requests on the page that went out
+ * unauthenticated, and under a deployment that shares the broker's login they came back
+ * 401 while everything else worked.
+ */
+export async function authorisedFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const response = await fetch(url, {
+    ...init,
+    headers: authHeaders((init.headers as Record<string, string>) ?? {}),
+  })
+  if (response.status === 401 || response.status === 403) {
+    if (goToSignIn()) throw new ApiError(response.status, 'signing in')
+  }
+  return response
 }
 
 export const getStatus = () => request<ServiceStatus>('/status')

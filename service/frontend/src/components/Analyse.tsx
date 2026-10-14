@@ -259,7 +259,13 @@ function RetryButton({ id }: { id: string }) {
 export function PieceList() {
   const pieces = usePieces()
   const rows = pieces.data?.pieces ?? []
-  if (!rows.length) return null
+  if (!rows.length) {
+    return (
+      <p className="rounded-md border border-dashed border-stone-300 px-4 py-6 text-center text-sm text-stone-500">
+        No pieces yet. One appears here as soon as a job finishes on the broker.
+      </p>
+    )
+  }
   return (
     <Card>
       <CardHeader>

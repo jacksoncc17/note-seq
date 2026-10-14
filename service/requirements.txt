@@ -1,9 +1,25 @@
-# The web layer. Everything else the service needs -- librosa, soundfile, verovio,
-# numpy, yt-dlp -- is already in the checkout's venv for the analyzer, and the service
-# imports the analyzer rather than reimplementing it. Install these into that venv:
+# The web layer. On a machine that already has the checkout's venv this is all that is
+# missing -- librosa, verovio, yt-dlp and the analyzer come from there, and the service
+# imports the analyzer rather than reimplementing it:
 #
 #   .venv/bin/pip install -r service/requirements.txt
 #
+# `soundfile` is listed because the *serving* half needs it on its own: the clip for a
+# bar range is sliced out of the piece's WAV with it (`app/clips.py`), and a container
+# built from this list has no venv to borrow it from. Leaving it out was a real failure
+# rather than a hypothetical one: the first image built from this file served every page,
+# returned the piece list, answered 200 for the engraved SVG -- and answered 500 for every
+# clip, with `ModuleNotFoundError: No module named 'soundfile'` in a stack trace, because
+# that import sits inside the function that slices the audio. The analyzer's own stack is
+# *not* here: it is the worker's, and the worker runs where librosa, verovio and the
+# soundfont are. A test in `test_api.py` now fails if a module the service imports is
+# missing from this list.
 fastapi>=0.115
 uvicorn>=0.30
 python-multipart>=0.0.9
+soundfile>=0.12
+
+# Only needed when the service shares the broker's login (SERVICE_TRUST_JWT): it checks
+# the HS256 signature on the broker's access token, which is how a page served under the
+# broker's own origin needs no password of its own.
+pyjwt>=2.8

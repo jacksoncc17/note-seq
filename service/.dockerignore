@@ -1,0 +1,36 @@
+# Keeping the build context to the serving half. Anything listed here is never uploaded to
+# the builder, whatever the caller's context happens to contain.
+
+# Pieces, job records, uploaded scores and recordings. Two of these are ~16 MB each.
+data/
+.scratch/
+
+# Built inside the frontend stage, and 200 MB of it.
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Not needed to build or run the page, and they document a worker that is not in here.
+tests/
+broker/
+
+# Caches and local state.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration (an `.env` may hold the broker's key).
+.env
+.env.*
+
+# Editors and version control.
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+.DS_Store

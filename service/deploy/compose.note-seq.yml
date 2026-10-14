@@ -1,0 +1,79 @@
+# The note-seq page, as a third service in the broker's stack.
+#
+# This is a compose overlay: it adds one service and one volume and touches nothing else.
+# Either use it as a third `-f` file
+#
+#   docker compose -f compose.yml -f compose.deploy.yml \
+#     -f ../note-seq/service/deploy/compose.note-seq.yml up -d --wait --build
+#
+# or paste the two blocks below into `compose.deploy.yml` (the `note-seq:` service under
+# the existing `services:` key, `note-seq-data:` under the existing `volumes:` key), which
+# needs no change to `deploy/deploy.sh`.
+#
+# Why an overlay rather than its own compose project: the whole point of serving this
+# under `${DOMAIN}/note-seq` instead of on a subdomain is that it shares the broker's
+# origin, and therefore the broker's token in `localStorage`. A separate origin would need
+# a login of its own. Nothing here is on a subdomain, and nothing here is published on a
+# port -- Traefik reaches it over the compose network by service name.
+
+services:
+
+  note-seq:
+    build:
+      # Only `service/` is sent to the builder. The repository's other directories --
+      # the analyzer's 236 MB cache, the 100 MB cyolo_score_following clone, the .venv --
+      # are not part of this context and never leave this machine. See service/Dockerfile
+      # and service/.dockerignore.
+      #
+      # Relative to the compose *project* directory (the directory of the first -f file,
+      # i.e. the broker repo root), so this assumes a checkout beside it. Override in .env
+      # if the note-seq checkout lives elsewhere.
+      context: ${NOTE_SEQ_DIR:-../note-seq}/service
+      args:
+        # Baked into the page at build time: where it is served from and where its API
+        # lives. Both are the broker's origin plus the prefix Traefik strips.
+        VITE_BASE: /note-seq/
+        VITE_API_BASE: /note-seq/api/v1
+    restart: always
+    environment:
+      # Serving only. A worker in here would claim jobs from a database it does not share
+      # and fail every one of them; the worker runs on the LAN, where the analyzer, the
+      # soundfont and ffmpeg are.
+      SERVICE_EMBEDDED_WORKER: "0"
+      # No submission form: analyses are submitted on the broker, and every job that
+      # finishes there is published here.
+      SERVICE_READ_ONLY: "1"
+      # The broker's own key, so a token this browser already holds is accepted. This is
+      # the *deployed* key: the repository's .env has a different one (measured: 10
+      # characters there against 9 here), and tokens signed with it are correctly
+      # rejected. Nothing else is shared -- no database, no token store.
+      SERVICE_TRUST_JWT: ${SECRET_KEY:?Variable not set}
+      # Public prefix, so the API's own docs and its redirects name the URLs the browser
+      # actually uses.
+      SERVICE_ROOT_PATH: /note-seq
+      SERVICE_DATA: /data
+      # Optional. `/note-seq/login` is the default; set this if the broker's sign-in page
+      # is somewhere else, or the page sends a browser there when its token is missing.
+      # SERVICE_BROKER_LOGIN: /login
+    volumes:
+      - note-seq-data:/data
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.note-seq.loadbalancer.server.port=8000
+
+      # One router on the broker's own host, restricted to the prefix, with the prefix
+      # removed before the request reaches this container. Because the rule is longer than
+      # the backend's `Host(...)`, Traefik gives it the higher priority, so `/` and
+      # `/api/v1/...` still go to the broker and `/note-seq/...` comes here.
+      - traefik.http.middlewares.note-seq-strip.stripprefix.prefixes=/note-seq
+      - traefik.http.routers.note-seq-https.rule=Host(`${DOMAIN:?Variable not set}`) && PathPrefix(`/note-seq`)
+      - traefik.http.routers.note-seq-https.entrypoints=https
+      - traefik.http.routers.note-seq-https.tls=true
+      - traefik.http.routers.note-seq-https.tls.certresolver=le
+      - traefik.http.routers.note-seq-https.middlewares=note-seq-strip
+
+volumes:
+  # Pieces live here: ~16 MB each (the recording as WAV, plus the engraved pages as SVG).
+  # Losing this loses the published pieces, not the analyses -- those are on whichever
+  # machine ran them, and can be published again.
+  note-seq-data:

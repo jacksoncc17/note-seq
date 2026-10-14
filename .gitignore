@@ -32,3 +32,16 @@ analyzer/output/
 
 # analyzer: scratch space while a module is being developed
 analyzer/.scratch/
+
+# service: what it produces and its scratch space are ignored in service/.gitignore.
+# This one is for a scratch directory at the top level -- staged build output, and a
+# docker config redirected here because the sandboxed home directory is read-only.
+.scratch/
+
+# A 100 MB clone of a scoring library, used as a reference while building the follower.
+# It is not part of this project and must not be committed to it.
+cyolo_score_following/
+
+# Caches written by tools run in this tree.
+.npm-cache/
+.fontcache/

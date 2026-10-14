@@ -53,6 +53,157 @@ def test_the_api_documents_itself(client):
   assert '/api/v1/pieces/{slug}/audio' in schema['paths']
 
 
+def test_the_page_is_served_from_the_build_directory(tmp_path, monkeypatch):
+  """`/`, an asset, a client-side route, and a path that is not a file of the page."""
+  dist = _fake_build(tmp_path)
+  client = _client_for(dist, monkeypatch)
+
+  page = client.get('/')
+  assert page.status_code == 200 and 'the page of the service' in page.text
+
+  asset = client.get('/assets/app-abc123.js')
+  assert asset.status_code == 200, asset.text
+  assert 'console.log(1)' in asset.text
+
+  # A client-side route is not a file: it is the page, which routes it itself.
+  deeper = client.get('/pieces/serenade-7')
+  assert deeper.status_code == 200 and 'the page of the service' in deeper.text
+
+
+def test_the_page_is_served_when_a_proxy_strips_a_prefix(tmp_path, monkeypatch):
+  """The deployment this service is built for: a path prefix, stripped by the proxy.
+
+  Under `Host(domain) && PathPrefix('/note-seq')` with Traefik's `stripPrefix`, the app
+  sees `/assets/app-abc123.js` and `SERVICE_ROOT_PATH` says `/note-seq`. That combination
+  -- and only that combination -- made every asset a 404 when the assets were a
+  `StaticFiles` mount: `Mount.matches` sets the child scope's `root_path` to
+  `/note-seq/assets`, `get_route_path` cannot strip that from a path that no longer has
+  the prefix, and `StaticFiles.lookup_path` then refuses the absolute path it is left
+  with. The page loaded, and came up blank. Empty `SERVICE_ROOT_PATH` answered 200 for the
+  same request, which is why serving on the LAN never showed it.
+  """
+  dist = _fake_build(tmp_path)
+  plain = _client_for(dist, monkeypatch)
+  assert plain.get('/assets/app-abc123.js').status_code == 200
+
+  prefixed = _client_for(dist, monkeypatch, root_path='/note-seq')
+  asset = prefixed.get('/assets/app-abc123.js')
+  assert asset.status_code == 200, (
+      'the page cannot load its own JavaScript under a stripped prefix: %s' % asset.text)
+  assert 'console.log(1)' in asset.text
+  assert prefixed.get('/pieces/serenade-7').status_code == 200
+
+
+def test_a_path_that_climbs_out_of_the_build_directory_is_not_served(tmp_path, monkeypatch):
+  """`dist / path` with `../../` in it reads outside the directory, so it is resolved.
+
+  This route is the page's catch-all, and the page is on the internet in the deployment
+  this service is written for. `%2e%2e%2f` reaches the handler as `../`, which Starlette
+  does not collapse.
+  """
+  dist = _fake_build(tmp_path)
+  secret = tmp_path / 'secret.txt'
+  secret.write_text('not for the browser')
+  client = _client_for(dist, monkeypatch)
+
+  response = client.get('/%2e%2e/secret.txt')
+  assert 'not for the browser' not in response.text
+
+
+def _fake_build(tmp_path) -> pathlib.Path:
+  dist = tmp_path / 'dist'
+  (dist / 'assets').mkdir(parents=True)
+  (dist / 'index.html').write_text('<html>the page of the service</html>')
+  (dist / 'assets' / 'app-abc123.js').write_text('console.log(1)')
+  return dist
+
+
+def _client_for(dist, monkeypatch, root_path=''):
+  """A client on a service serving `dist`, optionally behind a stripped prefix."""
+  from fastapi.testclient import TestClient
+  from service.app.api import create_app
+  from service.app.config import Settings
+
+  monkeypatch.setenv('SERVICE_FRONTEND', str(dist))
+  if root_path:
+    monkeypatch.setenv('SERVICE_ROOT_PATH', root_path)
+  else:
+    monkeypatch.delenv('SERVICE_ROOT_PATH', raising=False)
+  made = Settings(data_dir=dist.parent / 'data')
+  made.embedded_worker = False
+  made.ensure_dirs()
+  return TestClient(create_app(made))
+
+
+# ------------------------------------------------------- what a container has to install
+
+# The analyzer, and the tools only its pipeline touches: fetching a YouTube URL and
+# importing the analysis both belong to the *worker*. A serving deployment has none of
+# them, and `test_serving_a_piece_needs_no_analyzer` is what keeps it that way.
+WORKER_ONLY = {'analyzer', 'note_seq', 'librosa', 'verovio', 'yt_dlp'}
+# Brought in by fastapi, and deliberately not pinned here: a version chosen by the
+# framework is more likely to be right than one chosen by this file.
+TRANSITIVE = {'starlette', 'pydantic', 'anyio'}
+
+
+def _imported_modules(package: pathlib.Path) -> set[str]:
+  """Every top-level module named by an import statement in `package`.
+
+  `ast.walk` rather than a line scan on purpose: the import that broke the first
+  container (`import soundfile as sf` inside `slice_file`) is two levels down inside a
+  function, which is exactly the kind of import a line scan of the module headers misses.
+  """
+  import ast
+  modules: set[str] = set()
+  for path in sorted(package.glob('*.py')):
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+      if isinstance(node, ast.Import):
+        modules.update(alias.name.split('.')[0] for alias in node.names)
+      elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        modules.add(node.module.split('.')[0])
+  return modules
+
+
+def _declared_distributions() -> set[str]:
+  import re
+  text = (pathlib.Path(__file__).resolve().parents[1] / 'requirements.txt').read_text()
+  names = set()
+  for line in text.splitlines():
+    line = line.split('#', 1)[0].strip()
+    if line and not line.startswith('-'):
+      names.add(re.split(r'[<>=!\[;]', line, 1)[0].strip().lower().replace('_', '-'))
+  return names
+
+
+def test_requirements_declare_every_module_the_service_imports():
+  """The image is built from `requirements.txt`, so a missing line is a broken image.
+
+  Necessary because the *development* environment cannot show the problem: the
+  checkout's venv has soundfile, numpy and yt-dlp for the analyzer's sake, so a missing
+  declaration is invisible on this machine and fails only in the container -- which is
+  how it happened. This compares the list against the imports rather than against a
+  hand-kept note.
+  """
+  import importlib.metadata
+  import sys
+
+  declared = _declared_distributions()
+  distributions = importlib.metadata.packages_distributions()
+  missing = {}
+  for module in sorted(_imported_modules(pathlib.Path(__file__).resolve().parents[1] / 'app')):
+    if module in sys.stdlib_module_names or module in WORKER_ONLY or module in TRANSITIVE:
+      continue
+    # Not installed here at all (a worker-only machine, say): nothing to compare against,
+    # and the module is the analyzer's business anyway.
+    found = {name.lower().replace('_', '-') for name in distributions.get(module, [])}
+    if found and not (found & declared):
+      missing[module] = sorted(found)
+  assert not missing, (
+      'imported by service/app but not in requirements.txt: %s -- a container built from '
+      'that file will fail at the first request that needs them' % missing)
+
+
 # --------------------------------------------------------------------------- uploads
 
 @have_material

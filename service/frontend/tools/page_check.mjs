@@ -11,11 +11,23 @@
  * range is fetched and plays.
  *
  * Needs Chrome installed; Playwright drives the one on this machine.
+ *
+ * `BROKER_TOKEN=…` seeds the broker's token into localStorage first, for a deployment
+ * served under the broker's own origin (a path prefix on the same host), where the page
+ * authenticates with the token the broker's own frontend keeps under `access_token`.
  */
 
 import { chromium } from 'playwright'
 
 const target = process.argv[2] ?? 'http://127.0.0.1:8100/'
+
+// Where the API is, derived from the page's own path: `/pieces/<slug>` at the root means
+// `/api/v1`, and the same page served under a path prefix (`/note-seq/pieces/<slug>`,
+// which is how the service shares the broker's origin) means `/note-seq/api/v1`. Without
+// this the check asks the *broker* for the piece and gets its 404.
+const apiBase =
+  process.env.API_BASE ??
+  new URL(target).pathname.replace(/\/pieces\/.*$/, '').replace(/\/$/, '') + '/api/v1'
 const base = new URL(target).origin
 
 function fail(message) {
@@ -29,8 +41,21 @@ const browser = await chromium.launch({
 })
 try {
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } })
+  const brokerToken = process.env.BROKER_TOKEN
+  if (brokerToken) {
+    // the same key their own frontend uses (frontend/src/hooks/useAuth.ts)
+    await page.addInitScript((value) => {
+      window.localStorage.setItem('access_token', value)
+    }, brokerToken)
+    console.log('using a broker token from the environment')
+  }
   page.on('console', (message) => {
     if (message.type() === 'error') console.log('  [browser error]', message.text())
+  })
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      console.log('  [%d] %s', response.status(), response.url())
+    }
   })
 
   await page.goto(target, { waitUntil: 'domcontentloaded' })
@@ -39,7 +64,12 @@ try {
 
   await page.waitForSelector('[data-testid="measure-overlay"]', { timeout: 60000 })
   const slug = new URL(page.url()).pathname.split('/').pop()
-  const piece = await (await fetch(`${base}/api/v1/pieces/${slug}`)).json()
+  const headers = brokerToken ? { Authorization: `Bearer ${brokerToken}` } : {}
+  const piece = await (await fetch(`${base}${apiBase}/pieces/${slug}`, { headers })).json()
+  if (!piece.geometry) {
+    fail(`the API at ${apiBase} did not return a piece: ${JSON.stringify(piece).slice(0, 120)}`)
+    throw new Error('no piece data')
+  }
   const first = piece.geometry.pages[0]
   const firstBar = first.measures[0].number
   const lastBar = first.measures[first.measures.length - 1].number

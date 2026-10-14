@@ -1,18 +1,36 @@
 import { Link, Outlet, createRootRoute, createRoute, createRouter } from '@tanstack/react-router'
+import { useEffect } from 'react'
 
 import { JobList, PieceList, SubmitForm } from '../components/Analyse'
+import { Card, CardBody } from '../components/ui/card'
 import { ScoreScreen } from '../components/ScoreScreen'
+import { goToSignIn, rememberSignIn, token } from '../lib/api'
 import { useStatus } from '../lib/hooks'
 
 /** The shell: a title, a way home, and what this service can do on this machine. */
 function Layout() {
   const status = useStatus()
   const capabilities = status.data?.capabilities
-  const missing = capabilities
-    ? Object.entries(capabilities)
-        .filter(([, okay]) => !okay)
-        .map(([name]) => name)
-    : []
+  const auth = status.data?.auth
+
+  // Under the broker's origin the page is meant to be reached with the broker's token
+  // already in hand. If there is none, the useful thing is to go and sign in rather than
+  // to show three panels full of failed requests.
+  useEffect(() => {
+    if (!status.data) return
+    rememberSignIn(auth?.login_url)
+    if (auth?.mode === 'token' && !token()) goToSignIn()
+  }, [status.data, auth?.mode, auth?.login_url])
+  // A serving-only deployment has neither the analyzer nor ffmpeg nor yt-dlp and is not
+  // missing anything by that: it reads pieces the worker on the LAN analysed. Warning
+  // about them there would be a warning about the deployment being what it is.
+  const readOnly = Boolean(status.data?.read_only)
+  const missing =
+    capabilities && !readOnly
+      ? Object.entries(capabilities)
+          .filter(([, okay]) => !okay)
+          .map(([name]) => name)
+      : []
 
   return (
     <div className="min-h-full">
@@ -48,6 +66,28 @@ function Layout() {
 
 function Home() {
   const status = useStatus()
+  const readOnly = Boolean(status.data?.read_only)
+
+  // A serving-only deployment has no worker attached: a form here would queue an
+  // analysis nothing ever runs, and the queue it fills belongs to the broker. So it
+  // shows the pieces and says where analyses are submitted.
+  if (readOnly) {
+    return (
+      <div className="mx-auto max-w-[1500px] space-y-6 p-4 lg:p-6">
+        <Card>
+          <CardBody className="space-y-1 text-sm text-stone-600">
+            <p className="font-medium text-stone-900">Scores ready to read</p>
+            <p>
+              This deployment serves finished pieces only. Analyses are submitted on the
+              broker — every job that finishes there is published here and appears below.
+            </p>
+          </CardBody>
+        </Card>
+        <PieceList />
+      </div>
+    )
+  }
+
   return (
     <div className="mx-auto max-w-[1500px] space-y-6 p-4 lg:p-6">
       <SubmitForm capabilities={status.data?.capabilities} />
@@ -81,7 +121,15 @@ const pieceRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([indexRoute, pieceRoute])
 
-export const router = createRouter({ routeTree, defaultPreload: 'intent' })
+// `BASE_URL` is '/' at the root and '/note-seq/' under a path prefix; the router wants
+// it without the trailing slash.
+const basepath = import.meta.env.BASE_URL.replace(/\/$/, '') || '/'
+
+export const router = createRouter({
+  routeTree,
+  basepath,
+  defaultPreload: 'intent',
+})
 
 declare module '@tanstack/react-router' {
   interface Register {

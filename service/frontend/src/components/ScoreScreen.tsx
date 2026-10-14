@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight, Info, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  authorisedFetch,
   clipUrlForBars,
   type MeasureTime,
   type PageGeometry,
@@ -57,7 +58,7 @@ export function ScoreScreen({ slug }: { slug: string }) {
     setLoading(true)
     setProblem(null)
     let objectUrl: string | null = null
-    fetch(clipUrlForBars(slug, first, last), { signal: controller.signal })
+    authorisedFetch(clipUrlForBars(slug, first, last), { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) {
           const body = await response.json().catch(() => null)

@@ -22,10 +22,9 @@ import pathlib
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from .config import Settings
 from .jobs import JobStore
@@ -46,7 +45,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   settings.ensure_dirs()
   store = JobStore(settings)
   pieces = PieceStore(settings)
+  gate = settings.gate()
   worker: Optional[WorkerThread] = None
+
+  # Every endpoint below that reads a piece or a job is gated by this. When no trusted
+  # secret is configured it lets everyone through, so nothing about a local run changes.
+  signed_in = Depends(gate.require_user)
 
   @asynccontextmanager
   async def lifespan(_app: FastAPI):
@@ -69,6 +73,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         worker.shutdown()
 
   app = FastAPI(title='note-seq service', version='1.0', lifespan=lifespan,
+                root_path=settings.root_path,
                 description='Upload a score and a recording; read the score and listen '
                             'to any range of bars.')
   app.state.settings = settings
@@ -80,6 +85,19 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'],
                      allow_headers=['*'])
 
+  if settings.read_only:
+    # Unconditional, and before the body is parsed: a serving-only deployment has no
+    # worker, so a queued job would sit there forever. Checking inside the endpoint would
+    # let a malformed request through as a 422 instead, which says the wrong thing about
+    # why nothing will run.
+    @app.middleware('http')
+    async def _no_new_jobs(request: Request, call_next):
+      if request.method == 'POST' and request.url.path.rstrip('/').endswith('/jobs'):
+        return JSONResponse(
+            {'detail': 'this service only serves finished pieces; submit an analysis on '
+                       'the broker'}, status_code=405)
+      return await call_next(request)
+
   # ------------------------------------------------------------------ health
 
   @app.get(API + '/status')
@@ -88,6 +106,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return {'service': 'note-seq', 'version': app.version,
             'jobs': store.stats(),
             'pieces': len(pieces.slugs()),
+            'auth': gate.status(),
             **settings.describe()}
 
   # ------------------------------------------------------------------ jobs
@@ -99,7 +118,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
       youtube_url: str = Form('', description='or a YouTube URL instead of a file'),
       title: str = Form('', description='what to call the piece'),
   ) -> Dict[str, Any]:
-    """Accept an upload and queue it. The work happens on the worker, not here."""
+    """Accept an upload and queue it. The work happens on the worker, not here.
+
+    A serving-only deployment has no worker attached, so a queued job would sit there
+    forever -- and offering a form that does nothing is worse than not offering it. The
+    broker's own page is where jobs are submitted in that arrangement.
+    """
+    if settings.read_only:
+      raise HTTPException(405, 'this service only serves finished pieces; submit an '
+                               'analysis on the broker')
     name = (score.filename or 'score.musicxml')
     suffix = pathlib.Path(name).suffix.lower()
     if suffix not in SCORE_SUFFIXES:
@@ -140,19 +167,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return _job_json(store.get(job.id))
 
   @app.get(API + '/jobs')
-  def list_jobs(limit: int = 50, status: Optional[str] = None) -> Dict[str, Any]:
+  def list_jobs(limit: int = 50, status: Optional[str] = None,
+                _user=Depends(gate.require_user)) -> Dict[str, Any]:
     return {'jobs': [_job_json(job, brief=True) for job in store.list(limit, status)],
             'stats': store.stats()}
 
   @app.get(API + '/jobs/{job_id}')
-  def get_job(job_id: str) -> Dict[str, Any]:
+  def get_job(job_id: str, _user=Depends(gate.require_user)) -> Dict[str, Any]:
     job = store.get(job_id)
     if job is None:
       raise HTTPException(404, 'no such job')
     return _job_json(job)
 
   @app.post(API + '/jobs/{job_id}/retry')
-  def retry_job(job_id: str) -> Dict[str, Any]:
+  def retry_job(job_id: str, _user=Depends(gate.require_user)) -> Dict[str, Any]:
     job = store.get(job_id)
     if job is None:
       raise HTTPException(404, 'no such job')
@@ -164,11 +192,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   # ------------------------------------------------------------------ pieces
 
   @app.get(API + '/pieces')
-  def list_pieces() -> Dict[str, Any]:
+  def list_pieces(_user=Depends(gate.require_user)) -> Dict[str, Any]:
     return {'pieces': pieces.listing()}
 
   @app.get(API + '/pieces/{slug}')
-  def get_piece(slug: str) -> Dict[str, Any]:
+  def get_piece(slug: str, _user=Depends(gate.require_user)) -> Dict[str, Any]:
     """Everything the score page needs, in one request."""
     meta = pieces.meta(slug)
     map_dict = pieces.map(slug)
@@ -180,7 +208,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                       'duration_s': meta.get('duration_s') or 0.0}}
 
   @app.get(API + '/pieces/{slug}/pages/{number}.svg')
-  def get_page(slug: str, number: int) -> Response:
+  def get_page(slug: str, number: int, _user=Depends(gate.require_user)) -> Response:
     path = pieces.page_path(slug, number)
     if not path.is_file():
       raise HTTPException(404, 'no page %d for %s' % (number, slug))
@@ -190,7 +218,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   @app.get(API + '/pieces/{slug}/audio')
   def get_audio(slug: str, first_bar: Optional[int] = None,
                 last_bar: Optional[int] = None, start: Optional[float] = None,
-                end: Optional[float] = None, pad: int = 1) -> Response:
+                end: Optional[float] = None, pad: int = 1,
+                _user=Depends(gate.require_user)) -> Response:
     """A WAV of the recording -- all of it, or exactly the bars asked for.
 
     Bars are answered from the map, so the clip is the music of those bars and not the
@@ -332,15 +361,31 @@ def _describe(params: Dict[str, Any]) -> str:
 def _mount_frontend(app: FastAPI, settings: Settings) -> None:
   """Serve the built React app, if it has been built.
 
-  Vite writes hashed asset names, so the assets are mounted as static files and every
+  Vite writes hashed asset names; every file under `dist/` is served from there, and every
   unknown path falls back to `index.html` for the client-side routes. When `dist/` is
-  missing the root path says how to build it rather than 404ing: a service that is
-  running but has no page is worth explaining.
+  missing the root path says how to build it rather than 404ing: a service that is running
+  but has no page is worth explaining.
+
+  This deliberately does **not** use `StaticFiles` mounted at `/assets`, which is the
+  obvious way and was the first way. It is broken by exactly the deployment this service
+  is built for, and only there:
+
+  * behind a proxy that strips a prefix (Traefik `stripPrefix('/note-seq')`), the app is
+    asked for `/assets/app-abc123.js` while its `root_path` says `/note-seq`;
+  * `Mount.matches` then sets the child scope's `root_path` to `/note-seq/assets`;
+  * `get_route_path` cannot strip that from the already-stripped `/assets/app-abc123.js`,
+    so the path stays absolute;
+  * `StaticFiles.lookup_path` refuses a path starting with `/` -- a guard against escaping
+    the served directory -- and answers **404**.
+
+  Measured before it was understood: the container served `/`, `/api/v1/pieces`, the
+  engraved SVG and the audio clip, and 404'd on its own JavaScript, so the page came up
+  blank. The same request through the same app with `SERVICE_ROOT_PATH` empty answered 200,
+  which is why running the service on the LAN hid it. Serving from `dist` directly has no
+  prefix arithmetic in it at all, and `test_a_page_under_a_stripped_prefix_serves_its_assets`
+  holds it to that.
   """
   dist = settings.frontend_dist
-  assets = dist / 'assets'
-  if assets.is_dir():
-    app.mount('/assets', StaticFiles(directory=str(assets)), name='assets')
 
   @app.get('/', include_in_schema=False)
   def index() -> Response:
@@ -353,9 +398,15 @@ def _mount_frontend(app: FastAPI, settings: Settings) -> None:
   def spa(path: str, request: Request) -> Response:
     if path.startswith(API.lstrip('/')) or path in ('openapi.json', 'docs', 'redoc'):
       raise HTTPException(404, 'no such endpoint: /%s' % path)
-    candidate = dist / path
-    if candidate.is_file():
+
+    # Anything inside the build directory is a file of the page: `/assets/app-abc123.js`,
+    # its source map, the favicon. Resolved and checked rather than joined: `dist / path`
+    # with a path of `../../etc/passwd` would read outside the directory, and this route
+    # is reachable from the internet whenever the page is.
+    candidate = (dist / path).resolve()
+    if candidate.is_file() and dist.resolve() in candidate.parents:
       return FileResponse(str(candidate))
+
     page = dist / 'index.html'
     if page.is_file():
       return HTMLResponse(page.read_text(encoding='utf-8'))

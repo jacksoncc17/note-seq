@@ -357,10 +357,106 @@ analyzer import back makes it fail.
 analysis path (`pipeline.analyse`), which is where they are needed and where the worker
 runs; `SERVICE_EMBEDDED_WORKER=0` keeps the serving container from starting that loop.
 
+### Building it
+
+```bash
+docker build -t note-seq:local service/                 # 226 MB, two stages
+docker run --rm -p 8100:8000 -v note-seq-data:/data note-seq:local
+```
+
+226 MB is what `docker images` reports; measured by layer, 98 MB of it is the web layer as
+pip installs it, 7 MB is libsndfile, and the rest is the interpreter. The node stage that
+builds the page is not in the final image -- only its `dist/` is (401 kB).
+
+The build context is `service/` alone, which is the point: the analyzer's 236 MB cache, the
+100 MB `cyolo_score_following` clone, the venv and the piece data are not in it and never
+reach the builder. `.dockerignore` says so as well for callers who pass the repository root.
+
+Two bugs in this deployment were found by building the image and using it, and both were
+invisible from the LAN:
+
+* **`soundfile` was missing from `requirements.txt`.** The comment there said the rest came
+  from the checkout's venv, which is true on the machine the service was developed on and
+  false in a container. The image served `/`, the piece list and every engraved page, and
+  answered 500 for every clip -- `ModuleNotFoundError: No module named 'soundfile'`, from an
+  import inside the function that slices the audio. `test_api.py` now fails if a module
+  `service/app` imports is not in that file (mutation-checked: removing the line fails it).
+* **The page's own JavaScript 404'd under a path prefix.** `StaticFiles` mounted at
+  `/assets` plus `SERVICE_ROOT_PATH` is broken, and only there: `Mount.matches` sets the
+  child scope's `root_path` to `/note-seq/assets`, `get_route_path` cannot strip that from
+  the already-stripped `/assets/app-abc123.js`, and `StaticFiles.lookup_path` refuses the
+  absolute path it is left with. The page loaded and came up blank. Everything under
+  `dist/` is now served by one route that resolves the path against the build directory
+  (and refuses paths that climb out of it), with a test for each. Empty
+  `SERVICE_ROOT_PATH` answers 200 for the same request, which is why running on the LAN
+  hid it.
+
+## Deploying under the broker's origin
+
+The arrangement this service was written for: the page is served at `${DOMAIN}/note-seq`
+by the broker's own Traefik, so it shares the broker's **origin** -- and therefore the
+broker's token, because `localStorage` is per-origin. A subdomain would be a different
+origin and would need a login of its own; that is the whole reason for the prefix.
+
+`service/deploy/compose.note-seq.yml` is an overlay that adds one service and one volume to
+that stack and touches nothing else. Paste its two blocks into `compose.deploy.yml` (no
+change to `deploy/deploy.sh`), or bring the stack up with a third `-f`. On the droplet:
+
+```bash
+git clone <this repository> ~/note-seq                 # beside the broker's checkout
+cd ~/full-stack-fastapi-template && ./deploy/deploy.sh  # builds and starts everything
+```
+
+What the overlay sets, and why:
+
+| setting | value | why |
+| --- | --- | --- |
+| `SERVICE_EMBEDDED_WORKER` | `0` | a worker here would claim jobs and fail every one of them; the worker runs where the analyzer, ffmpeg and the soundfont are |
+| `SERVICE_READ_ONLY` | `1` | no submission form, and `POST /api/v1/jobs` answers 405 instead of queueing an analysis nobody runs |
+| `SERVICE_TRUST_JWT` | `${SECRET_KEY}` | the broker's own key, so the token this browser already holds is accepted |
+| `SERVICE_ROOT_PATH` | `/note-seq` | the public prefix, for the API's own docs and redirects |
+| `VITE_BASE`, `VITE_API_BASE` (build args) | `/note-seq/`, `/note-seq/api/v1` | where the page is served from and where its API is |
+
+Verified against the running broker, not against a description of it: no token gives
+`401 {"detail": "sign in first"}`; the broker's own token gives `200` and the pieces; a
+token signed with the repository's development key gives `401` (the deployed key and the
+one in the repository's `.env` are different -- measured 9 characters against 10, which is
+why the overlay takes it from the environment); an expired token gives `401`;
+`POST /api/v1/jobs` gives `405 this service only serves finished pieces; submit an analysis
+on the broker`. And through a local stand-in for Traefik's routing
+(`service/tools/prefix_proxy.py`, which strips the prefix exactly as `stripPrefix` does):
+the page renders, 18 click targets land within 0.019 px of the engraving, the clip for bars
+1-18 is 43.51 s, and the playhead follows it -- all inside the **container**, not the
+development server.
+
+Configuring `SERVICE_TRUST_JWT` is what puts the gate up; leaving it empty keeps the
+service open, which is right for loopback. `SERVICE_ALLOWED_SUBJECTS` can restrict it to
+particular accounts, and `SERVICE_BROKER_LOGIN` (default `/login`) is where a browser
+without a token is sent.
+
+**Not built yet:** pieces reach the droplet by hand. The worker on the LAN is what
+analyses, and the overlay has no path for it to publish into: there is no
+`POST /api/v1/pieces` for a worker to upload a finished piece to, and no setting in the
+plugin for where to send it. Until that exists, copy them:
+
+```bash
+rsync -a service/data/pieces/ droplet:~/note-seq-pieces/
+# Compose prefixes the volume with the project directory's name, so it is not just
+# `note-seq-data`; the first line says what it is actually called there.
+docker volume ls | grep note-seq-data
+docker run --rm -v full-stack-fastapi-template_note-seq-data:/data \
+  -v ~/note-seq-pieces:/in alpine \
+  sh -c 'mkdir -p /data/pieces && cp -a /in/. /data/pieces/'
+```
+
+That is the next piece of work, and it is a small one: the worker already knows the slug it
+computed (`app/pieces.py` claims it from the score's SHA-256), so the endpoint takes an
+upload and writes it under that name, with no analyzer on the serving side at all.
+
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 74 tests, ~100 s
+.venv/bin/python -m pytest service/tests -q          # 88 tests, ~110 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

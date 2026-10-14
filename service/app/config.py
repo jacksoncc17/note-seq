@@ -70,6 +70,26 @@ class Settings:
     self.embedded_worker = _flag('SERVICE_EMBEDDED_WORKER', True)
     self.poll_seconds = float(os.environ.get('SERVICE_POLL_SECONDS', 1.0))
 
+    # Serving under the broker's own origin (a path prefix, same host) is what makes the
+    # pages need no password: the browser already holds the broker's token, and this
+    # service checks the signature on it instead of running a login of its own.
+    # `SERVICE_TRUST_JWT` is the broker's SECRET_KEY; empty means no gate at all, which
+    # is the right default for a service on loopback.
+    self.trust_jwt = os.environ.get('SERVICE_TRUST_JWT', '').strip()
+    self.allowed_subjects = os.environ.get('SERVICE_ALLOWED_SUBJECTS', '').strip()
+    self.upload_token = os.environ.get('SERVICE_UPLOAD_TOKEN', '').strip()
+    self.broker_login = os.environ.get('SERVICE_BROKER_LOGIN', '/login').strip()
+
+    # A deployment that only serves finished pieces should not offer a form that queues
+    # an analysis nobody will ever run: no worker is attached there. The broker's own
+    # page is where jobs are submitted.
+    self.read_only = _flag('SERVICE_READ_ONLY', False)
+
+    # Behind a path-stripping reverse proxy (Traefik `stripPrefix`), this is the public
+    # prefix, so the API's own docs and redirects name the right URLs. Empty when the
+    # service is served at the root.
+    self.root_path = os.environ.get('SERVICE_ROOT_PATH', '').strip()
+
   # ------------------------------------------------------------------ paths
 
   @property
@@ -117,8 +137,15 @@ class Settings:
         'analyzer': (ANALYZER_DIR / 'analyzer' / 'align.py').is_file(),
     }
 
+  def gate(self):
+    """The front door, built from these settings. See `auth.py`."""
+    from .auth import Gate
+    return Gate(trust_jwt=self.trust_jwt, allowed_subjects=self.allowed_subjects,
+                upload_token=self.upload_token, broker_login=self.broker_login)
+
   def describe(self) -> dict:
     return {'data_dir': str(self.data_dir), 'database': str(self.database),
+            'read_only': self.read_only, 'root_path': self.root_path,
             'frontend': str(self.frontend_dist),
             'frontend_built': (self.frontend_dist / 'index.html').is_file(),
             'capabilities': self.capabilities()}

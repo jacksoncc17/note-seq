@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 
-import { getJob, getPiece, getStatus, listJobs, listPieces, pageUrl } from './api'
+import { authorisedFetch, getJob, getPiece, getStatus, listJobs, listPieces, pageUrl } from './api'
 
 /** Poll the job list while anything is queued or running, and stop when it is not.
  *  A list that keeps polling every second forever is a list that keeps a laptop's fan on. */
@@ -42,7 +42,7 @@ export function usePage(slug: string, number: number | null) {
     enabled: Boolean(number),
     staleTime: Infinity,
     queryFn: async () => {
-      const response = await fetch(pageUrl(slug, number as number))
+      const response = await authorisedFetch(pageUrl(slug, number as number))
       if (!response.ok) throw new Error(`page ${number} could not be loaded`)
       return response.text()
     },
