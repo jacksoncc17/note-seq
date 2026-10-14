@@ -172,11 +172,16 @@ def test_the_link_artifact_is_a_file_that_says_where_to_go(plugin, settings, tmp
   produced = plugin.run({'first_bar': 40, 'last_bar': 41}, tmp_path / 'work', out,
                         lambda *a: None, staged)
   link = pathlib.Path(next(a['path'] for a in produced if a['kind'] == KIND_LINK))
-  assert link.name == 'open-the-page.txt'
-  text = link.read_text()
-  assert 'http://localhost:8100/pieces/' in text, text
-  assert 'waltz-op-34-no-2-in-a-minor-lento' in text, 'the slug of the score it analysed'
-  assert 'Click a bar' in text
+  # `.uri` is load-bearing: that extension is what makes the worker send
+  # `text/uri-list`, which is how a frontend can tell a link from a download.
+  assert link.name == 'open-the-page.uri'
+  import mimetypes
+  assert mimetypes.guess_type(link.name)[0] == 'text/uri-list'
+  lines = link.read_text().splitlines()
+  assert lines[0] == 'http://localhost:8100/pieces/waltz-op-34-no-2-in-a-minor-lento', lines
+  assert all(line.startswith('#') for line in lines[1:] if line), \
+      'the rest of a uri-list is comments'
+  assert '204 bars' in lines[1]
 
 
 @have_material
@@ -349,7 +354,7 @@ def test_the_reference_worker_runs_it_and_uploads_the_artifacts(plugin, tmp_path
   for upload in broker.uploads:
     assert upload['data'], '%s was uploaded empty' % upload['kind']
     assert upload['mime'] in ('application/json', 'audio/x-wav', 'audio/wav', 'image/png',
-                              'text/plain')
+                              'text/uri-list')
   assert broker.progress_reported, 'progress should reach the broker'
   assert max(pct for pct, _ in broker.progress_reported) <= 95
 

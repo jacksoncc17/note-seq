@@ -1,0 +1,14 @@
+--- ServiceForm.tsx.orig	2026-10-13 22:48:24.238323172 -0400
++++ ServiceForm.tsx	2026-10-13 22:48:24.274323240 -0400
+@@ -44,6 +44,11 @@
+   maxLength?: number
+   minLength?: number
+   format?: string
++  // `accept` is a rendering hint the broker's schema validator carries (see
++  // app/param_schema.py) and ServiceForm reads it below to offer the right file types.
++  // It was missing from this type, so `tsc` failed on the line that uses it -- and the
++  // build script is `tsc && vite build`, so the whole frontend build failed with it.
++  accept?: string
+ }
+ 
+ /** textarea for long strings, so a question is not a one-line box */

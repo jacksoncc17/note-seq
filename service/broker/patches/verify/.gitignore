@@ -1,0 +1,5 @@
+# The verification harness installs a copy of their frontend here. Only the check
+# script is kept: everything else is reproducible (see README.md in this directory).
+frontend/
+node_modules/
+*.tsbuildinfo

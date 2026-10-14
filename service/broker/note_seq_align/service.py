@@ -250,11 +250,17 @@ class NoteSeqAlign:
     #    if it worked.
     viewer = self.publish(analysis, score=score, params=params, url=url)
     if viewer.get('published'):
-      link_path = outdir / 'open-the-page.txt'
+      # The extension is load-bearing: `mimetypes.guess_type('….uri')` is
+      # `text/uri-list`, the standard type for a list of URIs, and the worker sends that
+      # as the artifact's mime. A frontend can then treat "a URI list" as a link rather
+      # than a download without knowing which service produced it -- which is the only
+      # way to get a clickable link out of an artifact model that has no field for one.
+      # The content is a real uri-list too: the URI first, comments after it with `#`.
+      link_path = outdir / 'open-the-page.uri'
       link_path.write_text(
-          'Open this passage in the browser:\n\n  %s\n\n'
-          '%s -- %d bars, %d page(s).\n'
-          'Click a bar to start a passage and a second one to end it, then press play.\n'
+          '%s\n'
+          '# %s -- %d bars, %d page(s).\n'
+          '# Click a bar to start a passage and a second one to end it, then press play.\n'
           % (viewer['url'], viewer.get('title') or analysis.score_meta.get('title') or '',
              viewer.get('bars') or 0, len(analysis.pages)),
           encoding='utf-8')
@@ -375,9 +381,9 @@ class NoteSeqAlign:
     clip.write_bytes(_silent_wav(1.0))
     page = outdir / 'score_page_1.png'
     page.write_bytes(_tiny_png())
-    link = outdir / 'open-the-page.txt'
-    link.write_text('Open this passage in the browser:\n\n  %s/pieces/fake-piece\n'
-                    % self.viewer_url, encoding='utf-8')
+    link = outdir / 'open-the-page.uri'
+    link.write_text('%s/pieces/fake-piece\n# a fake page\n' % self.viewer_url,
+                    encoding='utf-8')
     report = outdir / 'report.json'
     report.write_text(json.dumps({'fake': True, 'first_bar': first, 'last_bar': last},
                                  indent=2))
