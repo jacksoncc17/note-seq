@@ -214,6 +214,16 @@ whole registration: the service appears in their web app's submit form, rendered
 interpreter that has this repository's dependencies, not their worker's Python: the
 plugin imports the analyzer, and the worker itself is deliberately stdlib-only.
 
+**The contract has to satisfy the oldest broker you register with, not the newest.** A
+broker refuses a schema using a keyword it cannot enforce, with a 422 listing what it does
+accept, and the sets differ between revisions: this plugin's `accept` (a rendering hint
+that makes the browser's file picker offer `.musicxml,.xml,.mxl`) is allowed by the
+checkout's validator and *refused* by the deployment at `jinshiming.net`, which predates
+it. So the vocabulary used here is the intersection — the file formats are named in the
+field descriptions instead, which every broker renders as help text — and
+`test_the_schema_only_uses_keywords_an_older_broker_accepts` pins it against that older
+list rather than against the local one.
+
 **Changing the plugin needs the worker restarted, not the app.** Two things make that so,
 and both are their design rather than an accident: their loader imports a plugin once at
 startup, so a running worker holds the old module in memory, and the submit form is built
@@ -329,7 +339,7 @@ scratch directory, into this service's cache, and (unless switched off) into its
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 71 tests, ~100 s
+.venv/bin/python -m pytest service/tests -q          # 73 tests, ~100 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

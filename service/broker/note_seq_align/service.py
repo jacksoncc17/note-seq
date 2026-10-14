@@ -100,16 +100,19 @@ class NoteSeqAlign:
                  'bars highlighted.')
   artifact_kinds = ARTIFACT_KINDS
 
-  # Only the keywords the broker's validator enforces (see its `param_schema.py`), and
-  # deliberately no more: a schema it cannot fully check is refused at registration.
-  # `format`/`accept` are rendering hints the submission form understands.
+  # Only the keywords the broker's validator enforces, and deliberately no more: a
+  # schema it cannot fully check is refused at registration with a 422 listing what it
+  # does accept. That set is not the same everywhere -- the broker deployed at
+  # jinshiming.net predates `accept` (a rendering hint for the file picker), so it is
+  # *not* used here even though a newer broker would allow it. The file formats are
+  # named in the descriptions instead, which every broker renders and none rejects.
+  # `format: "files"` is what makes a field a file field, and it is in both vocabularies.
   param_schema = {
       'type': 'object',
       'properties': {
           'score': {
               'type': 'array',
               'format': 'files',
-              'accept': '.musicxml,.xml,.mxl',
               'minItems': 1,
               'maxItems': 1,
               'title': 'Score (MusicXML)',
@@ -118,10 +121,10 @@ class NoteSeqAlign:
           'recording': {
               'type': 'array',
               'format': 'files',
-              'accept': '.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.wma,.webm',
               'maxItems': 1,
               'title': 'Recording',
-              'description': 'The performance to align. Give this or a YouTube URL.',
+              'description': 'The performance to align: mp3, wav, flac, m4a or ogg. Give '
+                             'this or a YouTube URL.',
           },
           'youtube_url': {
               'type': 'string',

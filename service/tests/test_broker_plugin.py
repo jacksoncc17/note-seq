@@ -549,3 +549,62 @@ def test_the_viewer_url_can_be_configured(monkeypatch, tmp_path):
   finally:
     monkeypatch.undo()
     importlib.reload(service_module)
+
+
+# ---------------------------------------------------------------------------
+# the schema has to be publishable by the OLDEST broker we talk to
+# ---------------------------------------------------------------------------
+
+# What a broker that predates `accept` accepts, copied verbatim from the 422 it answered:
+#
+#   unsupported param_schema: root/properties/score: unsupported schema keyword 'accept'.
+#   Supported: additionalProperties, allOf, anyOf, const, default, description, enum,
+#   exclusiveMaximum, exclusiveMinimum, format, items, maxItems, maxLength, maximum,
+#   minItems, minLength, minimum, oneOf, pattern, properties, required, title, type
+#
+# The local checkout's validator allows `accept` too (it is a rendering hint for the file
+# picker), which is exactly the trap: a schema that registers against the checkout fails
+# to register against a deployment running the older revision. So this list is the one
+# that matters, and a keyword outside it is a bug however new the local broker is.
+OLDEST_BROKER_KEYWORDS = {
+    'additionalProperties', 'allOf', 'anyOf', 'const', 'default', 'description', 'enum',
+    'exclusiveMaximum', 'exclusiveMinimum', 'format', 'items', 'maxItems', 'maxLength',
+    'maximum', 'minItems', 'minLength', 'minimum', 'oneOf', 'pattern', 'properties',
+    'required', 'title', 'type',
+}
+
+
+def _keywords(schema, path='root'):
+  """Every keyword in a schema, at every depth, with where it was found."""
+  found = []
+  if not isinstance(schema, dict):
+    return found
+  for key, value in schema.items():
+    found.append((key, path))
+    if key == 'properties' and isinstance(value, dict):
+      for name, sub in value.items():
+        found.extend(_keywords(sub, '%s/properties/%s' % (path, name)))
+    elif key == 'items':
+      found.extend(_keywords(value, '%s/items' % path))
+    elif key in ('anyOf', 'oneOf', 'allOf') and isinstance(value, list):
+      for index, sub in enumerate(value):
+        found.extend(_keywords(sub, '%s/%s/%d' % (path, key, index)))
+  return found
+
+
+def test_the_schema_only_uses_keywords_an_older_broker_accepts(plugin):
+  """A keyword the broker cannot enforce makes it refuse the whole contract at
+  registration -- which is a worker that publishes nothing and claims nothing."""
+  offenders = [(key, where) for key, where in _keywords(plugin.param_schema)
+               if key not in OLDEST_BROKER_KEYWORDS]
+  assert not offenders, 'the broker would refuse this schema: %s' % offenders
+
+
+def test_the_file_fields_say_what_they_take_in_their_description(plugin):
+  """Since `accept` is unavailable, the formats have to be in the description -- which
+  every broker renders as help text and none rejects."""
+  fields = plugin.param_schema['properties']
+  assert '.musicxml' in fields['score']['description']
+  assert 'wav' in fields['recording']['description']
+  assert fields['score']['format'] == 'files'
+  assert fields['recording']['format'] == 'files'
