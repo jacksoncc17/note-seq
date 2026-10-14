@@ -225,7 +225,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
       return FileResponse(str(audio_path), media_type='audio/wav',
                           filename='%s.wav' % slug)
 
-    from analyzer.server import slice_file
+    from .clips import slice_file
     payload, problem = slice_file(audio_path, max(0.0, start_s), end_s)
     if payload is None:
       raise HTTPException(400, problem or 'that range could not be cut')
@@ -278,24 +278,13 @@ def _wav_response(payload: bytes, slug: str, span) -> Response:
 def range_for_bars(map_dict: Dict[str, Any], first: int, last: int):
   """(start_s, end_s) for bars `first`..`last` inclusive, from the map.
 
-  Reuses the analyzer's own rule through `SyncResult`, materialised from the stored
-  map: a bar played twice by a repeat maps to the *first* pass here, which is the same
-  choice the desktop app makes when you click a bar twice over.
+  Kept as a thin alias so the endpoint reads the same as it always did; the rule itself
+  is in `clips.range_for_bars`, which reimplements the analyzer's `range_for_measures`
+  without needing the analyzer at request time. `test_the_bars_to_seconds_rule_is_the_
+  desktop_apps` checks the two agree.
   """
-  from analyzer.schema import MeasureTime, SyncResult
-  measures = [MeasureTime(measure=int(m['measure']), play_index=int(m.get('play_index') or 0),
-                          start_s=float(m['start_s']), end_s=float(m['end_s']),
-                          confidence=m.get('confidence'))
-              for m in (map_dict.get('measures') or [])]
-  if not measures:
-    return None
-  result = SyncResult(method=map_dict.get('method') or 'dtw', measures=measures,
-                      seconds_per_measure=float(map_dict.get('seconds_per_measure') or 0.0),
-                      audio_duration_s=float(map_dict.get('audio_duration_s') or 0.0),
-                      offset_s=float(map_dict.get('offset_s') or 0.0),
-                      quality=map_dict.get('quality') or {},
-                      warnings=list(map_dict.get('warnings') or []))
-  return result.range_for_measures(int(first), int(last))
+  from .clips import range_for_bars as _range_for_bars
+  return _range_for_bars(map_dict, int(first), int(last))
 
 
 def _job_json(job, brief: bool = False) -> Dict[str, Any]:

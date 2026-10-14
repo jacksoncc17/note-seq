@@ -259,3 +259,53 @@ def test_a_piece_with_no_audio_to_align_is_refused(settings, tmp_path):
   with pytest.raises(PipelineError):
     analyze(settings, tmp_path, {'score': str(empty), 'audio': str(junk)}, lambda *a: None,
             lambda line: None)
+
+
+# ---------------------------------------------------------------------------
+# the serving half, without the analyzer
+# ---------------------------------------------------------------------------
+
+@have_material
+def test_serving_a_piece_needs_no_analyzer(analyzed, monkeypatch):
+  """The page is deployed on its own, in a container that has fastapi, uvicorn,
+  soundfile and numpy and nothing else.
+
+  So rather than asserting that some import is lazy, this makes *every* import of
+  `analyzer` raise and then asks the API for the three things the page asks for: the
+  piece's data, an engraved page, and the clip of a bar range. If anything on that path
+  reaches for the analyzer -- as the clip endpoint did, through `analyzer.server`, and
+  the bar range did, through `analyzer.schema` -- this fails here rather than in a
+  container a deploy too late.
+  """
+  import importlib.abc
+  import sys
+
+  class Blocked(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+      if name == 'analyzer' or name.startswith('analyzer.'):
+        raise ImportError('the analyzer is not installed in a serving-only deployment')
+      return None
+
+  # a module imported by an earlier test would be found in sys.modules and never reach
+  # the finder, which is exactly the hole this test exists to avoid
+  for name in [m for m in list(sys.modules) if m == 'analyzer' or m.startswith('analyzer.')]:
+    monkeypatch.delitem(sys.modules, name)
+  monkeypatch.setattr(sys, 'meta_path', [Blocked()] + list(sys.meta_path))
+
+  client, slug = analyzed['client'], analyzed['slug']
+  piece = client.get('/api/v1/pieces/%s' % slug)
+  assert piece.status_code == 200, piece.text
+  assert len(piece.json()['map']['measures']) == 204
+
+  page = client.get('/api/v1/pieces/%s/pages/1.svg' % slug)
+  assert page.status_code == 200
+  assert page.text.count('class="measure">') == 31
+
+  clip = client.get('/api/v1/pieces/%s/audio' % slug,
+                    params={'first_bar': 40, 'last_bar': 83})
+  assert clip.status_code == 200, clip.text
+  assert len(clip.content) / (22050 * 2.0) == pytest.approx(60.98, abs=0.05)
+  assert float(clip.headers['X-Clip-Start']) == pytest.approx(62.265, abs=0.01)
+
+  # and the listing, which is what the page's front door asks for
+  assert client.get('/api/v1/pieces').status_code == 200

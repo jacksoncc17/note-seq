@@ -336,10 +336,31 @@ person files, so the plugin returns files — and now also leaves the page behin
 files cannot express. The two run independently: the plugin writes into the worker's
 scratch directory, into this service's cache, and (unless switched off) into its pieces.
 
+## Serving on its own (a container without the analyzer)
+
+The page can be deployed somewhere the analysis never runs — a small container behind the
+broker's reverse proxy, say — and that is only possible because the *serving* half needs
+none of the heavy stack. Measured: `create_app()` imports no analyzer, no verovio, no
+librosa, no fluidsynth, and a serving environment is **109 MB over 20 packages**
+(fastapi, uvicorn, python-multipart, soundfile, numpy and their dependencies). The
+analyzer's own stack is another gigabyte on top, and it belongs where the *worker* runs.
+
+Two functions used to be imported from the analyzer at request time — `slice_file` for
+the clip and `SyncResult.range_for_measures` for bars-to-seconds — which would have made
+a slim container serve every page and then fail with an `ImportError` on the audio. Both
+now live in `service/app/clips.py`, and `test_serving_a_piece_needs_no_analyzer` proves
+the point the blunt way: it makes *every* import of `analyzer` raise, then asks the API
+for a piece, an engraved page and a clip of a bar range. Mutation-checked: putting the
+analyzer import back makes it fail.
+
+`AnalyzerConfig`, `measures`, `scoreview` and `align` are still reached for on the
+analysis path (`pipeline.analyse`), which is where they are needed and where the worker
+runs; `SERVICE_EMBEDDED_WORKER=0` keeps the serving container from starting that loop.
+
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 73 tests, ~100 s
+.venv/bin/python -m pytest service/tests -q          # 74 tests, ~100 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists
