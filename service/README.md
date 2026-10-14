@@ -214,6 +214,19 @@ whole registration: the service appears in their web app's submit form, rendered
 interpreter that has this repository's dependencies, not their worker's Python: the
 plugin imports the analyzer, and the worker itself is deliberately stdlib-only.
 
+**Changing the plugin needs the worker restarted, not the app.** Two things make that so,
+and both are their design rather than an accident: their loader imports a plugin once at
+startup, so a running worker holds the old module in memory, and the submit form is built
+from the contract published at that same moment — so a new parameter does not exist in
+the form until the worker publishes again. (Their broker never runs service code at all:
+"the implementation lives in the worker".) Restarting the app does nothing.
+`worker.py --list-services --service note_seq_align` shows what a *fresh* worker would
+load, which is the cheap way to check before restarting anything.
+
+Artifacts behave differently: `store_artifact` upserts per `(job, kind)` and nothing
+removes a kind a job no longer produces, so a job that ran before a change keeps the
+artifacts it uploaded. Only jobs run by the restarted worker show the new set.
+
 **The service is called `note_seq_align` for a reason.** Their loader imports a plugin by
 its directory name, and this repository already contains a package called `note_seq` (the
 melody library `memorization/` uses). A service named `note_seq` would shadow it, or be
