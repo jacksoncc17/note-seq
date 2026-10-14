@@ -62,11 +62,28 @@ KIND_MAP = 'measure_map'
 KIND_AUDIO = 'range_audio'
 KIND_PAGE = 'score_page'
 KIND_REPORT = 'report'
+KIND_LINK = 'page_url'
 
-# Every kind this service can produce. `score_page_2` and up are page numbers: the
-# broker keys an artifact by (job, kind), so two pages of one job need two kinds -- and
-# "score_page_2 · 0.4 MB" reads perfectly well as a download button.
-ARTIFACT_KINDS = (KIND_MAP, KIND_AUDIO, KIND_PAGE, KIND_REPORT)
+# Every kind this service *can* produce, for the service list on the submit page.
+# `score_page_2` and up are page numbers: the broker keys an artifact by (job, kind), so
+# two pages of one job need two kinds -- and "score_page_2 · 0.4 MB" reads well as a
+# download button. Which of them a given job actually uploads is the submitter's choice
+# (see `include`), because the broker's job dashboard lists **every** artifact a job
+# uploads -- there is no hidden flag on an artifact (`ArtifactPublic` is id, kind,
+# filename, mime, bytes, sha256, created_at) -- so the only way not to display something
+# is not to hand it over.
+ARTIFACT_KINDS = (KIND_AUDIO, KIND_LINK, KIND_PAGE, KIND_MAP, KIND_REPORT)
+
+# What a job returns, as the submitter picks it. The default is the result of the work:
+# the passage you asked for, and where to open it. The measure map, the engraved pages
+# and the fit's numbers are how that result was arrived at -- they are all in the piece
+# the page serves, so sending them again mostly clutters the dashboard.
+RESULT_ONLY = 'the passage and its page'
+WITH_PAGES = 'also the engraved score pages'
+WITH_MAP = 'also the measure map (JSON)'
+EVERYTHING = 'everything'
+
+INCLUDES = (RESULT_ONLY, WITH_PAGES, WITH_MAP, EVERYTHING)
 
 
 class NoteSeqError(RuntimeError):
@@ -135,6 +152,16 @@ class NoteSeqAlign:
               'description': 'What to call this piece; defaults to the score\'s own '
                              'title.',
           },
+          'include': {
+              'type': 'string',
+              'enum': list(INCLUDES),
+              'default': RESULT_ONLY,
+              'title': 'Return',
+              'description': 'What to attach to the job. The passage and its page are '
+                             'the result; the pages, the timings and the report are '
+                             'how it was arrived at, and all of them are in the page '
+                             'anyway.',
+          },
       },
       'required': ['score'],
       # Exactly one recording: the broker's validator can say "one of these forms" but
@@ -197,26 +224,14 @@ class NoteSeqAlign:
     map_dict = analysis.result.to_dict()
     report(99.0, 'writing the artifacts')
 
+    include = str(params.get('include') or RESULT_ONLY)
+    want_pages = include in (WITH_PAGES, EVERYTHING)
+    want_map = include in (WITH_MAP, EVERYTHING)
+    want_report = include == EVERYTHING
+
     produced: List[dict] = []
 
-    # 1. the map: what every bar sounds at.
-    map_path = outdir / 'measure_map.json'
-    map_path.write_text(json.dumps({
-        **map_dict,
-        'title': str(params.get('title') or '').strip() or analysis.score_meta.get('title') or score.stem,
-        'composer': analysis.score_meta.get('composer') or '',
-        'score': {'name': score.name},
-        'audio': {'name': audio.name, 'source': 'youtube' if url else 'upload', 'url': url},
-        # The pages come with their measure boxes, in the engraving's own units: a
-        # consumer that has the map and the page image can then put a bar's box on the
-        # page without engraving anything itself. It is what this service's own page does
-        # with `geometry.json`, and it is why the two artifacts pair up.
-        'pages': [page.to_dict() for page in analysis.pages],
-        'warnings': analysis.warnings,
-    }, indent=2, sort_keys=True), encoding='utf-8')
-    produced.append({'kind': KIND_MAP, 'path': map_path})
-
-    # 2. the passage, as audio, when a range was asked for.
+    # 1. the passage, as audio: what the job was for.
     if first is not None and last is not None:
       span = range_for_bars(map_dict, first, last)
       if span is None:
@@ -229,39 +244,82 @@ class NoteSeqAlign:
       clip_path.write_bytes(clip)
       produced.append({'kind': KIND_AUDIO, 'path': clip_path})
 
-    # 3. the engraved page(s), with the passage highlighted.
-    pages = analysis.pages_for_bars(*(first, last)) if first is not None and last is not None \
-        else analysis.pages[:1]
-    if not pages:
-      pages = analysis.pages[:1]
-    for index, page in enumerate(pages):
-      kind = KIND_PAGE if index == 0 else '%s_%d' % (KIND_PAGE, index + 1)
-      png = _page_png(page, first, last)
-      if png is None:
-        continue
-      image_path = outdir / ('score_page_%d.png' % page.number)
-      image_path.write_bytes(png)
-      produced.append({'kind': kind, 'path': image_path})
-
-    # 4. the piece, in the standalone service's store, so the artifacts come with a page
-    #    you can actually listen in. Failing to publish must not fail the job: the
-    #    artifacts are the contract, this is a bonus.
+    # 2. the piece, in the standalone service's store, so a job leaves a page you can
+    #    listen in rather than only files. Failing to publish must not fail the job: the
+    #    artifacts are the contract and this is the result -- but the link is only real
+    #    if it worked.
     viewer = self.publish(analysis, score=score, params=params, url=url)
-
-    # 5. a short report: what was asked for, what came out, and what to distrust.
-    report_path = outdir / 'report.json'
-    report_path.write_text(json.dumps(_report(analysis, first, last, url, produced, viewer),
-                                      indent=2, sort_keys=True), encoding='utf-8')
-    produced.append({'kind': KIND_REPORT, 'path': report_path})
-
     if viewer.get('published'):
-      report(100.0, '%d bars at %.2f s a bar; %d artifact(s); the page is at %s'
-             % (len(map_dict['measures']), analysis.result.seconds_per_measure,
-                len(produced), viewer['url']))
+      link_path = outdir / 'open-the-page.txt'
+      link_path.write_text(
+          'Open this passage in the browser:\n\n  %s\n\n'
+          '%s -- %d bars, %d page(s).\n'
+          'Click a bar to start a passage and a second one to end it, then press play.\n'
+          % (viewer['url'], viewer.get('title') or analysis.score_meta.get('title') or '',
+             viewer.get('bars') or 0, len(analysis.pages)),
+          encoding='utf-8')
+      produced.append({'kind': KIND_LINK, 'path': link_path})
+
+    # 3. the engraved page(s), with the passage highlighted -- on request.
+    if want_pages:
+      pages = analysis.pages_for_bars(*(first, last)) if first is not None and last is not None \
+          else analysis.pages[:1]
+      if not pages:
+        pages = analysis.pages[:1]
+      for index, page in enumerate(pages):
+        kind = KIND_PAGE if index == 0 else '%s_%d' % (KIND_PAGE, index + 1)
+        png = _page_png(page, first, last)
+        if png is None:
+          continue
+        image_path = outdir / ('score_page_%d.png' % page.number)
+        image_path.write_bytes(png)
+        produced.append({'kind': kind, 'path': image_path})
+
+    # 4. the map: what every bar sounds at -- on request. It carries the measure boxes of
+    #    every page too, in the engraving's own units, so a consumer can put a bar on the
+    #    page image without engraving anything itself.
+    if want_map:
+      map_path = outdir / 'measure_map.json'
+      map_path.write_text(json.dumps({
+          **map_dict,
+          'title': str(params.get('title') or '').strip() or analysis.score_meta.get('title') or score.stem,
+          'composer': analysis.score_meta.get('composer') or '',
+          'score': {'name': score.name},
+          'audio': {'name': audio.name, 'source': 'youtube' if url else 'upload', 'url': url},
+          'pages': [page.to_dict() for page in analysis.pages],
+          'warnings': analysis.warnings,
+      }, indent=2, sort_keys=True), encoding='utf-8')
+      produced.append({'kind': KIND_MAP, 'path': map_path})
+
+    # 5. the report: what was asked for, what came out, and what to distrust. Written when
+    #    it was asked for, and also when the page was *tried* and could not be published --
+    #    that is where the reason lives, and a silent missing link is worse than a file
+    #    explaining it. Not when publishing was simply switched off: that is a setting,
+    #    not a fault.
+    if want_report or (viewer.get('attempted') and not viewer.get('published')):
+      report_path = outdir / 'report.json'
+      report_path.write_text(json.dumps(_report(analysis, first, last, url, produced, viewer),
+                                        indent=2, sort_keys=True), encoding='utf-8')
+      produced.append({'kind': KIND_REPORT, 'path': report_path})
+
+    # A worker refuses a job that produced nothing, and it is right to: an empty result is
+    # not a result. With `include` at its leanest this can only happen when there is no
+    # range *and* the page could not be published -- in which case the report is the one
+    # honest thing left to hand back.
+    if not produced:
+      report_path = outdir / 'report.json'
+      report_path.write_text(json.dumps(_report(analysis, first, last, url, produced, viewer),
+                                        indent=2, sort_keys=True), encoding='utf-8')
+      produced.append({'kind': KIND_REPORT, 'path': report_path})
+
+    kinds = ', '.join(a['kind'] for a in produced)
+    if viewer.get('published'):
+      report(100.0, '%d bars at %.2f s a bar; %s; the page is at %s'
+             % (len(map_dict['measures']), analysis.result.seconds_per_measure, kinds,
+                viewer['url']))
     else:
-      report(100.0, '%d bars at %.2f s a bar; %d artifact(s)'
-             % (len(map_dict['measures']), analysis.result.seconds_per_measure,
-                len(produced)))
+      report(100.0, '%d bars at %.2f s a bar; %s'
+             % (len(map_dict['measures']), analysis.result.seconds_per_measure, kinds))
     return produced
 
   def publish(self, analysis, *, score: pathlib.Path, params: Dict[str, Any],
@@ -278,7 +336,8 @@ class NoteSeqAlign:
     artifacts are complete should not fail over a link.
     """
     if not self.viewer_enabled:
-      return {'published': False, 'reason': 'switched off (NOTE_SEQ_VIEWER)'}
+      return {'published': False, 'attempted': False,
+              'reason': 'switched off (NOTE_SEQ_VIEWER)'}
     try:
       settings = self.settings or Settings()
       settings.ensure_dirs()
@@ -287,8 +346,10 @@ class NoteSeqAlign:
           title=str(params.get('title') or '').strip(),
           audio_source_name='', url=url, job_id=str(params.get('job_id') or ''))
     except Exception as e:                     # noqa: BLE001 - see the docstring
-      return {'published': False, 'reason': '%s: %s' % (type(e).__name__, e)}
-    return {'published': True, 'slug': slug, 'url': '%s/pieces/%s' % (self.viewer_url, slug),
+      return {'published': False, 'attempted': True,
+              'reason': '%s: %s' % (type(e).__name__, e)}
+    return {'published': True, 'attempted': True, 'slug': slug,
+            'url': '%s/pieces/%s' % (self.viewer_url, slug),
             'title': meta.get('title') or slug, 'bars': meta.get('bars')}
 
   def fake_run(self, params: Dict[str, Any], workdir: pathlib.Path, outdir: pathlib.Path,
@@ -314,6 +375,9 @@ class NoteSeqAlign:
     clip.write_bytes(_silent_wav(1.0))
     page = outdir / 'score_page_1.png'
     page.write_bytes(_tiny_png())
+    link = outdir / 'open-the-page.txt'
+    link.write_text('Open this passage in the browser:\n\n  %s/pieces/fake-piece\n'
+                    % self.viewer_url, encoding='utf-8')
     report = outdir / 'report.json'
     report.write_text(json.dumps({'fake': True, 'first_bar': first, 'last_bar': last},
                                  indent=2))
@@ -321,6 +385,7 @@ class NoteSeqAlign:
     return [{'kind': KIND_MAP, 'path': map_path},
             {'kind': KIND_AUDIO, 'path': clip},
             {'kind': KIND_PAGE, 'path': page},
+            {'kind': KIND_LINK, 'path': link},
             {'kind': KIND_REPORT, 'path': report}]
 
   # ------------------------------------------------------------------ inputs

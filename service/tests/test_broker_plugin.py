@@ -23,7 +23,9 @@ import sys
 
 import pytest
 
-from note_seq_align.service import NoteSeqError
+from note_seq_align.service import (EVERYTHING, KIND_LINK, KIND_REPORT,
+                                    RESULT_ONLY, WITH_MAP, WITH_PAGES,
+                                    NoteSeqError)
 
 from conftest import RECORDING, SCORE, have_material
 
@@ -103,8 +105,8 @@ def test_the_broker_can_enforce_the_parameter_schema(plugin):
 
 def test_every_declared_kind_is_one_the_plugin_can_produce(plugin):
   """`artifact_kinds` is what the UI shows before anything has run."""
-  assert set(plugin.artifact_kinds) == {'measure_map', 'range_audio', 'score_page',
-                                        'report'}
+  assert set(plugin.artifact_kinds) == {'range_audio', 'page_url', 'score_page',
+                                        'measure_map', 'report'}
   assert plugin.name == 'note_seq_align'
   assert plugin.name == PLUGIN_DIR.joinpath('note_seq_align').name, \
       'the loader requires the service name to be the package name'
@@ -142,11 +144,59 @@ def test_half_a_range_is_refused(plugin, tmp_path):
   assert 'both first_bar and last_bar' in str(caught.value)
 
 
+@have_material
+def test_what_a_job_returns_is_the_submitters_choice(plugin, tmp_path):
+  """The broker's dashboard lists every artifact a job uploads and there is no hidden
+  flag on an artifact, so the way to keep the workings out of it is not to send them."""
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  out = tmp_path / 'out'
+
+  def run(include, name):
+    produced = plugin.run({'first_bar': 40, 'last_bar': 41, 'include': include},
+                          tmp_path / ('work-' + name), out / name, lambda *a: None, staged)
+    return {a['kind'] for a in produced}
+
+  assert run(RESULT_ONLY, 'result') == {'range_audio', 'page_url'}
+  assert run(WITH_PAGES, 'pages') == {'range_audio', 'page_url', 'score_page'}
+  assert run(WITH_MAP, 'map') == {'range_audio', 'page_url', 'measure_map'}
+  assert run(EVERYTHING, 'all') == {'range_audio', 'page_url', 'score_page', 'measure_map',
+                                    'report'}
+  # An unknown value is treated as the default rather than failing a job.
+  assert run('nonsense', 'other') == {'range_audio', 'page_url'}
+
+
+@have_material
+def test_the_link_artifact_is_a_file_that_says_where_to_go(plugin, settings, tmp_path):
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  out = tmp_path / 'out'
+  produced = plugin.run({'first_bar': 40, 'last_bar': 41}, tmp_path / 'work', out,
+                        lambda *a: None, staged)
+  link = pathlib.Path(next(a['path'] for a in produced if a['kind'] == KIND_LINK))
+  assert link.name == 'open-the-page.txt'
+  text = link.read_text()
+  assert 'http://localhost:8100/pieces/' in text, text
+  assert 'waltz-op-34-no-2-in-a-minor-lento' in text, 'the slug of the score it analysed'
+  assert 'Click a bar' in text
+
+
+@have_material
+def test_a_job_always_returns_at_least_one_artifact(plugin, tmp_path):
+  """Their worker refuses a job that produced nothing, and it is right to: an empty
+  result is not a result. With publishing off and no range, the report is what is left."""
+  import note_seq_align
+
+  off = note_seq_align.plugin(settings=plugin.settings, viewer=False)
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  produced = off.run({}, tmp_path / 'work', tmp_path / 'out', lambda *a: None, staged)
+  assert [a['kind'] for a in produced] == [KIND_REPORT]
+  assert all(pathlib.Path(a['path']).is_file() for a in produced)
+
+
 def test_the_fake_run_needs_no_music_at_all(plugin, tmp_path):
   """`--fake-pipeline` is how the queue plumbing is tested; it must not touch audio."""
   produced = plugin.fake_run({}, tmp_path, tmp_path / 'out', lambda *a: None, {})
   kinds = {artifact['kind'] for artifact in produced}
-  assert kinds == {'measure_map', 'range_audio', 'score_page', 'report'}
+  assert kinds == {'measure_map', 'range_audio', 'score_page', KIND_LINK, 'report'}
   for artifact in produced:
     assert pathlib.Path(artifact['path']).is_file()
   assert json.loads(pathlib.Path(produced[0]['path']).read_text())['method'] == 'fake'
@@ -166,16 +216,23 @@ def test_it_produces_the_map_the_clip_and_the_highlighted_page(plugin, tmp_path)
                         tmp_path / 'work', out, lambda pct, msg: messages.append((pct, msg)),
                         staged)
   by_kind = {artifact['kind']: pathlib.Path(artifact['path']) for artifact in produced}
-  # Bars 40-83 span three engraved pages, so three page artifacts: the broker keys an
-  # artifact by (job, kind), and a passage that crosses a page turn has to be visible on
-  # both sides of it.
-  page_kinds = sorted(kind for kind in by_kind if kind.startswith('score_page'))
-  assert page_kinds == ['score_page', 'score_page_2', 'score_page_3'], page_kinds
-  assert set(by_kind) == {'measure_map', 'range_audio', 'report', *page_kinds}
+  # The default is the result of the work -- the passage and where to open it -- not the
+  # workings: the map, the engraved pages and the report are all in the page, and the
+  # broker's dashboard lists every artifact a job uploads.
+  assert set(by_kind) == {'range_audio', 'page_url'}, sorted(by_kind)
   assert all(path.is_file() and path.stat().st_size > 0 for path in by_kind.values())
 
+  # Bars 40-83 span three engraved pages when the pages are asked for: the broker keys an
+  # artifact by (job, kind), and a passage that crosses a page turn has to be visible on
+  # both sides of it.
+  everything = {a['kind'] for a in plugin.run({'first_bar': 40, 'last_bar': 83, 'title': 'Chopin',
+                                               'include': 'everything'},
+                                              tmp_path / 'work2', out / 'everything',
+                                              lambda *a: None, staged)}
+  assert {'score_page', 'score_page_2', 'score_page_3'} <= everything, sorted(everything)
+
   # The map: the analyzer's own numbers, which the desktop app also produces.
-  payload = json.loads(by_kind['measure_map'].read_text())
+  payload = json.loads((out / 'everything' / 'measure_map.json').read_text())
   assert payload['method'] == 'dtw'
   assert len(payload['measures']) == 204
   bar40 = next(m for m in payload['measures'] if m['measure'] == 40)
@@ -201,25 +258,26 @@ def test_it_produces_the_map_the_clip_and_the_highlighted_page(plugin, tmp_path)
   # space -- Verovio's outer SVG is in pixels and the boxes are in viewBox units, so a
   # rectangle placed one level too high lands off the page while the file still has
   # blue in it somewhere.
-  image = by_kind['score_page'].read_bytes()
+  page_png = out / 'everything' / 'score_page_2.png'
+  image = page_png.read_bytes()
   assert image[:8] == b'\x89PNG\r\n\x1a\n'
   page_two = next(page for page in payload['pages'] if page['number'] == 2)
-  assert _tinted_at(by_kind['score_page'], page_two, 40), \
+  assert _tinted_at(page_png, page_two, 40), \
       'the middle of bar 40, which was asked for, should be tinted'
   before = next(box['number'] for box in page_two['measures'] if box['number'] < 40)
-  assert not _tinted_at(by_kind['score_page'], page_two, before), \
+  assert not _tinted_at(page_png, page_two, before), \
       'bar %d is on the same page but outside the passage, and must not be tinted' % before
 
   # And the report says what a person needs to know before trusting it.
-  report = json.loads(by_kind['report'].read_text())
+  report = json.loads((out / 'everything' / 'report.json').read_text())
   assert report['passage'] == {'first_bar': 40, 'last_bar': 83}
   assert report['bars'] == 204
   assert 'clamped' in report['reading']
   # The report lists what the job produced, besides itself: it is written before it
   # exists, and a list that claims a file it might not have written would be worse than
   # one that stops at the others.
-  assert {a['kind'] for a in report['artifacts']} == set(by_kind) - {'report'}
   assert 'measure_map.json' in {a['name'] for a in report['artifacts']}
+  assert {a['kind'] for a in report['artifacts']} == everything - {'report'}
 
   # Progress reached the worker, and never claimed the whole of it.
   assert messages and max(pct for pct, _ in messages) <= 95
@@ -232,7 +290,7 @@ def test_no_range_means_no_clip(plugin, tmp_path):
   produced = plugin.run({}, tmp_path / 'work', tmp_path / 'out', lambda *a: None, staged)
   kinds = {artifact['kind'] for artifact in produced}
   assert 'range_audio' not in kinds, 'a clip only exists if a passage was asked for'
-  assert {'measure_map', 'score_page', 'report'} <= kinds
+  assert kinds == {'page_url'}, sorted(kinds)
 
 
 @have_material
@@ -247,8 +305,8 @@ def test_a_range_the_map_does_not_have_is_an_error(plugin, tmp_path):
 @have_material
 def test_a_range_across_pages_highlights_every_page_it_touches(plugin, tmp_path):
   staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
-  produced = plugin.run({'first_bar': 30, 'last_bar': 40}, tmp_path / 'work',
-                        tmp_path / 'out', lambda *a: None, staged)
+  produced = plugin.run({'first_bar': 30, 'last_bar': 40, 'include': EVERYTHING},
+                        tmp_path / 'work', tmp_path / 'out', lambda *a: None, staged)
   kinds = sorted(a['kind'] for a in produced if a['kind'].startswith('score_page'))
   assert kinds == ['score_page', 'score_page_2'], \
       'bars 30 and 40 are on different pages, so two artifacts'
@@ -286,10 +344,12 @@ def test_the_reference_worker_runs_it_and_uploads_the_artifacts(plugin, tmp_path
   assert broker.completed and broker.completed['success'] is True
 
   kinds = [upload['kind'] for upload in broker.uploads]
-  assert 'measure_map' in kinds and 'range_audio' in kinds and 'score_page' in kinds
+  assert 'range_audio' in kinds and 'page_url' in kinds, kinds
+  assert 'measure_map' not in kinds, 'the workings are not what the dashboard should list'
   for upload in broker.uploads:
     assert upload['data'], '%s was uploaded empty' % upload['kind']
-    assert upload['mime'] in ('application/json', 'audio/x-wav', 'audio/wav', 'image/png')
+    assert upload['mime'] in ('application/json', 'audio/x-wav', 'audio/wav', 'image/png',
+                              'text/plain')
   assert broker.progress_reported, 'progress should reach the broker'
   assert max(pct for pct, _ in broker.progress_reported) <= 95
 
@@ -404,11 +464,11 @@ def test_a_job_publishes_a_piece_its_own_page_can_serve(plugin, settings, tmp_pa
   out = tmp_path / 'out'
   produced = plugin.run({'first_bar': 40, 'last_bar': 83, 'title': 'Chopin, from the broker'},
                         tmp_path / 'work', out, lambda *a: None, staged)
-  report = json.loads((out / 'report.json').read_text())
-  assert report['viewer']['published'] is True, report['viewer']
-  slug = report['viewer']['slug']
+  link = next(a for a in produced if a['kind'] == KIND_LINK)
+  assert 'http://localhost:8100/pieces/' in pathlib.Path(link['path']).read_text()
+  slug = pathlib.Path(link['path']).read_text().split('/pieces/')[1].split()[0].strip()
   assert slug == 'chopin-from-the-broker'
-  assert report['viewer']['url'].endswith('/pieces/%s' % slug)
+  assert slug == 'chopin-from-the-broker'
 
   # The piece is on disk, and the API serves it exactly as it serves its own.
   assert (settings.piece_dir(slug) / 'map.json').is_file()
@@ -442,11 +502,11 @@ def test_the_switch_turns_the_page_off_and_the_job_still_works(plugin, settings,
   out = tmp_path / 'out'
   produced = off.run({'first_bar': 40, 'last_bar': 41}, tmp_path / 'work', out,
                      lambda *a: None, staged)
-  report = json.loads((out / 'report.json').read_text())
-  assert report['viewer']['published'] is False
-  assert 'NOTE_SEQ_VIEWER' in report['viewer']['reason']
-  assert {a['kind'] for a in produced} >= {'measure_map', 'range_audio', 'score_page'}
-  assert not (settings.piece_dir('chopin-waltz-in-a-minor-op-34-no-2')).exists()
+  assert {a['kind'] for a in produced} == {'range_audio'}
+  assert not list(settings.pieces_dir.glob('*')), 'nothing was published'
+  assert not (out / 'report.json').exists(), \
+      'switching it off is a setting, not a fault, so nothing needs explaining'
+  assert not (out / 'open-the-page.txt').exists(), 'and there is no link to hand out'
 
 
 @have_material
@@ -465,7 +525,8 @@ def test_publishing_that_fails_does_not_fail_the_job(plugin, settings, tmp_path,
   report = json.loads((out / 'report.json').read_text())
   assert report['viewer']['published'] is False
   assert 'read-only file system' in report['viewer']['reason']
-  assert {a['kind'] for a in produced} >= {'measure_map', 'score_page', 'report'}
+  assert {a['kind'] for a in produced} == {'report'}, \
+      'the report is the only honest thing left, and a job must not return nothing'
   for artifact in produced:
     assert pathlib.Path(artifact['path']).is_file()
 

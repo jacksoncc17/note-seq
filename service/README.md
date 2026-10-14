@@ -220,17 +220,45 @@ melody library `memorization/` uses). A service named `note_seq` would shadow it
 shadowed by it, depending on `sys.path` order — and the failure reads as "no plugin
 found", which says nothing about the cause.
 
-### What one job produces
+### What one job returns, and who decides
 
-Measured on the Chopin waltz (204 bars, 309.7 s of audio): **8.6 s**, six artifacts,
-3.36 MB.
+Measured on the Chopin waltz (204 bars, 309.7 s of audio): **8.6 s**.
+
+The default is the *result*, not the workings:
 
 | artifact kind | file | measured |
 |---|---|---|
-| `measure_map` | `measure_map.json` (77.7 KB) | every bar with its start and end, the per-bar confidence, the fit's own numbers, **and the measure boxes of all nine pages** — so a consumer can pair the map with the page image without engraving anything |
 | `range_audio` | `bars_40-83.wav` (2.63 MB) | 60.98 s: the passage plus the same 0.12 s run-in and 0.25 s run-out the desktop app plays it with |
-| `score_page`, `score_page_2`, … | `score_page_2.png` (237 KB) | 1260×1382 px, one per page the passage touches, with the selected bars washed in colour |
-| `report` | `report.json` (1.7 KB) | what to distrust: `"20 bars had to be clamped: the fit was erratic there, so their times are a plausible guess rather than a measurement."` |
+| `page_url` | `open-the-page.txt` (0.3 KB) | where to open it: `http://localhost:8100/pieces/…`, with a line on how to use it |
+
+The `include` field on the submission form adds the rest, because they are how the
+result was arrived at rather than the result:
+
+| choice | adds |
+|---|---|
+| `the passage and its page` (default) | — |
+| `also the engraved score pages` | `score_page`, `score_page_2`, … — 1260×1382 px, one per page the passage touches, with the selected bars washed in colour |
+| `also the measure map (JSON)` | `measure_map.json` (77.7 KB): every bar with its start and end, the per-bar confidence, the fit's own numbers, and the measure boxes of all nine pages |
+| `everything` | both, plus `report.json` (1.7 KB): `"20 bars had to be clamped: the fit was erratic there, so their times are a plausible guess rather than a measurement."` |
+
+**This is a display decision, forced by their model.** The broker's job dashboard lists
+*every* artifact a job uploads, and an artifact has no visibility flag — `ArtifactPublic`
+is `id, kind, filename, mime_type, bytes, sha256, created_at` (and `ARTIFACT_KINDS` in
+`models_jobs.py` is a dead tuple, referenced nowhere). So the only way for something not
+to appear in the dashboard is not to hand it over. Nothing is lost by that: the map, the
+geometry, the engraved pages and the quality warnings are all in the piece the page
+serves, which is where you go to look at them anyway.
+
+Two consequences of the lean default, both deliberate:
+
+* **A job always returns at least one artifact**, because a worker refuses a job that
+  produced nothing (an empty result is not a result). With `include` at its leanest that
+  can only be reached when there is no bar range *and* the page could not be published —
+  and then the report is the one honest thing left, so it goes out.
+* **If publishing was attempted and failed, the report always goes out**, because that is
+  where the reason is; a silently missing link would be worse than a file explaining it.
+  Switching publishing off (`NOTE_SEQ_VIEWER=0`) is a setting rather than a fault, so it
+  explains nothing and writes nothing.
 
 The wash is drawn *into* the SVG before rasterising, at the box the engraving itself
 reported — the same boxes the browser puts its click targets on. Where it lands is
@@ -288,7 +316,7 @@ scratch directory, into this service's cache, and (unless switched off) into its
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 68 tests, ~55 s
+.venv/bin/python -m pytest service/tests -q          # 71 tests, ~100 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists
