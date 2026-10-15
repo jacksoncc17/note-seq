@@ -12,9 +12,10 @@ So three ways in, and which ones apply is configuration:
   `SERVICE_ALLOWED_SUBJECTS` restricts it to particular user ids, because a broker token
   carries only `sub` and `exp` -- no roles -- so without that list *any* signed-in user
   could read every piece. (Find your id with `GET /api/v1/users/me` on the broker.)
-* **a shared upload token** -- `SERVICE_UPLOAD_TOKEN`, for the worker on the LAN, which
-  has no user token and needs to publish a finished piece. It is compared in constant
-  time and only unlocks the upload endpoint, never the pages.
+* **an upload token** -- `SERVICE_UPLOAD_TOKEN`, for the workers that publish finished
+  pieces (`PUT /api/v1/pieces/{slug}`). It is compared in constant time and unlocks the
+  publish endpoint only, never the pages. Comma-separate it to give each publishing machine
+  its own, so one can be revoked without rotating everybody's secret.
 * **nothing** -- the default. A service on loopback for one person needs no gate, and
   adding one silently would be a surprising way to lock somebody out of their own tool.
 
@@ -36,6 +37,12 @@ from fastapi import HTTPException, Request
 # Bearer header, exactly as the broker's own client does (frontend/src/hooks/useAuth.ts).
 AUTH_HEADER = 'Authorization'
 BEARER = 'bearer '
+
+# A worker may also name its token explicitly. Both are accepted because the bearer header
+# is shared with the broker's user tokens, and a publisher that sends the wrong kind of
+# credential into that header is a confusing 401 to debug -- an upload with this header
+# says what it is.
+UPLOAD_HEADER = 'X-Upload-Token'
 
 
 def credentials_from(request: Request) -> Optional[str]:
@@ -82,7 +89,10 @@ class Gate:
                upload_token: str = '', broker_login: str = '/login'):
     self.trust_jwt = (trust_jwt or '').strip()
     self.allowed = {s.strip() for s in (allowed_subjects or '').split(',') if s.strip()}
-    self.upload_token = (upload_token or '').strip()
+    # A list, comma-separated, because the alternative to "one shared token" should not be
+    # "a table of workers": one token per publishing machine is revocable by editing a
+    # variable, and costs nothing to keep. One entry is the common case.
+    self.upload_tokens = [t.strip() for t in (upload_token or '').split(',') if t.strip()]
     # Where to send a browser whose token is missing or expired. Relative, because the
     # page is served on the broker's own origin -- a ../login keeps working whatever the
     # host is, and a subdomain deployment can override it.
@@ -108,7 +118,40 @@ class Gate:
     return verify_token(token, self.trust_jwt, self.allowed or None)
 
   def accepts_upload(self, token: Optional[str]) -> bool:
-    """Is this the worker's upload token? Compared without an early exit."""
-    if not self.upload_token:
+    """Is this one of the worker's upload tokens? Compared without an early exit.
+
+    Every configured token is compared even after a match, because the time this takes
+    should not depend on which token was right -- the same reason the comparison itself is
+    `compare_digest` rather than `==`.
+    """
+    if not self.upload_tokens or not token:
       return False
-    return hmac.compare_digest(self.upload_token, token or '')
+    matched = False
+    for candidate in self.upload_tokens:
+      if hmac.compare_digest(candidate, token):
+        matched = True
+    return matched
+
+  def require_writer(self, request: Request) -> Optional[Dict[str, Any]]:
+    """FastAPI dependency for publishing a piece: an upload token, or a signed-in user.
+
+    Reading is not writing, so this is deliberately a different door from
+    `require_user` -- and it is the one place where an upload token is accepted at all.
+    Which of the three arrangements applies depends on what is configured:
+
+    * an upload token that matches -- the worker on the LAN, which has no user token;
+    * `SERVICE_TRUST_JWT` set -- a broker token is required as well, so a human can
+      publish from the page or with `curl` and an anonymous caller cannot;
+    * an upload token set but no broker trust -- a token is still required, because
+      configuring one is a statement that publishing is not open;
+    * nothing configured at all -- open, like every other endpoint on loopback.
+    """
+    token = request.headers.get(UPLOAD_HEADER) or credentials_from(request)
+    if self.accepts_upload(token):
+      return {'sub': 'upload-token', 'via': 'upload-token'}
+    if self.enabled:
+      return self.require_user(request)
+    if self.upload_tokens:
+      raise HTTPException(401, 'a token is needed to publish a piece here',
+                          headers={'WWW-Authenticate': 'Bearer'})
+    return None

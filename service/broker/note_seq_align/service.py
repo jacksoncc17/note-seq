@@ -38,7 +38,7 @@ for _path in (str(REPO), str(REPO / 'analyzer')):
 
 from service.app.config import Settings                   # noqa: E402
 from service.app.pipeline import (Progress, analyse, audio_path,        # noqa: E402
-                                  publish_piece)
+                                  publish_piece, publish_remote)
 
 # The passage a range is cut with, in seconds, either side: the same run-in and run-out
 # the desktop app uses, because starting exactly on the downbeat clips the piano's
@@ -56,7 +56,8 @@ HIGHLIGHT_OPACITY = 0.18
 # Where this service's own page is, for the link a job hands back. The default is the
 # port `service/run.sh` serves on; the deployment that runs a broker worker may well be
 # somewhere else, so it is configurable.
-VIEWER_URL = os.environ.get('NOTE_SEQ_VIEWER_URL', 'http://localhost:8100').rstrip('/')
+DEFAULT_VIEWER_URL = 'http://localhost:8100'
+VIEWER_URL = os.environ.get('NOTE_SEQ_VIEWER_URL', DEFAULT_VIEWER_URL).rstrip('/')
 
 KIND_MAP = 'measure_map'
 KIND_AUDIO = 'range_audio'
@@ -350,16 +351,32 @@ class NoteSeqAlign:
     try:
       settings = self.settings or Settings()
       settings.ensure_dirs()
+      # Where the page is and where a piece is *sent* are the same page, so an unset
+      # `SERVICE_PUBLISH_URL` follows `NOTE_SEQ_VIEWER_URL` rather than leaving the link
+      # pointing at a page the piece never reaches -- which is exactly what happened the
+      # first time this ran against a deployment: the link said jinshiming.net and the
+      # piece was written to the local store, so the link 404'd.
+      #
+      # The exception is the default: on loopback the two are the same service, and
+      # pushing a piece to the store it was just written to would spend 16 MB of traffic
+      # to replace a piece with itself.
+      if not settings.publish_url and self.viewer_url != DEFAULT_VIEWER_URL:
+        settings.publish_url = self.viewer_url
       slug, meta = publish_piece(
           settings, analysis, score=score,
           title=str(params.get('title') or '').strip(),
           audio_source_name='', url=url, job_id=str(params.get('job_id') or ''))
+      delivery = publish_remote(settings, slug, log=lambda m: print('  note-seq: %s' % m))
     except Exception as e:                     # noqa: BLE001 - see the docstring
       return {'published': False, 'attempted': True,
               'reason': '%s: %s' % (type(e).__name__, e)}
     return {'published': True, 'attempted': True, 'slug': slug,
             'url': '%s/pieces/%s' % (self.viewer_url, slug),
-            'title': meta.get('title') or slug, 'bars': meta.get('bars')}
+            'title': meta.get('title') or slug, 'bars': meta.get('bars'),
+            # Where the piece itself got to: this machine's store always, and the page
+            # that serves it if `SERVICE_PUBLISH_URL` is set -- `queued` means the send
+            # failed and the outbox will retry, so the link is still worth handing back.
+            'delivery': delivery}
 
   def fake_run(self, params: Dict[str, Any], workdir: pathlib.Path, outdir: pathlib.Path,
                progress, inputs=None) -> List[dict]:

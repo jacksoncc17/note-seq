@@ -85,6 +85,21 @@ class Settings:
     # page is where jobs are submitted.
     self.read_only = _flag('SERVICE_READ_ONLY', False)
 
+    # Publishing a piece to the page that serves it: where to send it, and what to send
+    # with. This is the *outbox* side, so it belongs to the machine that analyses -- a
+    # serving deployment leaves `SERVICE_PUBLISH_URL` empty and never pushes anything.
+    # When it is empty nothing is queued, so the default is exactly the old behaviour.
+    self.publish_url = os.environ.get('SERVICE_PUBLISH_URL', '').strip().rstrip('/')
+    self.publish_token = (os.environ.get('SERVICE_PUBLISH_TOKEN', '').strip()
+                          or self.upload_token)
+    self.publish_timeout_s = float(os.environ.get('SERVICE_PUBLISH_TIMEOUT_S', 120))
+
+    # The other direction: does this service accept pieces from a worker? On for a
+    # deployment whose whole job is to serve them, and the switch is here for a mirror
+    # that should stay exactly as it is.
+    self.accept_pieces = _flag('SERVICE_ACCEPT_PIECES', True)
+    self.max_piece_mb = float(os.environ.get('SERVICE_MAX_PIECE_MB', 64))
+
     # Behind a path-stripping reverse proxy (Traefik `stripPrefix`), this is the public
     # prefix, so the API's own docs and redirects name the right URLs. Empty when the
     # service is served at the root.
@@ -99,6 +114,11 @@ class Settings:
   @property
   def pieces_dir(self) -> pathlib.Path:
     return self.data_dir / 'pieces'
+
+  @property
+  def outbox_dir(self) -> pathlib.Path:
+    """Pieces analysed here that their page has not accepted yet. See `outbox.py`."""
+    return self.data_dir / 'outbox'
 
   def job_dir(self, job_id: str) -> pathlib.Path:
     return self.jobs_dir / job_id
@@ -146,6 +166,8 @@ class Settings:
   def describe(self) -> dict:
     return {'data_dir': str(self.data_dir), 'database': str(self.database),
             'read_only': self.read_only, 'root_path': self.root_path,
+            'accept_pieces': self.accept_pieces,
+            'publish_url': self.publish_url or None,
             'frontend': str(self.frontend_dist),
             'frontend_built': (self.frontend_dist / 'index.html').is_file(),
             'capabilities': self.capabilities()}

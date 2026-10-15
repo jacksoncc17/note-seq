@@ -32,8 +32,10 @@ import time
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, Optional
 
+from . import outbox
 from .config import REPO_ROOT, Settings, analyzer_importable
 from .pieces import PieceStore, fingerprint, slugify
+from .uploads import PackageError, pack_piece, package_url
 
 # Where each step sits in the progress bar. The alignment is the slow part by a wide
 # margin -- tens of seconds against a couple for everything else -- so it owns most of
@@ -126,8 +128,9 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
       url=url, job_id=params.get('job_id') or '')
   log('stored as %s: %d page(s), %d bars, %.1f s of audio'
       % (slug, meta['pages'], meta['bars'], meta['duration_s']))
+  delivery = publish_remote(settings, slug, log=log)
   step(100.0, 'done')
-  return {'slug': slug, 'meta': meta}
+  return {'slug': slug, 'meta': meta, 'delivery': delivery}
 
 
 def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
@@ -172,6 +175,63 @@ def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
   store.write(slug, score=score, reference_midi=analysis.reference_midi, audio=audio,
               map_dict=result.to_dict(), geometry=geometry, pages=pages, meta=meta)
   return slug, meta
+
+
+# How many *older* pieces one job will try to deliver. A backlog is drained as jobs run,
+# and a job that pushed twenty pieces would spend its lease on the network; the rest wait
+# for the next job, or for `python -m service.app.publish`.
+BACKLOG_PER_JOB = 3
+
+
+def publish_remote(settings: Settings, slug: str,
+                   log: Callable[[str], None] = lambda _m: None) -> Dict[str, Any]:
+  """Hand a finished piece to the page that serves it, through the outbox.
+
+  Both front doors call this after writing locally -- this service's own job and the
+  broker plugin -- so there is one delivery path to reason about, one place where
+  `SERVICE_PUBLISH_URL` is read, and one behaviour to test.
+
+  The order is deliberate: **write the marker first, then send.** A job killed between
+  the two leaves a piece that is queued and unsent, which the next job or
+  `python -m service.app.publish` picks up. The other order would lose it silently, which is
+  the failure this outbox exists to prevent.
+
+  Returns a dict for the report: `configured=False` when nothing is configured (the
+  default, and the previous behaviour), otherwise whether it went -- and why not, if it
+  did not.
+  """
+  if not settings.publish_url:
+    return {'configured': False,
+            'reason': 'no SERVICE_PUBLISH_URL, so this piece stays on this machine'}
+
+  store = PieceStore(settings)
+  try:
+    payload = pack_piece(store.directory(slug))
+  except PackageError as e:
+    return {'configured': True, 'sent': False, 'queued': False,
+            'reason': 'the piece could not be packaged: %s' % e}
+
+  marker = outbox.enqueue(settings, slug, payload, url=settings.publish_url)
+  entry = outbox.read_marker(marker) or {'slug': slug, 'url': settings.publish_url,
+                                         'marker': str(marker)}
+  outcome = outbox.push(settings, entry, timeout=settings.publish_timeout_s)
+  if outcome.get('ok'):
+    log('sent %s (%.1f MB) to %s' % (slug, outcome['bytes'] / 1e6, settings.publish_url))
+  else:
+    log('could not send %s yet; it stays queued: %s' % (slug, outcome.get('reason')))
+
+  # Then whatever else is waiting, oldest first: a page that was down for an hour is
+  # caught up by the jobs that follow, without anyone remembering to run anything.
+  for other in outbox.drain(settings, limit=BACKLOG_PER_JOB, skip={slug},
+                            timeout=settings.publish_timeout_s, log=log):
+    if not other.get('ok'):
+      break                    # the same network is in the way; do not spend the job on it
+
+  return {'configured': True, 'sent': bool(outcome.get('ok')),
+          'queued': not outcome.get('ok'),
+          'url': package_url(settings.publish_url, slug),
+          'pending': outbox.count(settings),
+          'reason': outcome.get('reason', '')}
 
 
 def analysis_config(settings: Settings):

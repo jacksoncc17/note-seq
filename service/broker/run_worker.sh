@@ -59,6 +59,18 @@ printf '    broker     %s\n' "${BROKER_URL:-<not set: worker.py defaults to http
 printf '    name       %s\n' "$NAME"
 printf '    key        %s\n' "$([ -n "${WORKER_KEY:-}" ] && echo 'set' || echo '<not set>')"
 printf '    page link  %s\n' "$VIEWER"
+# Where a finished piece is *sent*: the same page as the link, unless it is overridden.
+# Printing which of the two applies is what makes the failure visible in advance -- the one
+# where the link names a deployment and the piece stays on this machine.
+if [ -n "${SERVICE_PUBLISH_URL:-}" ]; then
+  printf '    publishing %s\n' "$SERVICE_PUBLISH_URL"
+elif [ "$VIEWER" != 'http://localhost:8100' ]; then
+  printf '    publishing %s (following the page link)\n' "$VIEWER"
+else
+  printf '    publishing %s\n' '<nowhere: set SERVICE_PUBLISH_URL or NOTE_SEQ_VIEWER_URL>'
+fi
+printf '    token      %s\n' "$([ -n "${SERVICE_PUBLISH_TOKEN:-}${SERVICE_UPLOAD_TOKEN:-}" ] \
+  && echo 'set' || echo '<not set>')"
 echo
 
 # BROKER_URL and WORKER_KEY are read by worker.py from the environment, so they can be

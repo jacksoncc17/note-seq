@@ -52,7 +52,16 @@ services:
       # actually uses.
       SERVICE_ROOT_PATH: /note-seq
       SERVICE_DATA: /data
-      # Optional. `/note-seq/login` is the default; set this if the broker's sign-in page
+      # The other half of the piece upload: this is the token the worker on the LAN sends
+      # with `PUT /api/v1/pieces/{slug}`. It must match that worker's
+      # `SERVICE_PUBLISH_TOKEN` (or `SERVICE_UPLOAD_TOKEN`, which is the same secret from
+      # the other end of the wire), and it is compared in constant time. Comma-separate to
+      # give each publishing machine its own, so one can be revoked without rotating the
+      # rest. Without it, and without SERVICE_TRUST_JWT, publishing is open -- right on
+      # loopback, wrong here. Required rather than defaulted: a default would be a
+      # published token, and compose says so at startup if it is missing.
+      SERVICE_UPLOAD_TOKEN: ${NOTE_SEQ_UPLOAD_TOKEN:?Set NOTE_SEQ_UPLOAD_TOKEN in .env (see service/README.md; the LAN worker sends it as SERVICE_PUBLISH_TOKEN)}
+      # Optional `/note-seq/login` is the default; set this if the broker's sign-in page
       # is somewhere else, or the page sends a browser there when its token is missing.
       # SERVICE_BROKER_LOGIN: /login
     volumes:

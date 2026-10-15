@@ -173,6 +173,74 @@ class PieceStore:
     shutil.rmtree(target)
     return True
 
+  def staging_path(self, slug: str) -> pathlib.Path:
+    """Where a piece is assembled before it is moved into place.
+
+    Same name `write` uses, so an interrupted upload leaves the same kind of debris as an
+    interrupted analysis -- and `swab()` below can clear either.
+    """
+    return self.settings.pieces_dir / (slug + '.building')
+
+  def install(self, slug: str, staging: pathlib.Path) -> pathlib.Path:
+    """Move an assembled directory into place, replacing whatever was there.
+
+    This is the other half of the piece-package upload (`uploads.py`): a worker sends the
+    files, the API unpacks them into `staging_path(slug)`, and this swaps them in with the
+    same two renames `write` uses. The page keeps serving the old piece until the new one
+    is complete, and a crash in between leaves `.previous` behind rather than a piece that
+    is half one analysis and half another.
+    """
+    staging = pathlib.Path(staging)
+    if not (staging / 'meta.json').is_file():
+      raise PieceError('nothing staged at %s' % staging)
+    target = self.directory(slug)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+      previous = target.parent / (slug + '.previous')
+      if previous.exists():
+        shutil.rmtree(previous)
+      target.rename(previous)
+      staging.rename(target)
+      shutil.rmtree(previous, ignore_errors=True)
+    else:
+      staging.rename(target)
+    return target
+
+  def swab(self) -> List[str]:
+    """Finish or clear what a killed process left behind.
+
+    Both kinds of debris come from the two-rename swap used by `write` and `install`:
+
+    * `<slug>.building` -- an assembly that never completed. Removed; the piece it was
+      replacing, if any, is still in place.
+    * `<slug>.previous` -- the piece that was replaced, normally deleted immediately after
+      the swap. If a crash landed between the two renames the target is *missing* and this
+      is the only complete copy left, so it is moved back rather than thrown away.
+
+    Called once at startup rather than on a timer: these directories only appear when a
+    process died mid-write, and a service that starts on top of one fills a disk quietly.
+    """
+    root = self.settings.pieces_dir
+    removed: List[str] = []
+    if not root.is_dir():
+      return removed
+    for path in sorted(root.iterdir()):
+      if not path.is_dir():
+        continue
+      if path.name.endswith('.building'):
+        shutil.rmtree(path, ignore_errors=True)
+        removed.append(path.name)
+      elif path.name.endswith('.previous'):
+        slug = path.name[:-len('.previous')]
+        target = self.directory(slug)
+        if (path / 'meta.json').is_file() and not (target / 'meta.json').is_file():
+          path.rename(target)
+          removed.append('%s -> restored as %s' % (path.name, slug))
+        else:
+          shutil.rmtree(path, ignore_errors=True)
+          removed.append(path.name)
+    return removed
+
 
 def _read_json(path: pathlib.Path) -> Optional[Dict[str, Any]]:
   if not path.is_file():

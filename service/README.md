@@ -434,29 +434,65 @@ service open, which is right for loopback. `SERVICE_ALLOWED_SUBJECTS` can restri
 particular accounts, and `SERVICE_BROKER_LOGIN` (default `/login`) is where a browser
 without a token is sent.
 
-**Not built yet:** pieces reach the droplet by hand. The worker on the LAN is what
-analyses, and the overlay has no path for it to publish into: there is no
-`POST /api/v1/pieces` for a worker to upload a finished piece to, and no setting in the
-plugin for where to send it. Until that exists, copy them:
+## Getting a finished piece to the page
 
-```bash
-rsync -a service/data/pieces/ droplet:~/note-seq-pieces/
-# Compose prefixes the volume with the project directory's name, so it is not just
-# `note-seq-data`; the first line says what it is actually called there.
-docker volume ls | grep note-seq-data
-docker run --rm -v full-stack-fastapi-template_note-seq-data:/data \
-  -v ~/note-seq-pieces:/in alpine \
-  sh -c 'mkdir -p /data/pieces && cp -a /in/. /data/pieces/'
-```
+The job runs where the analyzer is, and the page is served from somewhere else, so a piece
+has to cross. It does that as one file: `PUT /api/v1/pieces/{slug}`, whose body is a zip of
+exactly what the page reads -- `meta.json`, `map.json`, `geometry.json`, `audio.wav` and
+`pages/NNNN.svg`. The score is *not* in it: serving never reads MusicXML, the engraving
+already happened, and re-analysing is the worker's job. That is ~16 MB per piece, nearly all
+of it the recording.
 
-That is the next piece of work, and it is a small one: the worker already knows the slug it
-computed (`app/pieces.py` claims it from the score's SHA-256), so the endpoint takes an
-upload and writes it under that name, with no analyzer on the serving side at all.
+**Why a `PUT`, and why an outbox.** The hop is the one part of this system that can fail for
+reasons nobody controls, so it is a queue rather than a step in the job:
+
+* the plugin writes the piece locally and drops a marker (`data/outbox/<slug>.json`) **before**
+  it tries to send it, so a job killed mid-send leaves a queued piece and never a lost one;
+* the send is then attempted immediately, and anything that did not get through stays marked;
+* the next job drains up to three older pieces on its way past, so a page that was down for an
+  hour catches up on its own;
+* `python -m service.app.publish` does it without waiting for a job (`--status`, `--watch`,
+  `--to <service root>`), and `/api/v1/status` reports `outbox: N` -- which is also what the
+  page shows in its header when there is a backlog.
+
+Sending is idempotent by construction, which is what makes retrying safe: the same package
+twice leaves the same piece, and the swap into place is two renames, so the page keeps
+serving the old piece until the new one is complete.
+
+What is *not* in a marker: the token. A marker is a file on a disk; the token is a capability
+to publish to your site, so it is read from the environment at send time.
+
+**Configuration**, on the machine that analyses:
+
+| setting | what it is |
+| --- | --- |
+| `SERVICE_PUBLISH_URL` | the page to send to, as a *service root* -- `https://example.com/note-seq`. The same value as `NOTE_SEQ_VIEWER_URL`, and if it is unset the plugin follows that variable, so the link and the piece cannot drift apart (they did, once: the link said the droplet and the piece was written locally, so every link 404'd) |
+| `SERVICE_PUBLISH_TOKEN` | what to send as. Falls back to `SERVICE_UPLOAD_TOKEN`, which is the same secret from the other end of the wire |
+| `SERVICE_UPLOAD_TOKEN` | on the *serving* side: which tokens may publish. Comma-separated, so each machine can have its own and one can be revoked without rotating the rest. A signed-in user's broker token is also accepted, which is what makes `curl` enough |
+
+On the serving side, `SERVICE_ACCEPT_PIECES=0` refuses uploads (405) for a mirror that
+should stay as it is, and `SERVICE_MAX_PIECE_MB` (default 64) caps the body. Note that this
+works in a `SERVICE_READ_ONLY=1` deployment on purpose: read-only is about the queue, and a
+deployment whose whole job is to serve pieces must be able to receive them.
+
+What is checked before anything is written, because an uploaded archive is a list of names
+chosen by somebody else: the slug must match `^[a-z0-9][a-z0-9-]{0,63}$` (validated, not
+slugified -- `slugify` lives in the analyzer, and this endpoint must not need it), every
+member must be one of the five names above, `..` and absolute paths are refused, and the
+declared uncompressed size is checked before anything is inflated. A rejected package leaves
+no partial piece behind.
+
+Measured end to end, against the container serving on loopback: a piece queued against a port
+with nothing listening stayed marked with `attempts 1` and `Connection refused`; `--status`
+printed it and exited 1; the same piece then delivered with `--to` and the token (`1 sent, 0
+still waiting`, exit 0); the page reported `pieces 1`; and the clip for bars 1-18 from the
+uploaded copy hashes **identically** (`242cfca44450d74f…`) to the clip from the machine that
+analysed it.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 88 tests, ~110 s
+.venv/bin/python -m pytest service/tests -q          # 109 tests, ~110 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

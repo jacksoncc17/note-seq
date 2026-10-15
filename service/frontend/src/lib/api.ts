@@ -97,6 +97,9 @@ export type ServiceStatus = {
   version: string
   jobs: Record<JobStatus, number>
   pieces: number
+  /** Pieces analysed here that the page serving them has not accepted yet. Zero on a
+   *  serving deployment; on the machine that analyses, this is the number to watch. */
+  outbox?: number
   data_dir: string
   database: string
   frontend_built: boolean

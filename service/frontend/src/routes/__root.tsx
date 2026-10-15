@@ -45,6 +45,14 @@ function Layout() {
             <span className="text-xs text-stone-400" title={status.data.data_dir}>
               {status.data.pieces} piece{status.data.pieces === 1 ? '' : 's'} ·{' '}
               {status.data.jobs.done} analysed
+              {/* A piece that has not reached the page serving it. Shown only when there
+                  is something waiting, because on a serving deployment it never is. */}
+              {Boolean(status.data.outbox) && (
+                <span className="text-amber-700">
+                  {' '}
+                  · {status.data.outbox} waiting to publish
+                </span>
+              )}
             </span>
           )}
         </div>

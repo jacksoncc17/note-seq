@@ -19,6 +19,7 @@ desktop app, and it is a real file with range support, so the browser can seek i
 from __future__ import annotations
 
 import pathlib
+import shutil
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
@@ -26,9 +27,11 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
+from . import outbox
 from .config import Settings
 from .jobs import JobStore
 from .pieces import AUDIO_SUFFIXES, SCORE_SUFFIXES, PieceStore
+from .uploads import PackageError, unpack_piece, valid_slug
 from .worker import WorkerThread
 
 # A range is trimmed this much beyond the bars themselves, exactly as the desktop app
@@ -45,6 +48,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   settings.ensure_dirs()
   store = JobStore(settings)
   pieces = PieceStore(settings)
+  # Clear what a killed process left half-written before serving anything out of that
+  # directory: see `PieceStore.swab`, which also puts a piece back if a crash landed
+  # between the two renames of a replacement.
+  for swabbed in pieces.swab():
+    print('note-seq: cleared leftover %s' % swabbed)
   gate = settings.gate()
   worker: Optional[WorkerThread] = None
 
@@ -106,6 +114,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return {'service': 'note-seq', 'version': app.version,
             'jobs': store.stats(),
             'pieces': len(pieces.slugs()),
+            # Pieces analysed here that their page has not accepted yet. Always zero on a
+            # serving deployment -- this is the *sending* side's backlog -- and the number
+            # that says whether the page is up to date on the machine that analyses.
+            'outbox': outbox.count(settings),
             'auth': gate.status(),
             **settings.describe()}
 
@@ -194,6 +206,45 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   @app.get(API + '/pieces')
   def list_pieces(_user=Depends(gate.require_user)) -> Dict[str, Any]:
     return {'pieces': pieces.listing()}
+
+  @app.put(API + '/pieces/{slug}', status_code=201)
+  async def put_piece(slug: str, request: Request,
+                      _writer=Depends(gate.require_writer)) -> Dict[str, Any]:
+    """Accept a finished piece from the worker that analysed it.
+
+    A `PUT`, not a `POST`, because it is idempotent by construction: the same package
+    twice leaves the same piece, so this is safe to retry -- which is the whole reason the
+    sending side can keep an outbox (`outbox.py`) instead of needing a transaction.
+
+    The body *is* the package: one zip, contents described in `uploads.py`. Nothing here
+    needs the analyzer -- the slug was computed where the analysis ran -- which is what
+    lets the serving deployment stay a 226 MB container with no Verovio in it.
+    """
+    if not settings.accept_pieces:
+      raise HTTPException(405, 'this deployment does not accept pieces '
+                               '(SERVICE_ACCEPT_PIECES=0)')
+    if not valid_slug(slug):
+      raise HTTPException(400, 'a piece slug is lowercase letters, digits and hyphens '
+                               '(up to 64 of them), not %r' % slug[:80])
+    payload = await _read_body(request, settings.max_piece_mb, 'piece')
+    replaced = pieces.exists(slug)
+    staging = pieces.staging_path(slug)
+    if staging.exists():
+      shutil.rmtree(staging, ignore_errors=True)
+    try:
+      summary = unpack_piece(payload, staging,
+                             max_bytes=int(settings.max_piece_mb * 1024 * 1024))
+      pieces.install(slug, staging)
+    except PackageError as e:
+      shutil.rmtree(staging, ignore_errors=True)
+      raise HTTPException(400, 'that package could not be installed: %s' % e)
+    except Exception:
+      shutil.rmtree(staging, ignore_errors=True)
+      raise
+    return {'slug': slug, 'installed': True, 'replaced': replaced,
+            'title': summary['title'], 'bars': summary['bars'],
+            'pages': summary['pages'], 'bytes': summary['bytes'],
+            'score_sha256': summary['score_sha256']}
 
   @app.get(API + '/pieces/{slug}')
   def get_piece(slug: str, _user=Depends(gate.require_user)) -> Dict[str, Any]:
@@ -290,6 +341,27 @@ async def _save(upload: UploadFile, path: pathlib.Path, limit_mb: float,
   if written == 0:
     path.unlink(missing_ok=True)
     raise HTTPException(400, 'the %s arrived empty' % what)
+
+
+async def _read_body(request: Request, limit_mb: float, what: str) -> bytes:
+  """A request body as bytes, refused past the limit while it is still arriving.
+
+  `await request.body()` would read however much the sender chose to send before anybody
+  looked at the size, which on a public endpoint is the whole problem. This reads in
+  blocks and stops at the cap, so an oversized upload is a 413 and a closed connection
+  rather than 2 GB of somebody's tmpfs.
+  """
+  limit = int(limit_mb * 1024 * 1024)
+  chunks: List[bytes] = []
+  written = 0
+  async for block in request.stream():
+    written += len(block)
+    if written > limit:
+      raise HTTPException(413, 'that %s is larger than %g MB' % (what, limit_mb))
+    chunks.append(block)
+  if written == 0:
+    raise HTTPException(400, 'the %s arrived empty' % what)
+  return b''.join(chunks)
 
 
 def _wav_response(payload: bytes, slug: str, span) -> Response:
