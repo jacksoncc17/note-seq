@@ -489,10 +489,50 @@ still waiting`, exit 0); the page reported `pieces 1`; and the clip for bars 1-1
 uploaded copy hashes **identically** (`242cfca44450d74f…`) to the clip from the machine that
 analysed it.
 
+## Housekeeping
+
+Nothing here cleans up after itself, and two things grow without limit: **jobs** (a row with
+its log, plus a directory holding the score and the recording that were uploaded — often
+10-50 MB each) and **pieces** (~16 MB each). A third is `data/output/`, where the analyzer's
+renderer leaves derived audio that nothing reads once the piece is written. Measured on the
+machine this was developed on, after a handful of analyses: `data/pieces` **144 MB** over
+nine pieces, `data/output/render` **30 MB**, and `data/jobs` empty — jobs that run through
+the broker's worker do not create local rows.
+
+```bash
+python -m service.app.manage                          # what is on disk. Deletes nothing.
+python -m service.app.manage --jobs done,failed --older-than 14 --delete
+python -m service.app.manage --jobs all --keep 5 --delete
+python -m service.app.manage --pieces serenade-3 --delete
+python -m service.app.manage --keepers 3 --delete      # keep the three newest pieces
+python -m service.app.manage --renders --delete        # derived renders, regenerable
+python -m service.app.manage --scratch --delete        # debris from killed processes
+python -m service.app.manage --outbox --delete         # queued sends that will never land
+```
+
+**Nothing is deleted without `--delete`**, and the summary is the same either way: this is
+the one tool here that destroys work, and a dry run that costs nothing beats a confirmation
+prompt that gets typed through. A `queued` or `running` job is refused unless `--force`,
+because deleting one out from under a worker leaves it uploading artifacts for a job that no
+longer exists; renders are refused while any job is queued or running, because that is where
+the analyzer is writing.
+
+The one genuinely irreversible thing is a job's directory: it holds the score and the
+recording that were *uploaded*, and once those are gone the piece cannot be re-analysed.
+`--older-than` is the flag that matters. Everything else is regenerable — a piece can be
+re-analysed from its source, and a queued send can be re-queued with
+`python -m service.app.publish --queue-all`.
+
+Two things found while building it. `PieceStore.slugs()` used to count any directory holding
+a `meta.json`, so a half-written piece appeared in the page's list as `waltz.building` for as
+long as an analysis took — `write()` puts that file in place *before* it renames the
+directory. And the `pieces` table in `db.py`'s schema is never written or read; the
+filesystem is the truth, so deleting piece *files* is what removes a piece.
+
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 110 tests, ~110 s
+.venv/bin/python -m pytest service/tests -q          # 124 tests, ~110 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

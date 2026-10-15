@@ -27,53 +27,13 @@ import zipfile
 
 import pytest
 
+from conftest import make_piece, package
+
 TOKEN = 'a-shared-secret'
 OTHER_TOKEN = 'the-other-workers-secret'
 
 
 # --------------------------------------------------------------------------- a piece
-
-def make_piece(directory: pathlib.Path, slug: str = 'hand-made', *, pages: int = 2,
-               title: str = 'A hand-made piece', bars: int = 8,
-               seconds_per_bar: float = 1.5) -> pathlib.Path:
-  """A servable piece, written by hand: the five things the page reads, nothing else."""
-  import numpy as np
-  import soundfile as sf
-
-  directory.mkdir(parents=True, exist_ok=True)
-  (directory / 'pages').mkdir(exist_ok=True)
-  duration = bars * seconds_per_bar
-  sf.write(str(directory / 'audio.wav'), np.zeros(int(22050 * duration), dtype='float32'),
-           22050)
-  measures = [{'measure': bar, 'play_index': bar - 1,
-               'start_s': round((bar - 1) * seconds_per_bar, 3),
-               'end_s': round(bar * seconds_per_bar, 3), 'confidence': 1.0}
-              for bar in range(1, bars + 1)]
-  (directory / 'map.json').write_text(json.dumps(
-      {'method': 'hand-made', 'seconds_per_measure': seconds_per_bar,
-       'audio_duration_s': duration, 'measures': measures, 'warnings': []}), encoding='utf-8')
-  (directory / 'geometry.json').write_text(json.dumps(
-      {'slug': slug, 'pages': [{'number': n, 'width': 100.0, 'height': 200.0,
-                                'measures': []} for n in range(1, pages + 1)],
-       'warnings': []}), encoding='utf-8')
-  (directory / 'meta.json').write_text(json.dumps(
-      {'slug': slug, 'title': title, 'composer': '', 'bars': bars, 'duration_s': duration,
-       'method': 'hand-made', 'seconds_per_measure': seconds_per_bar, 'pages': pages,
-       'created_at': 1700000000.0, 'job_id': '',
-       'score': {'name': 'hand-made.musicxml', 'sha256': 'deadbeefdeadbeef'},
-       'audio': {'name': 'audio.wav', 'duration_s': duration}, 'quality': {},
-       'warnings': []}, indent=1), encoding='utf-8')
-  for number in range(1, pages + 1):
-    (directory / 'pages' / ('%04d.svg' % number)).write_text(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="200"/>',
-        encoding='utf-8')
-  return directory
-
-
-def package(directory: pathlib.Path) -> bytes:
-  from service.app.uploads import pack_piece
-  return pack_piece(directory)
-
 
 @pytest.fixture
 def piece_dir(tmp_path):

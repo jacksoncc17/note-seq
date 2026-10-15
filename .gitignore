@@ -45,3 +45,9 @@ cyolo_score_following/
 # Caches written by tools run in this tree.
 .npm-cache/
 .fontcache/
+
+# Local notes and shell transcripts. This one held a broker password and a live worker key
+# when it was first noticed, which is the whole reason it is not tracked -- and the reason
+# to keep tokens in `service/broker/worker.env` (ignored too) rather than in commands that
+# get pasted into a scratch file.
+useful_commands.txt

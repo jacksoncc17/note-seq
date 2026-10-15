@@ -48,6 +48,57 @@ have_material = pytest.mark.skipif(
     reason='the Chopin score and its cached recording are needed')
 
 
+def make_piece(directory, slug='hand-made', *, pages=2, title='A hand-made piece',
+               bars=8, seconds_per_bar=1.5):
+  """A servable piece written by hand: the five things the page reads, and nothing else.
+
+  No analysis and no analyzer, so a test about the *store* -- serving, uploading, deleting
+  -- runs in milliseconds on any machine. Shared because two test files need one: the
+  upload tests, and the housekeeping tests.
+  """
+  import json
+
+  import numpy as np
+  import soundfile as sf
+
+  directory = pathlib.Path(directory)
+  directory.mkdir(parents=True, exist_ok=True)
+  (directory / 'pages').mkdir(exist_ok=True)
+  duration = bars * seconds_per_bar
+  sf.write(str(directory / 'audio.wav'),
+           np.zeros(int(22050 * duration), dtype='float32'), 22050)
+  measures = [{'measure': bar, 'play_index': bar - 1,
+               'start_s': round((bar - 1) * seconds_per_bar, 3),
+               'end_s': round(bar * seconds_per_bar, 3), 'confidence': 1.0}
+              for bar in range(1, bars + 1)]
+  (directory / 'map.json').write_text(json.dumps(
+      {'method': 'hand-made', 'seconds_per_measure': seconds_per_bar,
+       'audio_duration_s': duration, 'measures': measures, 'warnings': []}),
+      encoding='utf-8')
+  (directory / 'geometry.json').write_text(json.dumps(
+      {'slug': slug, 'pages': [{'number': n, 'width': 100.0, 'height': 200.0,
+                                'measures': []} for n in range(1, pages + 1)],
+       'warnings': []}), encoding='utf-8')
+  (directory / 'meta.json').write_text(json.dumps(
+      {'slug': slug, 'title': title, 'composer': '', 'bars': bars, 'duration_s': duration,
+       'method': 'hand-made', 'seconds_per_measure': seconds_per_bar, 'pages': pages,
+       'created_at': 1700000000.0, 'job_id': '',
+       'score': {'name': 'hand-made.musicxml', 'sha256': 'deadbeefdeadbeef'},
+       'audio': {'name': 'audio.wav', 'duration_s': duration}, 'quality': {},
+       'warnings': []}, indent=1), encoding='utf-8')
+  for number in range(1, pages + 1):
+    (directory / 'pages' / ('%04d.svg' % number)).write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="200"/>',
+        encoding='utf-8')
+  return directory
+
+
+def package(directory):
+  """That piece as one zip, the way a worker sends it."""
+  from service.app.uploads import pack_piece
+  return pack_piece(directory)
+
+
 def settings_for(directory):
   """Settings on a directory, with the worker left for the test to drive."""
   from service.app.config import Settings

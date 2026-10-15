@@ -104,16 +104,29 @@ class JobStore:
     row = self.connection.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
     return Job(db.row_to_dict(row)) if row is not None else None
 
-  def list(self, limit: int = 50, status: Optional[str] = None) -> List[Job]:
+  def list(self, limit: Optional[int] = 50, status: Optional[str] = None) -> List[Job]:
+    """Jobs, newest first. `limit=None` means all of them, which is what cleanup needs."""
     sql = 'SELECT * FROM jobs'
     args: List[Any] = []
     if status:
       sql += ' WHERE status = ?'
       args.append(status)
-    sql += ' ORDER BY created_at DESC LIMIT ?'
-    args.append(int(limit))
+    sql += ' ORDER BY created_at DESC'
+    if limit is not None:
+      sql += ' LIMIT ?'
+      args.append(int(limit))
     rows = self.connection.execute(sql, args).fetchall()
     return [Job(db.row_to_dict(row)) for row in rows]
+
+  def forget(self, job_id: str) -> bool:
+    """Delete a job row -- and with it its log, which lives in the row. True if it existed.
+
+    Deliberately not `delete`: this throws the record of what happened away, and the only
+    thing that should call it is `service.app.manage`, out loud.
+    """
+    with self.database.immediate() as connection:
+      cursor = connection.execute('DELETE FROM jobs WHERE id = ?', (job_id,))
+      return cursor.rowcount > 0
 
   def stats(self) -> Dict[str, int]:
     rows = self.connection.execute(

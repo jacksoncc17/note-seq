@@ -56,6 +56,14 @@ def fingerprint(path) -> str:
 class PieceStore:
   """Read and write `data/pieces/`."""
 
+  # Never a piece, whatever is inside: `.building` is one being assembled by `write` or by
+  # an upload, `.previous` is one that was just replaced. Both hold a real `meta.json` --
+  # written *before* the rename, so that a crash leaves something identifiable -- which is
+  # why a listing cannot be filtered by "does it look like a piece". Going by that showed a
+  # half-written piece in the list, under a name like `waltz.building`, for as long as an
+  # analysis took. Found by a housekeeping test.
+  STAGING_SUFFIXES = ('.building', '.previous')
+
   def __init__(self, settings: Settings):
     self.settings = settings
 
@@ -77,7 +85,8 @@ class PieceStore:
     if not self.settings.pieces_dir.is_dir():
       return []
     return sorted((p.name for p in self.settings.pieces_dir.iterdir()
-                   if (p / 'meta.json').is_file()))
+                   if (p / 'meta.json').is_file()
+                   and not p.name.endswith(self.STAGING_SUFFIXES)))
 
   # ------------------------------------------------------------------ reading
 
@@ -206,40 +215,59 @@ class PieceStore:
       staging.rename(target)
     return target
 
-  def swab(self) -> List[str]:
-    """Finish or clear what a killed process left behind.
+  def swab_plan(self) -> List[Dict[str, Any]]:
+    """What `swab()` would do, so a dry run can say it without doing it.
 
     Both kinds of debris come from the two-rename swap used by `write` and `install`:
 
-    * `<slug>.building` -- an assembly that never completed. Removed; the piece it was
-      replacing, if any, is still in place.
+    * `<slug>.building` -- an assembly that never completed: **remove**.
     * `<slug>.previous` -- the piece that was replaced, normally deleted immediately after
       the swap. If a crash landed between the two renames the target is *missing* and this
-      is the only complete copy left, so it is moved back rather than thrown away.
+      is the only complete copy left, so it is **restored** rather than thrown away.
 
-    Called once at startup rather than on a timer: these directories only appear when a
-    process died mid-write, and a service that starts on top of one fills a disk quietly.
+    A caller that removes these itself instead of asking would lose the second case, which
+    is why this exists: `service.app.manage --scratch` reports and applies this plan rather
+    than globbing the directory.
     """
     root = self.settings.pieces_dir
-    removed: List[str] = []
+    plan: List[Dict[str, Any]] = []
     if not root.is_dir():
-      return removed
+      return plan
     for path in sorted(root.iterdir()):
       if not path.is_dir():
         continue
       if path.name.endswith('.building'):
-        shutil.rmtree(path, ignore_errors=True)
-        removed.append(path.name)
+        plan.append({'action': 'remove', 'path': str(path), 'name': path.name,
+                     'reason': 'an assembly that never finished'})
       elif path.name.endswith('.previous'):
         slug = path.name[:-len('.previous')]
         target = self.directory(slug)
         if (path / 'meta.json').is_file() and not (target / 'meta.json').is_file():
-          path.rename(target)
-          removed.append('%s -> restored as %s' % (path.name, slug))
+          plan.append({'action': 'restore', 'path': str(path), 'name': path.name,
+                       'slug': slug,
+                       'reason': 'the only complete copy of %s, left by a crash between '
+                                 'the two renames' % slug})
         else:
-          shutil.rmtree(path, ignore_errors=True)
-          removed.append(path.name)
-    return removed
+          plan.append({'action': 'remove', 'path': str(path), 'name': path.name,
+                       'reason': 'the piece it replaced is in place'})
+    return plan
+
+  def swab(self) -> List[str]:
+    """Apply `swab_plan`: clear half-built pieces, restore one a crash displaced.
+
+    Called once at startup rather than on a timer: these directories only appear when a
+    process died mid-write, and a service that starts on top of one fills a disk quietly.
+    """
+    done: List[str] = []
+    for step in self.swab_plan():
+      path = pathlib.Path(step['path'])
+      if step['action'] == 'restore':
+        path.rename(self.directory(step['slug']))
+        done.append('%s -> restored as %s' % (step['name'], step['slug']))
+      else:
+        shutil.rmtree(path, ignore_errors=True)
+        done.append(step['name'])
+    return done
 
 
 def _read_json(path: pathlib.Path) -> Optional[Dict[str, Any]]:
