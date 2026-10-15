@@ -492,7 +492,7 @@ analysed it.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 109 tests, ~110 s
+.venv/bin/python -m pytest service/tests -q          # 110 tests, ~110 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists
