@@ -440,6 +440,41 @@ def test_publishing_over_real_http(tmp_path, monkeypatch, piece_dir):
   assert outbox.count(settings) == 0
 
 
+def test_the_command_can_queue_pieces_analysed_before_there_was_an_address(tmp_path,
+                                                                          monkeypatch,
+                                                                          piece_dir):
+  """Backfill, which is the difference between "sync from now on" and "sync everything".
+
+  Re-running an analysis to publish a piece that is already on disk would be absurd, so the
+  command packs the store and marks it -- through the same path a fresh job uses.
+  """
+  import importlib
+
+  from service.app import outbox
+
+  received = []
+  server = RecordingPage(received)
+  try:
+    monkeypatch.setenv('SERVICE_DATA', str(tmp_path / 'data'))
+    monkeypatch.setenv('SERVICE_PUBLISH_URL', server.url + '/note-seq')
+    monkeypatch.setenv('SERVICE_PUBLISH_TOKEN', TOKEN)
+    publish = importlib.import_module('service.app.publish')
+
+    settings = publish.Settings()
+    settings.ensure_dirs()
+    piece_dir.rename(settings.pieces_dir / 'hand-made')
+
+    assert publish.main(['--queue-all']) == 0
+  finally:
+    server.stop()
+
+  assert [r[0]['path'] for r in received] == ['/note-seq/api/v1/pieces/hand-made']
+  assert outbox.count(settings) == 0
+  # A second run has nothing left to do, and says so rather than sending it again.
+  assert publish.main(['--queue-all', '--status']) == 0
+  assert len(received) == 1
+
+
 def test_a_send_with_no_token_says_so_rather_than_broken_pipe(tmp_path, monkeypatch,
                                                               piece_dir):
   """Found by doing it: a refused upload answers before reading the body, so the sender

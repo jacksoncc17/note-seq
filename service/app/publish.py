@@ -42,6 +42,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                       help='seconds for one push (default %g)' % outbox.PUSH_TIMEOUT_S)
   parser.add_argument('--limit', type=int, default=0,
                       help='send at most this many per attempt (0 = all)')
+  parser.add_argument('--queue', metavar='SLUG', action='append', default=[],
+                      help='also mark this local piece for delivery (repeatable). For '
+                           'pieces analysed before an address was configured')
+  parser.add_argument('--queue-all', action='store_true',
+                      help='also mark every local piece for delivery')
   parser.add_argument('--status', action='store_true',
                       help='list what is waiting, send nothing')
   parser.add_argument('--token', default=None,
@@ -52,6 +57,14 @@ def main(argv: Optional[List[str]] = None) -> int:
   settings = Settings()
   if args.to:
     settings.publish_url = args.to.strip().rstrip('/')
+
+  if args.queue or args.queue_all:
+    # Pieces that were analysed before there was anywhere to send them live only in the
+    # local store, and re-running the analysis to publish them would be absurd. This marks
+    # them for delivery instead, through exactly the same path a fresh job uses.
+    queued = _queue(settings, args)
+    print('marked %d piece(s) for delivery: %s'
+          % (len(queued), ', '.join(queued) or '(nothing to mark)'))
 
   waiting = outbox.pending(settings)
   print('outbox %s: %d waiting' % (settings.outbox_dir, len(waiting)))
@@ -87,6 +100,40 @@ def main(argv: Optional[List[str]] = None) -> int:
       if first:
         print('  still failing: %s' % first.get('reason'))
     time.sleep(max(5.0, args.interval))
+
+
+def _queue(settings: Settings, args) -> List[str]:
+  """Mark local pieces for delivery, skipping anything already waiting.
+
+  Packing happens here rather than at send time so that a piece which cannot be packaged
+  -- half-written, or missing its pages -- is reported now, while somebody is watching,
+  instead of turning into a marker that fails forever.
+  """
+  from .pieces import PieceStore
+  from .uploads import PackageError, pack_piece
+
+  store = PieceStore(settings)
+  wanted = list(args.queue)
+  if args.queue_all:
+    wanted = [slug for slug in store.slugs() if slug not in wanted]
+  if not settings.publish_url:
+    print('nowhere to send them: set SERVICE_PUBLISH_URL, or pass --to', file=sys.stderr)
+    raise SystemExit(2)
+
+  waiting = {entry['slug'] for entry in outbox.pending(settings)}
+  queued = []
+  for slug in wanted:
+    if slug in waiting:
+      continue
+    try:
+      payload = pack_piece(store.directory(slug))
+    except PackageError as e:
+      print('  %-40s cannot be packaged: %s' % (slug, e), file=sys.stderr)
+      continue
+    outbox.enqueue(settings, slug, payload, url=settings.publish_url)
+    print('  %-40s %6.1f MB' % (slug, len(payload) / 1e6))
+    queued.append(slug)
+  return queued
 
 
 if __name__ == '__main__':                   # pragma: no cover - a command
