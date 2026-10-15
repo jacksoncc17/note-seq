@@ -23,6 +23,22 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"        # service/broker
 REPO="$(cd "$HERE/../.." && pwd)"                           # the note-seq checkout
 
+# Configuration, if it is there: a file beside this script (or wherever
+# NOTE_SEQ_WORKER_ENV points). It holds the broker's worker key and the upload token, so it
+# is not committed -- see `worker.env.example` for what goes in it -- and it exists because
+# the alternative is a secret in your shell history and in the output of `ps`, retyped on
+# every restart. Variables already set in the environment win, so a one-off override still
+# works: `SERVICE_PUBLISH_URL=... ./service/broker/run_worker.sh`.
+ENV_FILE="${NOTE_SEQ_WORKER_ENV:-$HERE/worker.env}"
+ENV_LOADED='(none)'
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  ENV_LOADED="$ENV_FILE"
+fi
+
 PYTHON="${PYTHON:-$REPO/.venv/bin/python}"
 VIEWER="${NOTE_SEQ_VIEWER_URL:-http://localhost:8100}"
 NAME="${WORKER_NAME:-lan-note-seq}"
@@ -55,6 +71,7 @@ printf '==> %s\n' "note_seq_align worker"
 printf '    python     %s\n' "$PYTHON"
 printf '    worker     %s\n' "$WORKER_PY"
 printf '    plugin dir %s\n' "$HERE"
+printf '    env file   %s\n' "$ENV_LOADED"
 printf '    broker     %s\n' "${BROKER_URL:-<not set: worker.py defaults to http://127.0.0.1:8000/api/v1>}"
 printf '    name       %s\n' "$NAME"
 printf '    key        %s\n' "$([ -n "${WORKER_KEY:-}" ] && echo 'set' || echo '<not set>')"

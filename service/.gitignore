@@ -9,6 +9,10 @@ __pycache__/
 # Scratch space used while developing, and the browser check's screenshot.
 .scratch/
 
+# The worker's own configuration: the broker's worker key and the page's upload token.
+# `worker.env.example` is the committed template; this is the filled-in one.
+broker/worker.env
+
 # The front end's build outputs.
 frontend/node_modules/
 frontend/dist/
