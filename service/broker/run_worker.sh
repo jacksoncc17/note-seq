@@ -97,9 +97,22 @@ echo
 
 # BROKER_URL and WORKER_KEY are read by worker.py from the environment, so they can be
 # given either way; --name and the plugin directory are set here rather than repeated.
-exec env NOTE_SEQ_VIEWER_URL="$VIEWER" \
-  "$PYTHON" "$WORKER_PY" \
-  --plugin-dir "$HERE" \
-  --service note_seq_align \
-  --name "$NAME" \
-  "$@"
+# `%q` so the line can be copied and run: this *is* the command, not a description of it.
+command=(env NOTE_SEQ_VIEWER_URL="$VIEWER" \
+         "$PYTHON" "$WORKER_PY" \
+         --plugin-dir "$HERE" \
+         --service note_seq_align \
+         --name "$NAME" \
+         "$@")
+
+# `NOTE_SEQ_WORKER_PRINT=1` prints that command instead of running it -- for
+# `worker-ctl.sh show`, and for answering "what exactly does this start?" without
+# having to read two scripts. The secrets are not in it: the key and the token are read
+# from the environment by worker.py, so they never reach an argv.
+if [ -n "${NOTE_SEQ_WORKER_PRINT:-}" ]; then
+  printf '%q ' "${command[@]}"
+  printf '\n'
+  exit 0
+fi
+
+exec "${command[@]}"

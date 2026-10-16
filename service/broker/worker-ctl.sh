@@ -8,6 +8,7 @@
 #   ./service/broker/worker-ctl.sh restart    # after changing the plugin -- which is when
 #   ./service/broker/worker-ctl.sh stop       # SIGTERM, and it says if that was safe
 #   ./service/broker/worker-ctl.sh services   # what a fresh worker would load (no broker)
+#   ./service/broker/worker-ctl.sh show       # the exact command it would run, to copy
 #
 # `run_worker.sh` is the worker itself and runs in the foreground on purpose: a supervisor
 # that hides the first thirty lines of output hides the part that says the token is missing.
@@ -28,7 +29,7 @@ PIDFILE="$DATA/worker.pid"
 LOGFILE="$DATA/worker.log"
 WORKER="$HERE/run_worker.sh"
 
-usage() { sed -n '3,12p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 running() {
   [ -f "$PIDFILE" ] || return 1
@@ -122,6 +123,12 @@ EOF
 
   services)
     exec "$WORKER" --list-services
+    ;;
+
+  show)
+    # The command, not a description of it: `run_worker.sh` is what knows the interpreter and
+    # their worker.py, so it is what prints this.
+    NOTE_SEQ_WORKER_PRINT=1 "$WORKER" "${@:2}"
     ;;
 
   ''|-h|--help) usage 0 ;;
