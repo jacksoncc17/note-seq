@@ -498,6 +498,55 @@ def test_a_job_publishes_a_piece_its_own_page_can_serve(plugin, settings, tmp_pa
 
 
 @have_material
+def test_the_piece_belongs_to_whoever_asked_for_the_job(plugin, settings, tmp_path,
+                                                       monkeypatch):
+  """`owner_id` in the params is this side of the ownership contract, end to end.
+
+  The broker's worker puts the submitting account into the params it hands a plugin (that
+  is the patch in `service/broker/patches/owner-through-the-worker.patch`), the plugin
+  writes it into the piece, and the page then shows that piece to that account and to
+  nobody else. Verified the only way that means anything: the real plugin, a real
+  analysis, and the API asked as two different accounts.
+  """
+  import json
+  import time
+
+  import jwt
+  from fastapi.testclient import TestClient
+
+  from service.app.api import create_app
+  from service.app.config import Settings
+
+  staged = _stage(tmp_path, score=SCORE, recording=RECORDING)
+  plugin.run({'first_bar': 40, 'last_bar': 41, 'title': 'Owned by the asker',
+              'owner_id': 'user-42'},
+             tmp_path / 'work', tmp_path / 'out', lambda *a: None, staged)
+
+  slug = 'owned-by-the-asker'
+  meta = json.loads((settings.piece_dir(slug) / 'meta.json').read_text(encoding='utf-8'))
+  assert meta['owner'] == 'user-42'
+
+  monkeypatch.setenv('SERVICE_TRUST_JWT', 'the-brokers-key')
+  monkeypatch.setenv('SERVICE_ALLOWED_SUBJECTS', '')
+  client = TestClient(create_app(Settings(data_dir=settings.data_dir)))
+
+  def bearer(subject):
+    signed = jwt.encode({'sub': subject, 'exp': int(time.time()) + 600},
+                        'the-brokers-key', algorithm='HS256')
+    return {'Authorization': 'Bearer %s' % signed}
+
+  theirs = client.get('/api/v1/pieces', headers=bearer('user-42'))
+  assert [row['slug'] for row in theirs.json()['pieces']] == [slug]
+  assert client.get('/api/v1/pieces/%s' % slug, headers=bearer('user-42')).status_code == 200
+
+  somebody_else = client.get('/api/v1/pieces', headers=bearer('user-7'))
+  assert somebody_else.json()['pieces'] == []
+  assert client.get('/api/v1/pieces/%s' % slug, headers=bearer('user-7')).status_code == 404
+  assert client.get('/api/v1/pieces/%s/audio' % slug,
+                    headers=bearer('user-7')).status_code == 404
+
+
+@have_material
 def test_the_switch_turns_the_page_off_and_the_job_still_works(plugin, settings, tmp_path):
   """A machine that only runs broker workers should be able to say no."""
   import note_seq_align

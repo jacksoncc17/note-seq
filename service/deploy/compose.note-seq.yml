@@ -61,6 +61,14 @@ services:
       # loopback, wrong here. Required rather than defaulted: a default would be a
       # published token, and compose says so at startup if it is missing.
       SERVICE_UPLOAD_TOKEN: ${NOTE_SEQ_UPLOAD_TOKEN:?Set NOTE_SEQ_UPLOAD_TOKEN in .env (see service/README.md; the LAN worker sends it as SERVICE_PUBLISH_TOKEN)}
+      # Who sees every piece. Everyone else with a valid token sees the pieces they own,
+      # so this is the one setting a single-user deployment wants and the reason a
+      # deployment with open sign-up is safe: a stranger gets an empty list, not a
+      # catalogue. Your id is `GET /api/v1/users/me` on the broker. Pieces published
+      # before ownership existed have no owner and are visible *only* to these accounts,
+      # which is why adopting them matters:
+      #   python -m service.app.manage --adopt-unowned --owner <your id>
+      SERVICE_ALLOWED_SUBJECTS: ${NOTE_SEQ_OPERATOR_SUBJECTS:-}
       # Optional `/note-seq/login` is the default; set this if the broker's sign-in page
       # is somewhere else, or the page sends a browser there when its token is missing.
       # SERVICE_BROKER_LOGIN: /login

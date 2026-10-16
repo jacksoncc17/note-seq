@@ -80,6 +80,14 @@ class Settings:
     self.upload_token = os.environ.get('SERVICE_UPLOAD_TOKEN', '').strip()
     self.broker_login = os.environ.get('SERVICE_BROKER_LOGIN', '/login').strip()
 
+    # Whose pieces this machine produces, when the analysis did not come from the broker.
+    # A job submitted on the broker carries its owner through the worker; a job submitted to
+    # *this* service (the LAN page, `curl`) has nobody to ask, so a single-user installation
+    # sets this once and everything it analyses belongs to them. Empty means the pieces are
+    # unowned, which only an operator can see -- correct, and easy to fix with
+    # `python -m service.app.manage --adopt-unowned --owner <sub>`.
+    self.owner = os.environ.get('SERVICE_OWNER', '').strip()
+
     # A deployment that only serves finished pieces should not offer a form that queues
     # an analysis nobody will ever run: no worker is attached there. The broker's own
     # page is where jobs are submitted.
@@ -166,7 +174,7 @@ class Settings:
   def describe(self) -> dict:
     return {'data_dir': str(self.data_dir), 'database': str(self.database),
             'read_only': self.read_only, 'root_path': self.root_path,
-            'accept_pieces': self.accept_pieces,
+            'accept_pieces': self.accept_pieces, 'owner': self.owner or None,
             'publish_url': self.publish_url or None,
             'frontend': str(self.frontend_dist),
             'frontend_built': (self.frontend_dist / 'index.html').is_file(),

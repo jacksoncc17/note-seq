@@ -365,7 +365,13 @@ class NoteSeqAlign:
       slug, meta = publish_piece(
           settings, analysis, score=score,
           title=str(params.get('title') or '').strip(),
-          audio_source_name='', url=url, job_id=str(params.get('job_id') or ''))
+          audio_source_name='', url=url, job_id=str(params.get('job_id') or ''),
+          # Whose piece this is. The broker's worker puts the job's owner into the params it
+          # hands a plugin (`owner_id`), and that is the only way the account that asked for
+          # the analysis can be known this far from the broker. A piece that arrives without
+          # one is visible to operators only, deliberately: better a page somebody has to
+          # claim than a recording anyone can read.
+          owner=str(params.get('owner_id') or ''))
       delivery = publish_remote(settings, slug, log=lambda m: print('  note-seq: %s' % m))
     except Exception as e:                     # noqa: BLE001 - see the docstring
       return {'published': False, 'attempted': True,

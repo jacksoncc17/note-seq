@@ -1,4 +1,4 @@
-# Two small patches for the broker's jobs dashboard
+# Three small patches for the broker: two for the dashboard, one for ownership
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -114,3 +114,61 @@ Two wrinkles worth knowing if you reproduce the harness, both in that README: th
 sandbox cannot run `@vitejs/plugin-react-swc` at all (its native binding refuses every
 cache root), and their list route's `307` to a trailing slash turns into a cross-origin
 redirect — and loses the `Authorization` header — if a dev proxy rewrites the Host.
+
+
+---
+
+# (c) Whose job is it? — `owner-through-the-worker.patch`
+
+A third patch, and the only one that touches the backend. Everything a service publishes
+for a *person* needs to know which person asked, and at the moment nothing downstream of
+the broker does:
+
+```
+broker job row   owner_id        <- it knows, and its own job list is scoped by it
+JobClaimed       (nothing)       <- the worker is never told
+plugin params    (nothing)       <- so the plugin cannot tell the service
+piece meta.json  (nothing)       <- so a page shows every piece to everybody
+```
+
+The fix is three lines in three files, all in the direction the data already flows:
+
+* `backend/app/models_jobs.py` — `JobClaimed` gains `owner_id`;
+* `backend/app/api/routes/worker.py` — `_claimed()` fills it from `job.owner_id`;
+* `worker.py` — the params handed to a plugin gain `owner_id`, next to the `_extra_args`
+  key that is already injected there.
+
+The plugin on this side reads `params["owner_id"]`, writes it into `meta.json`, and the
+piece carries its owner from then on — into the package that is uploaded to the serving
+deployment, and into every read that decides what to show. Nothing else in the broker
+changes: no migration, no route, no model. A worker that has not been restarted after the
+patch simply keeps sending pieces without an owner, which the page then shows to operators
+only (`SERVICE_ALLOWED_SUBJECTS`), so the two halves can be rolled out in either order.
+
+## Apply
+
+```bash
+cd ~/full-stack-fastapi-template
+git apply --check /path/to/note-seq/service/broker/patches/owner-through-the-worker.patch
+git apply         /path/to/note-seq/service/broker/patches/owner-through-the-worker.patch
+# then restart the backend and the worker: the plugin's params come from the worker, and
+# the worker's owner comes from the backend's claim response
+```
+
+Then, on the serving deployment, list yourself as an operator so the pieces that predate
+this are still visible to you:
+
+```
+SERVICE_ALLOWED_SUBJECTS=<your user id from GET /api/v1/users/me>
+```
+
+and claim the ones already published:
+
+```bash
+python -m service.app.manage --adopt-unowned --owner <your user id>
+```
+
+Verified here: the patch applies cleanly to the current checkout (`git apply --check`),
+the three patched files compile, and the half that lives on this side is covered by
+`test_the_piece_belongs_to_whoever_asked_for_the_job`, which runs a real broker job through
+the real plugin and then asks the page's API as two different accounts.

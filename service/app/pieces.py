@@ -102,10 +102,33 @@ class PieceStore:
   def audio(self, slug: str) -> pathlib.Path:
     return self.path(slug, 'audio.wav')
 
-  def listing(self) -> List[Dict[str, Any]]:
-    """Every piece, newest first, as the file list shows it -- cheap, from meta only."""
+  def owner(self, slug: str) -> str:
+    """The subject that owns this piece, or '' when it is not known.
+
+    Empty is a real state rather than a missing field: every piece published before
+    ownership was recorded is unowned, and so is one analysed on a machine that was never
+    told whose it is. Those are visible to operators only, which is the deliberate choice --
+    the alternative shows somebody's recording to whoever asks for the slug.
+    """
+    return str(((self.meta(slug) or {}).get('owner') or ''))
+
+  def may_see(self, slug: str, viewer: Optional[Dict[str, Any]] = None) -> bool:
+    """May this viewer read `slug`? `viewer` is what `Gate.viewer` returns.
+
+    No viewer means nothing is filtered, which is right for a caller that has already
+    decided for itself: `service.app.manage`, and the tests.
+    """
+    if viewer is None or viewer.get('all'):
+      return True
+    subject = str(viewer.get('sub') or '')
+    return bool(subject) and subject == self.owner(slug)
+
+  def listing(self, viewer: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Every piece the viewer may see, newest first -- cheap, from meta only."""
     out = []
     for slug in self.slugs():
+      if not self.may_see(slug, viewer):
+        continue
       meta = self.meta(slug) or {}
       out.append({'slug': slug,
                   'title': meta.get('title') or slug,
@@ -117,6 +140,21 @@ class PieceStore:
                   'warnings': len(meta.get('warnings') or [])})
     out.sort(key=lambda row: row['created_at'], reverse=True)
     return out
+
+  def adopt(self, slug: str, owner: str) -> bool:
+    """Give an existing piece an owner, in place. True if it changed anything.
+
+    For pieces that predate ownership -- published when the page showed everything to
+    everybody. `service.app.manage --adopt-unowned` is the only caller, and it is a
+    metadata write: nothing about the music changes, and the piece is served exactly as
+    before to whoever now owns it.
+    """
+    meta = self.meta(slug)
+    if meta is None or (meta.get('owner') or '') == owner:
+      return False
+    meta['owner'] = owner
+    _write_json(self.path(slug, 'meta.json'), meta)
+    return True
 
   # ------------------------------------------------------------------ writing
 

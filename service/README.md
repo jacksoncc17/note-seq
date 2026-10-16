@@ -430,9 +430,10 @@ the page renders, 18 click targets land within 0.019 px of the engraving, the cl
 development server.
 
 Configuring `SERVICE_TRUST_JWT` is what puts the gate up; leaving it empty keeps the
-service open, which is right for loopback. `SERVICE_ALLOWED_SUBJECTS` can restrict it to
-particular accounts, and `SERVICE_BROKER_LOGIN` (default `/login`) is where a browser
-without a token is sent.
+service open, which is right for loopback. `SERVICE_ALLOWED_SUBJECTS` lists **operators**
+-- accounts that see every piece -- and you want it set to your own user id; without it,
+pieces whose owner is unknown are visible to nobody, including you. `SERVICE_BROKER_LOGIN`
+(default `/login`) is where a browser without a token is sent.
 
 ## Getting a finished piece to the page
 
@@ -489,6 +490,50 @@ still waiting`, exit 0); the page reported `pieces 1`; and the clip for bars 1-1
 uploaded copy hashes **identically** (`242cfca44450d74f…`) to the clip from the machine that
 analysed it.
 
+## Whose piece is it
+
+A piece belongs to the broker account whose job produced it, and you see the pieces you
+own. That sentence is the whole model; what follows is how it is carried and what happens
+at the edges.
+
+**How it travels.** The broker's job row already knows its `owner_id`, and its own job list
+is scoped by it, but nothing downstream did: the worker was never told, so neither the
+plugin nor the piece could be. The chain is now `job.owner_id` → `JobClaimed.owner_id` →
+`params['owner_id']` → `meta.json` → the package a worker uploads → the store that serves
+it. Only the first step is a change to the broker, and it is three lines: see
+`service/broker/patches/owner-through-the-worker.patch`. The owner travels *inside* the
+piece rather than being looked up, which is what lets a page decide what to show without
+asking anybody — and is why the upload token is what makes that statement trustworthy.
+
+**What a reader sees.** `SERVICE_ALLOWED_SUBJECTS` used to be an access list: a valid token
+for anybody else got a 403. It now lists **operators**, who see everything; every other
+valid token sees the pieces it owns and nothing else, answering an empty list rather than a
+refusal. That change is what makes a closed deployment possible — otherwise every student
+would have to be on a list that means "sees everything" — and it is why a broker with open
+sign-up is no longer a reason to keep the whole store private: a stranger who signs in and
+asks for somebody else's piece gets the same 404 as one that does not exist. Whether a slug
+is taken is not this service's business to disclose.
+
+**Edges.** Three cases are worth knowing, and all three fail closed:
+
+* **no owner** — every piece published before this existed, and anything analysed on a
+  machine that was never told whose it is. Operators only. Claim them with
+  `python -m service.app.manage --adopt-unowned --owner <sub>`, which writes one field into
+  `meta.json` and changes nothing about the music. Run it on whichever machine holds the
+  pieces: the store that serves them, or the one that is about to send them (with
+  `python -m service.app.publish --owner <sub>` doing the same on the way out).
+* **no gate** — `SERVICE_TRUST_JWT` unset means one person on loopback, and nothing is
+  filtered. Ownership is recorded anyway, so the pieces carry it to wherever they are sent.
+* **`SERVICE_OWNER`** — for an analysis that did not come from a broker job (the LAN page,
+  `curl`): this machine stamps its pieces with that subject, so they show up for the right
+  account on the page that serves them.
+
+**What it is not.** Not sharing, and not roles: there is no way to let one account read
+another's piece, and no notion of a teacher. Both are small additions on top of this — a
+group table, or an access row keyed by `(piece, subject)` — but each is a different
+decision, and this is the one that had to come first, because a piece that belongs to
+nobody cannot be shared correctly either.
+
 ## Housekeeping
 
 Nothing here cleans up after itself, and two things grow without limit: **jobs** (a row with
@@ -508,6 +553,7 @@ python -m service.app.manage --keepers 3 --delete      # keep the three newest p
 python -m service.app.manage --renders --delete        # derived renders, regenerable
 python -m service.app.manage --scratch --delete        # debris from killed processes
 python -m service.app.manage --outbox --delete         # queued sends that will never land
+python -m service.app.manage --adopt-unowned --owner <sub>   # claim pre-ownership pieces
 ```
 
 **Nothing is deleted without `--delete`**, and the summary is the same either way: this is
@@ -532,7 +578,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 124 tests, ~110 s
+.venv/bin/python -m pytest service/tests -q          # 137 tests, ~115 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

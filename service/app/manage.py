@@ -67,6 +67,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                            'no row')
   parser.add_argument('--outbox', action='store_true',
                       help='pieces queued for a page that has not taken them')
+  parser.add_argument('--adopt', default=None,
+                      help='give these piece slugs an owner (comma separated), so the page '
+                           'shows them to that account')
+  parser.add_argument('--adopt-unowned', action='store_true',
+                      help='give every piece with no owner one -- for pieces published '
+                           'before ownership was recorded')
+  parser.add_argument('--owner', default=None,
+                      help="the owner to adopt pieces for (the broker's user id)")
   parser.add_argument('--delete', action='store_true',
                       help='actually remove what the summary listed')
   parser.add_argument('--force', action='store_true',
@@ -92,7 +100,11 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('data directory %s' % settings.data_dir)
   print('  jobs      %-4d %s   (%s on disk)'
         % (len(jobs), by_status or '', _size(_directory_bytes(settings.jobs_dir))))
-  print('  pieces    %-4d %s' % (len(piece_rows), _size(_directory_bytes(settings.pieces_dir))))
+  unowned = [row['slug'] for row in piece_rows if not pieces.owner(row['slug'])]
+  print('  pieces    %-4d %s%s'
+        % (len(piece_rows), _size(_directory_bytes(settings.pieces_dir)),
+           '' if not unowned else '   (%d with no owner: only an operator can see those)'
+           % len(unowned)))
   print('  renders   %s' % _size(_directory_bytes(settings.data_dir / 'output')))
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
@@ -141,6 +153,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                      'label': '%-40s %s' % (slug, _size(_directory_bytes(
                          settings.piece_dir(slug)))),
                      'blockers': []})
+
+  # ------------------------------------------------------------------ ownership
+  if args.adopt or args.adopt_unowned:
+    # A write, not a deletion, so it does not wait for `--delete`: it adds one field to a
+    # piece's meta and changes nothing about the music. It is here rather than in a script
+    # of its own because it is the same question this tool already answers -- what is in
+    # this store, and what should stop being.
+    if not args.owner:
+      print('say who owns them: --owner <subject>, which is the broker\'s user id',
+            file=sys.stderr)
+      return 2
+    wanted = [s.strip() for s in (args.adopt or '').split(',') if s.strip()]
+    if args.adopt_unowned:
+      wanted += [row['slug'] for row in piece_rows if not pieces.owner(row['slug'])]
+    adopted = 0
+    for slug in dict.fromkeys(wanted):
+      if slug not in [row['slug'] for row in piece_rows]:
+        print('no such piece: %s' % slug, file=sys.stderr)
+        return 2
+      before = pieces.owner(slug) or '(nobody)'
+      if pieces.adopt(slug, args.owner):
+        adopted += 1
+        print('  owner    %-40s %s -> %s' % (slug, before, args.owner))
+    print('%d piece(s) adopted by %s%s' % (adopted, args.owner,
+                                           '' if adopted else ' (nothing was unowned)'))
 
   # ------------------------------------------------------------------ outbox
   if args.outbox:

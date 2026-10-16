@@ -105,8 +105,15 @@ export type ServiceStatus = {
   frontend_built: boolean
   capabilities: Record<string, boolean>
   /** How this deployment is reached: `open`, or `token` when it shares the broker's
-   *  login. `login_url` is where to send a browser that has no token. */
-  auth?: { mode: 'open' | 'token'; login_url: string | null; restricted: boolean }
+   *  login. `login_url` is where to send a browser that has no token. `owner_filter`
+   *  means the pieces you see are the ones you own; `operators` counts the accounts that
+   *  see every piece, including ones with no owner. */
+  auth?: {
+    mode: 'open' | 'token'
+    login_url: string | null
+    owner_filter?: boolean
+    operators?: number
+  }
   /** True when this deployment only serves finished pieces: no form, no queue. */
   read_only?: boolean
 }

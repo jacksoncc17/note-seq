@@ -125,7 +125,8 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
       settings, analysis, score=score,
       title=(params.get('title') or '').strip(),
       audio_source_name=pathlib.Path(audio_source).name if audio_source else '',
-      url=url, job_id=params.get('job_id') or '')
+      url=url, job_id=params.get('job_id') or '',
+      owner=str(params.get('owner_id') or ''))
   log('stored as %s: %d page(s), %d bars, %.1f s of audio'
       % (slug, meta['pages'], meta['bars'], meta['duration_s']))
   delivery = publish_remote(settings, slug, log=log)
@@ -135,7 +136,7 @@ def analyze(settings: Settings, job_dir: pathlib.Path, params: Dict[str, Any],
 
 def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
                   title: str = '', audio_source_name: str = '', url: str = '',
-                  job_id: str = '') -> Tuple[str, Dict[str, Any]]:
+                  job_id: str = '', owner: str = '') -> Tuple[str, Dict[str, Any]]:
   """Store an analysis as a piece the web page can serve. Returns (slug, meta).
 
   Both front doors end here: this service's own job, and the broker plugin in
@@ -156,6 +157,11 @@ def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
               'warnings': list(analysis.page_warnings)}
   meta = {
       'slug': slug,
+      # Whose it is: the broker account whose job produced it, or whatever this machine was
+      # told with SERVICE_OWNER. It travels with the piece -- into `meta.json`, into the
+      # package a worker uploads, and so into the store that serves it -- which is what lets
+      # a page decide what to show without asking anybody.
+      'owner': (owner or settings.owner or '').strip(),
       'title': title,
       'composer': analysis.score_meta.get('composer') or '',
       'bars': len({m.measure for m in result.measures}),

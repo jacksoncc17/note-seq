@@ -151,6 +151,12 @@ def unpack_piece(payload: bytes, dest: pathlib.Path, *,
           'pages': sum(1 for name in names if name.startswith('pages/')),
           'bytes': written,
           'files': sorted(names),
+          # Who it belongs to, as the sending side recorded it: the subject of the broker
+          # account whose job produced this piece. Empty is allowed and means nobody knows
+          # -- which the store then shows to operators only. The uploader is the worker, so
+          # this is a statement by a trusted party rather than a claim by a stranger; the
+          # token in the header is what makes that true.
+          'owner': str(meta.get('owner') or '').strip(),
           'score_sha256': ((meta.get('score') or {}).get('sha256') or ''),
           'meta': meta}
 

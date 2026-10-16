@@ -58,8 +58,10 @@ def test_without_a_trusted_secret_nothing_is_checked(client):
 def test_the_brokers_token_is_accepted(tmp_path):
   api, _settings = gated(tmp_path)
   assert api.get('/api/v1/pieces', headers=bearer(token())).status_code == 200
+  # `owner_filter` says the pieces you see are the ones you own -- which is what a gated
+  # deployment does now, instead of refusing everybody who is not on a list of accounts.
   assert api.get('/api/v1/status').json()['auth'] == {
-      'mode': 'token', 'login_url': '/login', 'restricted': False}
+      'mode': 'token', 'login_url': '/login', 'owner_filter': True, 'operators': 0}
 
 
 def test_no_token_is_a_401_that_says_so(tmp_path):
@@ -88,15 +90,22 @@ def test_an_expired_token_is_refused(tmp_path):
   assert api.get('/api/v1/pieces', headers=bearer(token(expires_in=-60))).status_code == 401
 
 
-def test_only_the_named_accounts_can_read(tmp_path):
-  """A broker token carries `sub` and `exp` and no roles, so without a list *any*
-  signed-in user of the broker could read every piece."""
+def test_the_named_accounts_are_operators_rather_than_the_only_ones_allowed(tmp_path):
+  """`SERVICE_ALLOWED_SUBJECTS` used to be an access list: anybody else got a 403.
+
+  It lists **operators** now -- accounts that see every piece, including ones whose owner is
+  unknown -- because ownership answers the other question. A valid token for an account that
+  is not on the list still gets in; it sees the pieces it owns, which on this empty store is
+  none of them. A 403 here would make a closed deployment impossible to run: every student
+  would have to be added to a list that means "sees everything".
+  """
   api, _settings = gated(tmp_path, allowed_subjects='user-1, user-2')
   assert api.get('/api/v1/pieces', headers=bearer(token('user-2'))).status_code == 200
-  refused = api.get('/api/v1/pieces', headers=bearer(token('somebody-else')))
-  assert refused.status_code == 403
-  assert 'not allowed' in refused.json()['detail']
-  assert api.get('/api/v1/status').json()['auth']['restricted'] is True
+  somebody = api.get('/api/v1/pieces', headers=bearer(token('somebody-else')))
+  assert somebody.status_code == 200
+  assert somebody.json()['pieces'] == []
+  auth = api.get('/api/v1/status').json()['auth']
+  assert auth['operators'] == 2 and auth['owner_filter'] is True
 
 
 def test_status_is_readable_without_a_token(tmp_path):

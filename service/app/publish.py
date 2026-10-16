@@ -47,6 +47,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                            'pieces analysed before an address was configured')
   parser.add_argument('--queue-all', action='store_true',
                       help='also mark every local piece for delivery')
+  parser.add_argument('--owner', default=None,
+                      help='stamp this owner on the pieces being queued (the broker\'s user '
+                           'id), so the page shows them to that account')
   parser.add_argument('--status', action='store_true',
                       help='list what is waiting, send nothing')
   parser.add_argument('--token', default=None,
@@ -125,6 +128,11 @@ def _queue(settings: Settings, args) -> List[str]:
   for slug in wanted:
     if slug in waiting:
       continue
+    if args.owner:
+      # Before packing, because the owner travels *inside* the package -- that is what
+      # makes it a statement by the sender rather than something the far side has to look
+      # up, and it is why an unowned piece can be fixed here and not only in the store.
+      store.adopt(slug, args.owner)
     try:
       payload = pack_piece(store.directory(slug))
     except PackageError as e:

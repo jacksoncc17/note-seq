@@ -204,8 +204,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   # ------------------------------------------------------------------ pieces
 
   @app.get(API + '/pieces')
-  def list_pieces(_user=Depends(gate.require_user)) -> Dict[str, Any]:
-    return {'pieces': pieces.listing()}
+  def list_pieces(viewer=Depends(gate.viewer)) -> Dict[str, Any]:
+    return {'pieces': pieces.listing(viewer)}
 
   @app.put(API + '/pieces/{slug}', status_code=201)
   async def put_piece(slug: str, request: Request,
@@ -244,24 +244,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return {'slug': slug, 'installed': True, 'replaced': replaced,
             'title': summary['title'], 'bars': summary['bars'],
             'pages': summary['pages'], 'bytes': summary['bytes'],
-            'score_sha256': summary['score_sha256']}
+            'owner': summary['owner'], 'score_sha256': summary['score_sha256']}
 
   @app.get(API + '/pieces/{slug}')
-  def get_piece(slug: str, _user=Depends(gate.require_user)) -> Dict[str, Any]:
-    """Everything the score page needs, in one request."""
+  def get_piece(slug: str, viewer=Depends(gate.viewer)) -> Dict[str, Any]:
+    """Everything the score page needs, in one request.
+
+    A piece somebody else owns is answered exactly like one that does not exist: 404, not
+    403. Whether a slug is taken is not this endpoint's business to disclose.
+    """
     meta = pieces.meta(slug)
     map_dict = pieces.map(slug)
     geometry = pieces.geometry(slug)
-    if meta is None or map_dict is None or geometry is None:
+    if meta is None or map_dict is None or geometry is None \
+        or not pieces.may_see(slug, viewer):
       raise HTTPException(404, 'no such piece: %s' % slug)
     return {'meta': meta, 'map': map_dict, 'geometry': geometry,
             'audio': {'url': '%s/pieces/%s/audio' % (API, slug),
                       'duration_s': meta.get('duration_s') or 0.0}}
 
   @app.get(API + '/pieces/{slug}/pages/{number}.svg')
-  def get_page(slug: str, number: int, _user=Depends(gate.require_user)) -> Response:
+  def get_page(slug: str, number: int, viewer=Depends(gate.viewer)) -> Response:
     path = pieces.page_path(slug, number)
-    if not path.is_file():
+    if not path.is_file() or not pieces.may_see(slug, viewer):
       raise HTTPException(404, 'no page %d for %s' % (number, slug))
     return Response(path.read_text(encoding='utf-8'), media_type='image/svg+xml',
                     headers={'Cache-Control': 'public, max-age=86400'})
@@ -270,7 +275,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   def get_audio(slug: str, first_bar: Optional[int] = None,
                 last_bar: Optional[int] = None, start: Optional[float] = None,
                 end: Optional[float] = None, pad: int = 1,
-                _user=Depends(gate.require_user)) -> Response:
+                viewer=Depends(gate.viewer)) -> Response:
     """A WAV of the recording -- all of it, or exactly the bars asked for.
 
     Bars are answered from the map, so the clip is the music of those bars and not the
@@ -279,7 +284,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     """
     meta = pieces.meta(slug)
     map_dict = pieces.map(slug)
-    if meta is None or map_dict is None:
+    if meta is None or map_dict is None or not pieces.may_see(slug, viewer):
       raise HTTPException(404, 'no such piece: %s' % slug)
     audio_path = pieces.audio(slug)
     if not audio_path.is_file():
