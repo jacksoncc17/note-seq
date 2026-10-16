@@ -351,15 +351,11 @@ class NoteSeqAlign:
     try:
       settings = self.settings or Settings()
       settings.ensure_dirs()
-      # Where the page is and where a piece is *sent* are the same page, so an unset
-      # `SERVICE_PUBLISH_URL` follows `NOTE_SEQ_VIEWER_URL` rather than leaving the link
-      # pointing at a page the piece never reaches -- which is exactly what happened the
-      # first time this ran against a deployment: the link said jinshiming.net and the
-      # piece was written to the local store, so the link 404'd.
-      #
-      # The exception is the default: on loopback the two are the same service, and
-      # pushing a piece to the store it was just written to would spend 16 MB of traffic
-      # to replace a piece with itself.
+      # `Settings` derives the delivery address from `NOTE_SEQ_VIEWER_URL` (see
+      # `app/config.py`), which is where the link comes from too. A plugin constructed with
+      # an explicit `viewer_url` is the one case it cannot know about, so that is filled in
+      # here -- and only when it is not the loopback default, where sending would copy a
+      # piece onto the store it was just written to.
       if not settings.publish_url and self.viewer_url != DEFAULT_VIEWER_URL:
         settings.publish_url = self.viewer_url
       slug, meta = publish_piece(

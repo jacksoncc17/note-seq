@@ -79,6 +79,25 @@ def enqueue(settings, slug: str, payload: bytes, *, url: str,
   return marker
 
 
+def _connection_died(error: BaseException) -> bool:
+  """Did the connection go away rather than the far side answering?
+
+  `urllib` wraps the interesting failure: over TLS this is a `URLError` whose `reason` is an
+  `ssl.SSLError`, and a refusal arrives as `SSL_ERROR_SYSCALL`, which Python reports with the
+  memorable text `[SYS] unknown error`. Checked through the wrapper rather than by name only,
+  because the name is exactly what makes this hard to read.
+  """
+  seen = [error, getattr(error, 'reason', None)]
+  while seen:
+    item = seen.pop()
+    if isinstance(item, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                         TimeoutError, OSError)):
+      return True
+    if type(item).__module__ == 'ssl' or 'ssl' in type(item).__module__:
+      return True
+  return False
+
+
 def _record(entry: Dict[str, Any], error: str) -> None:
   """Note a failed attempt, keeping everything else about the entry."""
   marker = pathlib.Path(entry['marker'])
@@ -144,14 +163,15 @@ def push(settings, entry: Dict[str, Any], *, timeout: float = PUSH_TIMEOUT_S,
     return {'ok': False, 'reason': reason, 'slug': slug, 'status': e.code}
   except Exception as e:                   # noqa: BLE001 - a network is allowed to fail
     reason = '%s: %s' % (type(e).__name__, e)
-    if (not (token or settings.publish_token)
-        and isinstance(e, (BrokenPipeError, ConnectionResetError))):
-      # A page that refuses an upload answers before reading it, and a client still writing
-      # 10 MB sees its socket closed rather than a status code. That is worth saying here:
-      # the alternative is `Broken pipe` and no idea which of the two ends is wrong.
+    if not (token or settings.publish_token) and _connection_died(e):
+      # A page that refuses an upload answers *before reading it*, so a client still writing
+      # 10 MB never sees the 401 -- it sees its connection go away, and how that is spelled
+      # depends on the stack: `Broken pipe` locally, `URLError: [SYS] unknown error
+      # (_ssl.c:2406)` over TLS. Both mean "the far side stopped listening", and the cause
+      # is usually this. Measured: the same request with a 1 kB body answers a clean 401.
       reason += (' -- the page closed the connection while the package was being sent, '
                  'which is what a refused upload looks like, and no upload token is '
-                 'configured (SERVICE_PUBLISH_TOKEN)')
+                 'configured (SERVICE_PUBLISH_TOKEN, or SERVICE_UPLOAD_TOKEN)')
     _record(entry, reason)
     return {'ok': False, 'reason': reason, 'slug': slug}
 

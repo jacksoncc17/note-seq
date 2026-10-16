@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import pathlib
 import sys
 import time
+import urllib.parse
 from typing import List, Optional
 
 from . import outbox
-from .config import Settings
+from .config import SERVICE_DIR, Settings
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -61,6 +63,16 @@ def main(argv: Optional[List[str]] = None) -> int:
   if args.to:
     settings.publish_url = args.to.strip().rstrip('/')
 
+  # The worker's own configuration file, if it is there. `run_worker.sh` already sources it,
+  # and the alternative is the failure this was written after: a bare
+  # `python -m service.app.publish --queue-all --to https://…` with no token in the
+  # environment, which the page refuses *before* reading the body -- so what comes back is
+  # `URLError: [SYS] unknown error (_ssl.c:2406)` rather than a 401, and nothing says the
+  # token is what is missing. Anything already in the environment wins.
+  from_worker_env = _worker_settings(settings)
+  if from_worker_env:
+    print('worker.env: took %s' % ', '.join(from_worker_env))
+
   if args.queue or args.queue_all:
     # Pieces that were analysed before there was anywhere to send them live only in the
     # local store, and re-running the analysis to publish them would be absurd. This marks
@@ -84,6 +96,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     print('nothing to send to: set SERVICE_PUBLISH_URL, or pass --to', file=sys.stderr)
     return 2
 
+  if not settings.publish_token and not _is_loopback(settings.publish_url):
+    print('no upload token is configured, and %s is not this machine: the page will '
+          'refuse every one of these before reading it (set SERVICE_PUBLISH_TOKEN, or '
+          'put it in service/broker/worker.env)' % settings.publish_url, file=sys.stderr)
+
   print('sending to %s' % settings.publish_url)
   while True:
     # `url` is passed as well as set: a marker remembers the address it was queued for, and
@@ -103,6 +120,44 @@ def main(argv: Optional[List[str]] = None) -> int:
       if first:
         print('  still failing: %s' % first.get('reason'))
     time.sleep(max(5.0, args.interval))
+
+
+def _worker_settings(settings: Settings) -> List[str]:
+  """Fill gaps in `settings` from the worker's env file. Returns what was taken.
+
+  A deliberately small parser rather than `source`: this reads a file of `KEY=value` lines,
+  ignores comments and blank lines, strips matching quotes, and never evaluates anything.
+  Anything already set in the environment wins, so a one-off override still works.
+  """
+  path = pathlib.Path(os.environ.get('NOTE_SEQ_WORKER_ENV')
+                      or (SERVICE_DIR / 'broker' / 'worker.env'))
+  if not path.is_file():
+    return []
+  taken: List[str] = []
+  for line in path.read_text(encoding='utf-8').splitlines():
+    line = line.strip()
+    if not line or line.startswith('#') or '=' not in line:
+      continue
+    key, _, value = line.partition('=')
+    key, value = key.strip(), value.strip().strip('"').strip("'")
+    if not key or not value:
+      continue
+    if key == 'SERVICE_PUBLISH_TOKEN' and not settings.publish_token:
+      settings.publish_token = value
+      taken.append('SERVICE_PUBLISH_TOKEN')
+    elif key == 'SERVICE_UPLOAD_TOKEN' and not settings.publish_token:
+      settings.publish_token = value
+      taken.append('SERVICE_UPLOAD_TOKEN')
+    elif key in ('SERVICE_PUBLISH_URL', 'NOTE_SEQ_VIEWER_URL') and not settings.publish_url:
+      settings.publish_url = value.rstrip('/')
+      taken.append(key)
+  return taken
+
+
+def _is_loopback(url: str) -> bool:
+  """Is this address this machine? A token is pointless on loopback and required off it."""
+  parsed = urllib.parse.urlsplit(url or '')
+  return parsed.hostname in ('localhost', '127.0.0.1', '::1', '[::1]') or not parsed.hostname
 
 
 def _queue(settings: Settings, args) -> List[str]:

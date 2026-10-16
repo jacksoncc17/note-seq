@@ -578,7 +578,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 137 tests, ~115 s
+.venv/bin/python -m pytest service/tests -q          # 140 tests, ~115 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

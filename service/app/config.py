@@ -15,6 +15,11 @@ import shutil
 import sys
 
 SERVICE_DIR = pathlib.Path(__file__).resolve().parents[1]     # service/
+
+# Where `service/run.sh` serves the page, and what `NOTE_SEQ_VIEWER_URL` means by default.
+# Named here because "the address is the same as the link unless it says otherwise" needs
+# to know when the link is only loopback.
+DEFAULT_VIEWER_URL = 'http://localhost:8100'
 REPO_ROOT = SERVICE_DIR.parent                                # the note-seq checkout
 ANALYZER_DIR = REPO_ROOT / 'analyzer'
 
@@ -97,7 +102,14 @@ class Settings:
     # with. This is the *outbox* side, so it belongs to the machine that analyses -- a
     # serving deployment leaves `SERVICE_PUBLISH_URL` empty and never pushes anything.
     # When it is empty nothing is queued, so the default is exactly the old behaviour.
-    self.publish_url = os.environ.get('SERVICE_PUBLISH_URL', '').strip().rstrip('/')
+    # An unset address follows `NOTE_SEQ_VIEWER_URL`, because the page a link points at is
+    # the page the piece belongs on -- one variable, so the two cannot drift into the state
+    # where the link names a deployment and the piece stays on this machine. The exception
+    # is the loopback default: there the store *is* this service, and sending would be a
+    # copy of a piece to itself.
+    viewer = os.environ.get('NOTE_SEQ_VIEWER_URL', '').strip().rstrip('/')
+    self.publish_url = (os.environ.get('SERVICE_PUBLISH_URL', '').strip().rstrip('/')
+                        or (viewer if viewer and viewer != DEFAULT_VIEWER_URL else ''))
     self.publish_token = (os.environ.get('SERVICE_PUBLISH_TOKEN', '').strip()
                           or self.upload_token)
     self.publish_timeout_s = float(os.environ.get('SERVICE_PUBLISH_TIMEOUT_S', 120))

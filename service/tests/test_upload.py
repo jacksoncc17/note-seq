@@ -435,6 +435,90 @@ def test_the_command_can_queue_pieces_analysed_before_there_was_an_address(tmp_p
   assert len(received) == 1
 
 
+def test_a_refusal_that_kills_the_connection_names_the_likely_cause(tmp_path, monkeypatch,
+                                                                   piece_dir):
+  """The shape this actually takes over TLS, which is how it was met in the field.
+
+  A page that refuses an upload answers before reading the body, so a client still writing
+  10 MB sees the connection go away. Spelled `Broken pipe` on loopback; over TLS, `urllib`
+  reports the same thing as `URLError: [SYS] unknown error (_ssl.c:2406)`, which names
+  neither end of the wire nor the cause. Measured against the deployed page: a 1 kB body
+  answers a clean 401, a 10 MB body fails this way -- because the refusal arrives while the
+  body is still going out.
+  """
+  import ssl
+  from urllib.error import URLError
+
+  from service.app import outbox
+
+  monkeypatch.delenv('SERVICE_PUBLISH_TOKEN', raising=False)
+  monkeypatch.delenv('SERVICE_UPLOAD_TOKEN', raising=False)
+  settings = outbox_settings(tmp_path, monkeypatch)
+  settings.publish_token = ''
+  outbox.enqueue(settings, 'hand-made', package(piece_dir), url=settings.publish_url)
+
+  def dead_socket(request, timeout=None):
+    raise URLError(ssl.SSLError(1, '[SYS] unknown error (_ssl.c:2406)'))
+
+  outcome = outbox.push(settings, outbox.pending(settings)[0], opener=dead_socket)
+  assert outcome['ok'] is False
+  assert 'no upload token is configured' in outcome['reason']
+  assert 'closed the connection' in outcome['reason']
+
+
+def test_the_command_takes_its_settings_from_the_workers_env_file(tmp_path, monkeypatch):
+  """The failure this was written after: a bare `--queue-all --to https://…` with the token
+  only in `service/broker/worker.env`, which `run_worker.sh` sources and nothing else did.
+
+  `SERVICE_PUBLISH_URL` may be absent from that file, in which case the page link in it is
+  the address -- the same rule as everywhere else.
+  """
+  import importlib
+
+  from service.app.config import Settings
+
+  env_file = tmp_path / 'worker.env'
+  env_file.write_text('# the worker\'s own file\n'
+                      'BROKER_URL=https://example.com/api/v1\n'
+                      "NOTE_SEQ_VIEWER_URL='https://example.com/note-seq'\n"
+                      'SERVICE_PUBLISH_TOKEN="a-token-from-the-file"\n')
+  monkeypatch.setenv('NOTE_SEQ_WORKER_ENV', str(env_file))
+  monkeypatch.setenv('SERVICE_DATA', str(tmp_path / 'data'))
+  monkeypatch.delenv('SERVICE_PUBLISH_TOKEN', raising=False)
+  monkeypatch.delenv('SERVICE_PUBLISH_URL', raising=False)
+  monkeypatch.delenv('NOTE_SEQ_VIEWER_URL', raising=False)
+
+  publish = importlib.import_module('service.app.publish')
+  settings = Settings(data_dir=tmp_path / 'data')
+  taken = publish._worker_settings(settings)
+  assert sorted(taken) == ['NOTE_SEQ_VIEWER_URL', 'SERVICE_PUBLISH_TOKEN']
+  assert settings.publish_token == 'a-token-from-the-file'
+  assert settings.publish_url == 'https://example.com/note-seq'
+
+  # what is already in the environment still wins over the file
+  monkeypatch.setenv('SERVICE_PUBLISH_TOKEN', 'from-the-environment')
+  other = Settings(data_dir=tmp_path / 'data')
+  publish._worker_settings(other)
+  assert other.publish_token == 'from-the-environment'
+
+
+def test_an_unset_address_follows_the_page_link(tmp_path, monkeypatch):
+  """One variable for "where the page is", used for the link and the delivery alike."""
+  from service.app.config import Settings
+
+  monkeypatch.delenv('SERVICE_PUBLISH_URL', raising=False)
+  monkeypatch.setenv('NOTE_SEQ_VIEWER_URL', 'https://example.com/note-seq')
+  assert Settings(data_dir=tmp_path / 'd1').publish_url == 'https://example.com/note-seq'
+
+  # ... but not when the link is the loopback default, where the store *is* this service
+  # and sending would copy a piece onto itself.
+  monkeypatch.setenv('NOTE_SEQ_VIEWER_URL', 'http://localhost:8100')
+  assert Settings(data_dir=tmp_path / 'd2').publish_url == ''
+
+  monkeypatch.setenv('SERVICE_PUBLISH_URL', 'https://explicit.example/note-seq')
+  assert Settings(data_dir=tmp_path / 'd3').publish_url == 'https://explicit.example/note-seq'
+
+
 def test_a_send_with_no_token_says_so_rather_than_broken_pipe(tmp_path, monkeypatch,
                                                               piece_dir):
   """Found by doing it: a refused upload answers before reading the body, so the sender
