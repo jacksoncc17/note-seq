@@ -6,6 +6,11 @@
 #   ... --once              # claim one job, run it, exit -- the smoke test
 #   ... --list-services     # what a fresh worker would load; no broker call
 #
+# This runs in the *foreground*, on purpose: the first lines it prints are the settings it
+# is about to use, and a supervisor that swallows them hides the one that says the token is
+# missing. To run it in the background, use `worker-ctl.sh start` beside this file -- it
+# adds a pid file and a log, and 'status' answers what 'ps' would.
+#
 # Two things this script exists to get right:
 #
 #   * **The interpreter.** Their `worker.py` is deliberately standard-library only, but

@@ -201,12 +201,18 @@ by calling `pipeline.analyse`, the function this service's own jobs call.
 Registering it is one command and no change to their repository:
 
 ```bash
-cd /home/wei/playground/goGames/selfCommentary/full-stack-fastapi-template
-WORKER_KEY=... python3 worker.py \
-    --plugin-dir /home/wei/music_gen/note-seq/service/broker \
-    --service note_seq_align \
-    --broker $BROKER_URL --key $WORKER_KEY --name lan-note-seq
+cd /home/wei/music_gen/note-seq
+./service/broker/run_worker.sh            # foreground, and it prints what it will use
+./service/broker/worker-ctl.sh start      # background, with a pid file and a log
 ```
+
+`run_worker.sh` is the worker itself; `worker-ctl.sh` is the thin layer around it
+(`start`, `stop`, `restart`, `status`, `log`, `services`) that keeps the process in
+`service/data/worker.pid` and its output in `service/data/worker.log`. Settings come from
+`service/broker/worker.env` (copy `worker.env.example`), so a restart is one command and no
+secret is retyped. The controller sends SIGTERM and *waits* rather than killing: taking a
+worker down mid-alignment loses that alignment and leaves the job claimed until the broker's
+lease expires, so `stop` says so and leaves `kill -9` to you.
 
 The worker publishes the contract at startup (`POST /worker/services`) — that *is* the
 whole registration: the service appears in their web app's submit form, rendered from
