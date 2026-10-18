@@ -4,6 +4,10 @@ Upload a MusicXML score and a recording (a file, or a YouTube URL). The service 
 two up — every bar gets a time in the recording — and serves a page showing the engraved
 score where you can **pick any range of bars and listen to exactly those bars**.
 
+A one-page introduction for a general audience — what it does, how, and what it is not —
+is `project-page.html`. It is a single self-contained file: no build, no external assets,
+so it opens from `file://`, a static host, or GitHub Pages as it is.
+
 It is the analyzer's analysis, moved to a server: the same alignment, the same measure
 map, the same engraving geometry. It is not a port of the Qt code but a reuse of it —
 `service/app/pipeline.py` calls `analyzer.align`, `analyzer.measures` and

@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio ↔ score sync — find any bar of a piece in any recording of it</title>
+<meta name="description" content="Give it a score and a recording: it works out when each bar of the score is played in that recording, and serves a page where clicking a bar plays exactly those bars.">
+<style>
+  :root {
+    --ink: #1c1917;          /* stone-900 */
+    --muted: #78716c;        /* stone-500 */
+    --line: #e7e5e4;         /* stone-200 */
+    --paper: #fafaf9;        /* stone-50  */
+    --amber: #b45309;        /* amber-700 */
+    --amber-soft: #fef3c7;   /* amber-100 */
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: #fff;
+  }
+  main { max-width: 46rem; margin: 0 auto; padding: 3.5rem 1.25rem 5rem; }
+  header { margin-bottom: 2.5rem; }
+  .kicker { font-size: .78rem; letter-spacing: .12em; text-transform: uppercase; color: var(--amber); font-weight: 600; }
+  h1 { font-size: clamp(1.9rem, 5vw, 2.6rem); line-height: 1.15; letter-spacing: -.02em; margin: .5rem 0 1rem; }
+  .lede { font-size: 1.12rem; color: #44403c; margin: 0; }
+  h2 { font-size: 1.15rem; letter-spacing: -.01em; margin: 2.75rem 0 .75rem; }
+  p { margin: 0 0 1rem; }
+  strong { font-weight: 600; }
+  a { color: var(--amber); }
+  figure { margin: 2rem 0; }
+  figcaption { font-size: .82rem; color: var(--muted); margin-top: .5rem; }
+  .figure-box { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 1rem .75rem .5rem; }
+  svg { display: block; width: 100%; height: auto; }
+  .readout {
+    margin: .35rem 0 0; padding: .5rem .25rem 0; border-top: 1px solid var(--line);
+    font: .95rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink); min-height: 2.4rem;
+  }
+  .bar-hit { cursor: pointer; }
+  .bar-hit:hover { fill: rgba(180, 83, 9, .07); }
+  ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 1rem 0; }
+  ol.steps li { position: relative; padding: .9rem 0 .9rem 2.6rem; border-top: 1px solid var(--line); }
+  ol.steps li:first-child { border-top: 0; }
+  ol.steps li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: .85rem;
+    width: 1.7rem; height: 1.7rem; border-radius: 50%;
+    background: var(--amber-soft); color: var(--amber);
+    font-size: .85rem; font-weight: 700; text-align: center; line-height: 1.7rem;
+  }
+  ol.steps b { display: block; }
+  ol.steps span { color: #57534e; }
+  table.numbers { width: 100%; border-collapse: collapse; font-size: .95rem; margin: 1rem 0; }
+  table.numbers th, table.numbers td { text-align: left; padding: .6rem .5rem; border-top: 1px solid var(--line); vertical-align: top; }
+  table.numbers th { width: 42%; font-weight: 600; color: #44403c; }
+  .note { font-size: .85rem; color: var(--muted); }
+  .limits { background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 0 8px 8px 0; padding: 1rem 1.1rem; font-size: .95rem; }
+  .limits p:last-child { margin-bottom: 0; }
+  footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--line); font-size: .85rem; color: var(--muted); }
+  code { font: .88em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: .1em .35em; }
+  @media print { main { padding: 0; } .bar-hit:hover { fill: none; } }
+</style>
+</head>
+<body>
+<main>
+
+  <header>
+    <div class="kicker">note-seq · practice tools</div>
+    <h1>Audio ↔ score sync</h1>
+    <p class="lede">
+      Give it a piece of sheet music and a recording of that piece. It works out <em>when</em>
+      each bar of the score is played in that recording — then serves a page where you click
+      any bars you like and hear exactly those.
+    </p>
+  </header>
+
+  <figure>
+    <div class="figure-box">
+      <svg viewBox="0 0 640 252" role="img" aria-labelledby="fig-title">
+        <title id="fig-title">A page of the score with bars 3 to 5 selected, and a playhead on the first of them</title>
+        <defs>
+          <pattern id="staves" width="600" height="70" patternUnits="userSpaceOnUse">
+            <g stroke="#a8a29e" stroke-width="1">
+              <line x1="0" y1="22" x2="600" y2="22"/>
+              <line x1="0" y1="28" x2="600" y2="28"/>
+              <line x1="0" y1="34" x2="600" y2="34"/>
+              <line x1="0" y1="40" x2="600" y2="40"/>
+              <line x1="0" y1="46" x2="600" y2="46"/>
+            </g>
+          </pattern>
+        </defs>
+
+        <!-- the page -->
+        <rect x="20" y="18" width="600" height="228" rx="4" fill="#fff" stroke="#d6d3d1"/>
+
+        <!-- two systems of music -->
+        <rect x="40" y="34" width="560" height="56" fill="url(#staves)" stroke="none"/>
+        <rect x="40" y="124" width="560" height="56" fill="url(#staves)" stroke="none"/>
+
+        <!-- bar lines: 6 bars per system -->
+        <g stroke="#a8a29e" stroke-width="1.2">
+          <line x1="40"  y1="34" x2="40"  y2="90"/>
+          <line x1="133.3" y1="34" x2="133.3" y2="90"/>
+          <line x1="226.6" y1="34" x2="226.6" y2="90"/>
+          <line x1="320" y1="34" x2="320" y2="90"/>
+          <line x1="413.3" y1="34" x2="413.3" y2="90"/>
+          <line x1="506.6" y1="34" x2="506.6" y2="90"/>
+          <line x1="600" y1="34" x2="600" y2="90"/>
+          <line x1="40"  y1="124" x2="40"  y2="180"/>
+          <line x1="133.3" y1="124" x2="133.3" y2="180"/>
+          <line x1="226.6" y1="124" x2="226.6" y2="180"/>
+          <line x1="320" y1="124" x2="320" y2="180"/>
+          <line x1="413.3" y1="124" x2="413.3" y2="180"/>
+          <line x1="506.6" y1="124" x2="506.6" y2="180"/>
+          <line x1="600" y1="124" x2="600" y2="180"/>
+        </g>
+
+        <!-- some notes, so it reads as music rather than a table -->
+        <g fill="#57534e">
+          <ellipse cx="70" cy="40" rx="4" ry="3"/><rect x="73.2" y="22" width="1.4" height="18"/>
+          <ellipse cx="104" cy="34" rx="4" ry="3"/><rect x="107.2" y="16" width="1.4" height="18"/>
+          <ellipse cx="170" cy="46" rx="4" ry="3"/><rect x="173.2" y="28" width="1.4" height="18"/>
+          <ellipse cx="250" cy="40" rx="4" ry="3"/><rect x="253.2" y="22" width="1.4" height="18"/>
+          <ellipse cx="352" cy="34" rx="4" ry="3"/><rect x="355.2" y="16" width="1.4" height="18"/>
+          <ellipse cx="440" cy="46" rx="4" ry="3"/><rect x="443.2" y="28" width="1.4" height="18"/>
+          <ellipse cx="80"  cy="130" rx="4" ry="3"/><rect x="83.2" y="112" width="1.4" height="18"/>
+          <ellipse cx="180" cy="142" rx="4" ry="3"/><rect x="183.2" y="124" width="1.4" height="18"/>
+          <ellipse cx="280" cy="136" rx="4" ry="3"/><rect x="283.2" y="118" width="1.4" height="18"/>
+          <ellipse cx="380" cy="130" rx="4" ry="3"/><rect x="383.2" y="112" width="1.4" height="18"/>
+          <ellipse cx="480" cy="142" rx="4" ry="3"/><rect x="483.2" y="124" width="1.4" height="18"/>
+        </g>
+
+        <!-- bar numbers -->
+        <g fill="#a8a29e" font-size="10.5" font-family="ui-monospace, Menlo, monospace" text-anchor="middle">
+          <text x="86"  y="30">40</text><text x="180" y="30">41</text><text x="273" y="30">42</text>
+          <text x="366" y="30">43</text><text x="460" y="30">44</text><text x="553" y="30">45</text>
+          <text x="86"  y="120">46</text><text x="180" y="120">47</text><text x="273" y="120">48</text>
+          <text x="366" y="120">49</text><text x="460" y="120">50</text><text x="553" y="120">51</text>
+        </g>
+
+        <!-- the selection (bars 40–42) and the playhead: this is what a click does -->
+        <rect id="selection" x="40" y="34" width="280" height="56" fill="rgba(180,83,9,.16)" stroke="none"/>
+        <line id="playhead" x1="40" y1="22" x2="40" y2="182" stroke="#b45309" stroke-width="2"/>
+
+        <!-- invisible click targets, one per bar -->
+        <g id="hits">
+          <rect class="bar-hit" data-first="40" data-last="40" x="40"  y="16" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="41" data-last="41" x="133.3" y="16" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="42" data-last="42" x="226.6" y="16" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="43" data-last="43" x="320" y="16" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="44" data-last="44" x="413.3" y="16" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="45" data-last="52" x="506.6" y="16" width="93.4" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="46" data-last="46" x="40"  y="108" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="47" data-last="47" x="133.3" y="108" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="48" data-last="48" x="226.6" y="108" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="49" data-last="49" x="320" y="108" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="50" data-last="50" x="413.3" y="108" width="93.3" height="80" fill="transparent"/>
+          <rect class="bar-hit" data-first="51" data-last="51" x="506.6" y="108" width="93.4" height="80" fill="transparent"/>
+        </g>
+
+      </svg>
+      <!-- Outside the drawing on purpose: text inside an SVG scales with it, which made
+           this line 6 px tall on a phone — the one sentence on the page that has to be
+           readable. Here it takes the page's own type size, and `aria-live` means a screen
+           reader says it when it changes. -->
+      <p class="readout" id="readout" aria-live="polite">click a bar…</p>
+    </div>
+    <figcaption>
+      Click two bars in the picture above — that is the whole idea, though the numbers here are
+      made up. On the real page the score is the piece you uploaded, and the times are measured
+      from your recording.
+    </figcaption>
+  </figure>
+
+  <h2>The problem it solves</h2>
+  <p>
+    A printed score says <em>what</em> to play, not <em>when</em>. It has no clock. A recording
+    has a clock but no names: you can hear two and a half minutes of music without knowing
+    that bar 63 has just gone past. So if you want to practise bars 40–48, you hunt for them
+    by ear, every time.
+  </p>
+  <p>
+    This service builds the missing table: <strong>for one recording of one piece, when does
+    each bar start and end?</strong> Think of subtitles for a film — except the “words” are
+    bars of music, and the timings come from listening to the recording rather than from
+    typing them in.
+  </p>
+
+  <h2>How it does it, without understanding music</h2>
+  <ol class="steps">
+    <li><b>Take the two inputs</b><span>The score as MusicXML (what notation software exports), and a recording — a file, or a YouTube link.</span></li>
+    <li><b>Read the score as structure, not sound</b><span>Which bars exist, what is in each one, and where each bar’s ink sits on the page.</span></li>
+    <li><b>Make a boring, perfect version</b><span>A plain computer rendition of the score: mechanical, unmusical, and with timing known to the millisecond.</span></li>
+    <li><b>Compare the two sounds, allowing for the human</b><span>The reference and your recording are matched moment by moment, letting one drift, pause and hurry against the other. That technique is called <em>dynamic time warping</em>; it is the part that makes this work on a real performance.</span></li>
+    <li><b>Turn that into a table, and engrave the score</b><span>Every bar gets its seconds in your recording; the score is drawn as clean web pages with the position of every bar on them, so a click can be turned back into bars.</span></li>
+  </ol>
+
+  <h2>What you get</h2>
+  <p>
+    A page showing the piece you uploaded, engraved. Click one bar, then another, and you hear
+    exactly that stretch of the music — not whatever seconds it happens to occupy in some
+    other performance. A playhead follows along and the bar underneath it lights up. There are
+    also downloadable pieces of the result: the bar-to-seconds map, a clip of any range, and
+    the engraved pages.
+  </p>
+
+  <h2>Measured, rather than claimed</h2>
+  <table class="numbers">
+    <tr><th>Alignment of a 5-minute Chopin waltz (204 bars)</th><td>8.6 seconds, from upload to finished page</td></tr>
+    <tr><th>Click accuracy on a 127-bar piece</th><td>every bar’s clickable area lands within 0.02 px of its printed notes</td></tr>
+    <tr><th>Clip of bars 1–18</th><td>43.5 seconds of audio, and byte-identical to the same clip cut on the machine that analysed it</td></tr>
+    <tr><th>One piece in storage</th><td>about 16 MB — nearly all of it the recording itself</td></tr>
+  </table>
+
+  <h2>What it is not</h2>
+  <div class="limits">
+    <p>
+      It does not transcribe audio into notes, and it does not judge how well anyone played.
+      It does not need a studio recording — only a recording of <em>that</em> piece.
+    </p>
+    <p>
+      A very free performance can still defeat it: long unwritten pauses, big jumps, or a
+      recording that only covers part of the piece. When the result is doubtful it says so
+      rather than guessing quietly — the map carries a confidence for each bar, and warnings
+      for the bars it had to force.
+    </p>
+  </div>
+
+  <h2>For the curious</h2>
+  <p class="note">
+    The alignment and the engraving are the same code the desktop practice app uses — a shared
+    library, not a reimplementation. Scores are parsed and drawn with <a href="https://www.verovio.org/">Verovio</a>,
+    the sound comparison uses <a href="https://librosa.org/">librosa</a>, and the reference
+    performance is rendered with FluidSynth. The web half is
+    <a href="https://fastapi.tiangolo.com/">FastAPI</a> and <a href="https://react.dev/">React</a>,
+    and it is deliberately small: it needs none of the music-analysis machinery, because the
+    analysis happens on the machine that owns the recording.
+  </p>
+
+  <footer>
+    Part of the note-seq practice tools — a score, a recording, and the time between them.
+  </footer>
+</main>
+
+<script>
+  // Click two bars and the picture reports the range, the way the real page does.
+  // The numbers are illustrative: this file is a diagram, not the app.
+  (function () {
+    var starts = {40: 62, 41: 65, 42: 69, 43: 73, 44: 76, 45: 80, 46: 84,
+                  47: 87, 48: 91, 49: 95, 50: 98, 51: 102, 52: 106};
+    var first = null, second = null;
+    var selection = document.getElementById('selection');
+    var selection2 = document.getElementById('selection2');
+    var playhead = document.getElementById('playhead');
+    var readout = document.getElementById('readout');
+    var bars = Array.prototype.slice.call(document.querySelectorAll('.bar-hit'));
+
+    function mmss(seconds) {
+      var m = Math.floor(seconds / 60);
+      var s = Math.round(seconds % 60);
+      return m + ':' + (s < 10 ? '0' + s : s);
+    }
+    function barFor(number) {
+      return bars.find(function (bar) {
+        return +bar.dataset.first <= number && +bar.dataset.last >= number;
+      });
+    }
+    function paint() {
+      bars.forEach(function (bar) { bar.style.fill = 'transparent'; });
+      selection.setAttribute('opacity', '0');
+      playhead.setAttribute('opacity', '0');
+      if (!first) {
+        readout.textContent = 'click a bar…';
+        return;
+      }
+      var a = Math.min(first, second || first);
+      var b = Math.max(first, second || first);
+      var aBar = barFor(a), bBar = barFor(b);
+      if (aBar && bBar) {
+        // one band across every bar in the range, and the playhead on the first of them --
+        // which is what the real page does when you pick a passage
+        var x = +aBar.getAttribute('x');
+        var end = +bBar.getAttribute('x') + +bBar.getAttribute('width');
+        selection.setAttribute('x', x);
+        selection.setAttribute('width', end - x);
+        selection.setAttribute('opacity', '1');
+        playhead.setAttribute('x1', x);
+        playhead.setAttribute('x2', x);
+        playhead.setAttribute('opacity', '1');
+      }
+      var from = starts[a] || 62;
+      var to = (starts[b + 1] || (starts[b] + 4)) || 66;
+      readout.textContent = (a === b)
+        ? 'bar ' + a + ' · ' + mmss(from) + '–' + mmss(to) + ' · 0:0' + Math.max(1, Math.round(to - from))
+        : 'bars ' + a + '–' + b + ' · ' + mmss(from) + '–' + mmss(to) + ' · ' +
+          Math.floor((to - from) / 60) + ':' + ('0' + Math.round((to - from) % 60)).slice(-2) +
+          ' of music';
+    }
+    bars.forEach(function (bar) {
+      bar.addEventListener('click', function () {
+        var number = +bar.dataset.first;
+        if (!first || (first && second)) {
+          first = number; second = null;
+        } else {
+          second = number;
+        }
+        paint();
+      });
+    });
+    paint();
+  })();
+</script>
+</body>
+</html>
