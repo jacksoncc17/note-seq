@@ -1,4 +1,4 @@
-# Patches and operations for the broker: four patches, two procedures
+# Patches and operations for the broker: five patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -302,3 +302,43 @@ effect the next time that worker starts, because that is when it publishes.
 plugin's construction ("The note-seq broker plugin: one job, a few artifacts, …") and now
 says what choosing it does — *"Align a score with a recording of it: bar timings, a clip of
 any passage, a clickable page."*
+
+
+---
+
+# (f) An optional field left empty is a 422: `optional-fields-may-be-empty.patch`
+
+Reported as "why do I have to fill in first bar and last bar when the page lets me skip the
+range?" — and the fault is in the form, not in the service contract:
+
+```
+ServiceForm.tsx  initial(): no default → ""          (for every non-checkbox, non-file control)
+ServiceForm.tsx  submit():  { ...current }           → sends first_bar: ""
+broker           param_schema._type_ok(): "" is not an int
+                 → 422 "first_bar: expected integer"
+```
+
+Nothing about the service requires them: `param_schema` lists only `score` in `required`, and
+`note_seq_align._range()` already treats an absent or empty pair as "no passage" — *"give
+both first_bar and last_bar, or neither"*. The defect is that an untouched field is sent as an
+empty string, and only numerics notice: an empty string is a valid `string`, so optional text
+fields never showed the problem.
+
+The patch drops empty values for fields that are not required, just before submitting. That
+is deliberately general: it fixes every optional numeric field of every service, rather than
+one schema learning to spell "I am an integer, unless I am empty". Required fields keep their
+empty value, so the broker still names the one that is missing.
+
+Until it is deployed, the workaround on the form is to fill both numbers (which produces a
+clip — there is no way to say "no passage" from the form yet), or to omit them entirely:
+
+```bash
+curl -s -X POST https://${DOMAIN}/api/v1/jobs/generic \
+  -H "Authorization: Bearer $TOKEN" -F service=note_seq_align \
+  -F 'params={"title":"from curl"}' -F file_field=score -F files=@score.mxl
+```
+
+Verified: applies cleanly to the current checkout, and both the original and patched files
+parse as TSX (0 syntax errors) with the TypeScript compiler from the note-seq frontend, since
+their checkout has no `tsc` on disk to typecheck with. `required` is declared at line 234,
+`submit` at 245, so the reference resolves.
