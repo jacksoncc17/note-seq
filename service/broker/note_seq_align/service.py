@@ -1,4 +1,9 @@
-"""The note-seq broker plugin: one job, a few artifacts, the analysis of `app.pipeline`.
+"""Align a score with a recording of it: bar timings, a clip of any passage, a clickable page.
+
+This first line is not just documentation. The worker publishes a service's description to
+the broker as the *first line of its plugin's module docstring*, and the broker's submit form
+shows it -- under the picker for the selected service, and on hover over each item. So it is
+written as the sentence a person choosing a service needs, not as a note to a maintainer.
 
 Written against the contract in `worker_plugins/base.py` of the reference stack:
 

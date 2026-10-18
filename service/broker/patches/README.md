@@ -1,4 +1,4 @@
-# Patches and operations for the broker: three patches, two procedures
+# Patches and operations for the broker: four patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -261,3 +261,44 @@ curl -s -X POST "https://${DOMAIN}/api/v1/admin/workers/${WORKER_ID}/active?acti
 It stops claiming new jobs (the job it holds, if any, still has to finish: the lease is what
 prevents a second worker racing it) but the service stays on the form as a service nothing
 will run. Removing the row is the way to take it off the form.
+
+
+---
+
+# (e) A hint on hover, in the service picker: `service-description-on-hover.patch`
+
+One attribute, because the interesting part is that **the data was already flowing** and only
+one place failed to show it:
+
+```
+plugin docstring, first line   (services/*/service.py, worker_plugins/*.py)
+  → worker.py: description=_first_line(plugin.__doc__)          at startup
+  → POST /worker/services → upsert_service(description=…)
+  → GET  /jobs/services  → ServicePublic.description            (already in the client type)
+  → submit.tsx: shown under the picker for the *selected* service
+  → <-- and nowhere on the items, which is what this patches
+```
+
+So no backend change, no schema change, no new field: `submit.tsx` puts the description on
+each `<SelectItem>` as a native `title`, which is a hover hint in every browser with no
+component and no JS. It goes on the item rather than in its text because Radix mirrors an
+item's text into the closed trigger — a second line would then also appear in the box after
+you pick the service.
+
+**Where the text comes from is worth knowing when writing a plugin:** the description is the
+*first line of the module docstring*, so that line is user-facing copy, not a note to a
+maintainer. Two existing services currently publish a line that is a wrapped paragraph's
+first line and therefore ends mid-sentence:
+
+* `services/sgf_video/service.py` → *"The SGF video render service -- the pipeline this
+  system was built for, expressed as"*
+* `services/intonationCheck/service.py` → *"intonationCheck -- compare two recordings of the
+  same part against the score."* (this one is fine)
+
+Rewriting the first line of such a docstring is the whole fix — no code change, and it takes
+effect the next time that worker starts, because that is when it publishes.
+
+`note_seq_align` was rewritten the same way for the same reason: it used to describe the
+plugin's construction ("The note-seq broker plugin: one job, a few artifacts, …") and now
+says what choosing it does — *"Align a score with a recording of it: bar timings, a clip of
+any passage, a clickable page."*
