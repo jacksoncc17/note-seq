@@ -34,5 +34,42 @@ services:
       retries: 3
       start_period: 15s
 
+  # A web UI for looking around, optional and never on by default:
+  #
+  #   GARAGE_ADMIN_TOKEN=$(grep -oP '(?<=^admin_token = ")[^"]+' garage.toml) \
+  #     docker compose --profile ui up -d          # then http://<this host>:3909
+  #   docker compose --profile ui down             # and it is gone
+  #
+  # `khairul169/garage-webui` is the Garage-native one: cluster health and layout, buckets
+  # and their objects, access keys. It reads the admin token from `garage.toml`, which is
+  # mounted read-only below; the token is *not* written into this file, because this file is
+  # committed and garage.toml is not.
+  #
+  # It talks to the admin API over the compose network (`API_BASE_URL` below), so port 3903
+  # stays unpublished -- and that matters: the admin API can create and delete keys, so this
+  # container is the only thing that reaches it. The UI itself can delete the archive, so keep
+  # it on the LAN (or behind Tailscale) rather than publishing 3909 to the internet.
+  #
+  # To require a login, set AUTH_USER_PASS (see the project's README: `htpasswd -nbBC 10`).
+  webui:
+    image: khairul169/garage-webui:latest
+    container_name: garage-webui
+    restart: unless-stopped
+    profiles: ["ui"]
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+    environment:
+      API_BASE_URL: http://garage:3903
+      # Empty is fine when the mounted config is readable: the UI takes the token from it.
+      API_ADMIN_KEY: ${GARAGE_ADMIN_TOKEN:-}
+      S3_ENDPOINT_URL: http://garage:3900
+      S3_REGION: garage
+      AUTH_USER_PASS: ${GARAGE_UI_AUTH:-}
+    ports:
+      - "3909:3909"
+    depends_on:
+      garage:
+        condition: service_healthy
+
 volumes:
   garage-data:

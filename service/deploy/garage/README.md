@@ -41,6 +41,46 @@ SSH tunnel, not a published port.
 There is no TLS here: Garage speaks plain HTTP on 3900. Inside the LAN that is fine; across
 the internet, put it behind a tunnel or a TLS-terminating proxy rather than opening the port.
 
+## A web UI, if you want one
+
+Garage itself ships **no admin UI**: a CLI, an admin HTTP API (JSON, for automation and
+monitoring), Prometheus metrics, and — separate thing — the `[s3_web]` endpoint, which serves
+bucket *contents* as static websites. That last one is easy to mistake for a browser: per the
+[cookbook](https://garagehq.deuxfleurs.fr/documentation/cookbook/exposing-websites/) it does
+**not** do directory listings, it supports only an index and an error document, and it is
+**publicly** exposed with no authentication — so it is how you *publish* a bucket, not how you
+administer one.
+
+Two community UIs exist, and one of them is wired in here:
+
+```bash
+GARAGE_ADMIN_TOKEN=$(grep -oP '(?<=^admin_token = ")[^"]+' garage.toml) \
+  docker compose --profile ui up -d       # then http://<this host>:3909
+docker compose --profile ui down          # and it is gone
+```
+
+* **[khairul169/garage-webui](https://github.com/khairul169/garage-webui)** — what is configured
+  in `compose.yml`: cluster health and layout, buckets with an object browser, access keys. It
+  reads the admin token from the mounted `garage.toml`, and reaches the admin API as
+  `http://garage:3903` **inside the compose network**, so 3903 stays unpublished. Verified
+  here: the dashboard reports the live cluster (`Healthy`, 1 node, 256 partitions) and the
+  bucket's contents (`9.6 MB` — the one archived piece). It also takes an optional
+  `AUTH_USER_PASS=user:bcrypt-hash` login (`htpasswd -nbBC 10`), which is worth setting.
+* **[stouder-io/mechanic](https://github.com/stouder-io/mechanic)** — the other one, also
+  Garage-native, with website config and admin-token management. Its README's image reference
+  (`ghcr.io/stouderio/mechanic:latest`) returned *denied* when tried from here, so it is not
+  wired in; if you want it, build it from source or use a JAR release.
+
+If a UI is more than you want, the [browsing tools page](https://garagehq.deuxfleurs.fr/documentation/connect/cli/)
+lists what Garage's own authors recommend: **`mc`** (MinIO client, "recommended" and a single
+static binary), `aws s3`, `rclone` (whose `rclone ncdu` is a terminal browser), `s5cmd`,
+Cyberduck/`duck` (which ships a Garage connection profile), and `sftpgo` (which has a web UI and
+an SFTP front end over an S3 backend).
+
+**Treat any UI here as an admin console.** It holds the admin token, it can create and delete
+keys, and it can delete the archive. Keep it on the LAN — if you want it from elsewhere, put it
+behind Tailscale rather than publishing 3909.
+
 ## Filling the layout is the step people miss
 
 A node with no role assigned accepts **no writes at all** — `garage status` says
