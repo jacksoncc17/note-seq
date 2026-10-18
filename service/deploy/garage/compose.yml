@@ -1,0 +1,38 @@
+# Garage, containerised, for a machine that is not this one.
+#
+#   cp garage.toml.example garage.toml      # then replace the two secrets in it
+#   docker compose up -d
+#   ./bootstrap.sh                          # creates the layout, the key and the bucket
+#
+# The image is pinned: Garage's on-disk format has changed between minor versions, and an
+# archive that a newer container cannot read is a worse failure than a missing update.
+# Bump the tag deliberately, with `docker compose exec garage garage --version` to confirm.
+services:
+  garage:
+    image: dxflrs/garage:v2.1.0
+    container_name: garage
+    restart: always
+    # The S3 API only. The web UI (3902) and the admin API (3903) stay on the container's
+    # network: the admin endpoint can create keys, and neither is needed by a client.
+    ports:
+      - "3900:3900"
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      # One volume for both metadata and data, so a backup is one thing to copy.
+      - garage-data:/var/lib/garage
+    healthcheck:
+      # Exec form, because **this image has no shell** -- a `CMD-SHELL` check cannot run at
+      # all, and the container reports `unhealthy` forever while answering requests
+      # perfectly, which then fails `docker compose up --wait` on a deploy.
+      #
+      # `garage status` exits non-zero until the daemon answers on its RPC port, which is
+      # what "up" means here; the S3 endpoint alone would pass while the node still has no
+      # role assigned and refuses every write.
+      test: ["CMD", "/garage", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  garage-data:

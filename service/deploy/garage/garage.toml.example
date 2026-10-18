@@ -1,0 +1,49 @@
+# Garage, for storing finished pieces at home. Copy to `garage.toml` and replace the two
+# secrets below (any 64 / 32 hex characters; `openssl rand -hex 32` and `-hex 16`).
+#
+# Single node, single replica: this is a home archive, not a cluster. Every value here is
+# explained by the comments because the file is the whole configuration -- there is no
+# database, no migrations and nothing else to remember.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+
+# One node, one copy. Garage v2 dropped the old `replication_mode = "single"` key in favour
+# of these two; with a single machine, `replication_factor = 1` is the only workable value
+# and the mode is then moot (`consistent` with factor 1 has read and write quorum 1).
+replication_factor = 1
+consistency_mode = "consistent"
+db_engine = "lmdb"
+
+# LMDB is the recommended engine and the one that can corrupt on an unclean shutdown. These
+# snapshots are the cheap insurance: it keeps the two most recent, and a snapshot is what
+# `garage meta snapshot` recovery needs. Two weeks of pieces is not worth losing to a power
+# cut.
+metadata_auto_snapshot_interval = "6h"
+
+# The RPC port peers use to gossip. Nothing peers with a single node, but Garage will not
+# start without a secret, and it must be 64 hex characters.
+rpc_bind_addr = "[::]:3901"
+rpc_secret = "1ac74920506c2e1d8d939dca5a28461cb7a0642e38828e5d10cfddca6c58571d"
+
+# The S3 API, and the region the client must sign with. Garage accepts any region string
+# here as long as the client signs the same one -- `garage` is the conventional choice and
+# is what `service/app/s3.py` defaults to.
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+# A web front end that can list buckets in a browser. Not needed for the archive, and it is
+# deliberately *not* published in the compose file: an unauthenticated listing of your
+# music is not something to expose while debugging.
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage.localhost"
+index = "index.html"
+
+# `garage` CLI over HTTP, used by the bootstrap commands in README.md.
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "5e7ca46814f0361bb86845fda31b09ee"
+metrics_token = "5e7ca46814f0361bb86845fda31b09ee"

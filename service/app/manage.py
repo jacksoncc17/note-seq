@@ -60,6 +60,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                       help='only jobs finished (or created) more than this many days ago')
   parser.add_argument('--keep', type=int, default=None,
                       help='keep this many of the newest jobs in the selection')
+  parser.add_argument('--restore-from', default=None, metavar='BUCKET',
+                      help='copy every archived piece into this store from an S3 bucket '
+                           '(needs SERVICE_ARCHIVE_URL/_KEY/_SECRET)')
+  parser.add_argument('--restore-url', default=None,
+                      help='the archive endpoint, for a bucket that is not the configured one')
+  parser.add_argument('--overwrite', action='store_true',
+                      help='with --restore-from, replace pieces this store already has')
   parser.add_argument('--tools', action='store_true',
                       help='the external tools and their versions, and how to update the '
                            'one that goes stale (yt-dlp)')
@@ -112,6 +119,9 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
   print('  database  %s' % _size(_file_bytes(settings.database)))
+
+  if args.restore_from:
+    return _restore(settings, pieces, args)
 
   if args.tools:
     _tools(settings)
@@ -256,6 +266,71 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 # ------------------------------------------------------------------------- helpers
+
+def _restore(settings: Settings, pieces: PieceStore, args) -> int:
+  """Refill this store from the archive bucket. The "the serving machine is disposable" bit.
+
+  Expects the package format `publish_remote` archives: one `pieces/<slug>.zip` per piece,
+  the same bytes the page's own upload endpoint accepts. A piece this store already has is
+  skipped unless `--overwrite`, so re-running after a partial restore finishes the job
+  rather than re-downloading everything.
+  """
+  import tempfile
+
+  from .s3 import ARCHIVE_PREFIX, S3Error, slug_of
+  from .uploads import PackageError, unpack_piece
+
+  if args.restore_url:
+    settings.archive_url = args.restore_url
+  settings.archive_bucket = args.restore_from
+  if not (settings.archive_url and settings.archive_key and settings.archive_secret):
+    print('the archive is not configured: set SERVICE_ARCHIVE_URL, SERVICE_ARCHIVE_KEY and '
+          'SERVICE_ARCHIVE_SECRET (or pass --restore-url)', file=sys.stderr)
+    return 2
+  try:
+    client = settings.archive_client()
+    listed = client.list(ARCHIVE_PREFIX)
+  except S3Error as e:
+    print('could not list %s: %s' % (settings.archive_bucket, e), file=sys.stderr)
+    return 1
+
+  names = [(slug_of(item['name']), item) for item in listed]
+  names = [(slug, item) for slug, item in names if slug]
+  print('archive %s/%s: %d piece(s)' % (settings.archive_url, settings.archive_bucket,
+                                        len(names)))
+  if not names:
+    return 0
+
+  restored = skipped = failed = 0
+  for slug, item in sorted(names):
+    if pieces.exists(slug) and not args.overwrite:
+      skipped += 1
+      print('  have     %-40s %s' % (slug, _size(item['bytes'])))
+      continue
+    try:
+      payload = client.get(item['name'])
+    except S3Error as e:
+      failed += 1
+      print('  failed   %-40s %s' % (slug, e), file=sys.stderr)
+      continue
+    staging = pieces.staging_path(slug)
+    if staging.exists():
+      shutil.rmtree(staging, ignore_errors=True)
+    try:
+      summary = unpack_piece(payload, staging, max_bytes=int(settings.max_piece_mb * (1 << 20)))
+      pieces.install(slug, staging)
+    except (PackageError, OSError) as e:
+      shutil.rmtree(staging, ignore_errors=True)
+      failed += 1
+      print('  failed   %-40s %s' % (slug, e), file=sys.stderr)
+      continue
+    restored += 1
+    print('  restored %-40s %-6s %d pages, %d bars'
+          % (slug, _size(summary['bytes']), summary['pages'], summary['bars']))
+
+  print('\n%d restored, %d already here, %d failed' % (restored, skipped, failed))
+  return 0 if failed == 0 else 1
+
 
 def _tools(settings: Settings) -> None:
   """What the pipeline shells out to, and how current it is.

@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, Optional
 from . import outbox
 from .config import REPO_ROOT, Settings, analyzer_importable
 from .pieces import PieceStore, fingerprint, slugify
+from .s3 import archive_name
 from .uploads import PackageError, pack_piece, package_url
 
 # Where each step sits in the progress bar. The alignment is the slow part by a wide
@@ -189,6 +190,32 @@ def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
 BACKLOG_PER_JOB = 3
 
 
+def archive_piece(settings: Settings, slug: str,
+                  payload: Optional[bytes] = None,
+                  log: Callable[[str], None] = lambda _m: None) -> Dict[str, Any]:
+  """Put the piece's package in the archive bucket. **Never fails a job.**
+
+  The same rule as publishing: the analysis succeeded, so a store that is down, a wrong
+  secret or a full disk must cost an archive entry and a log line, not a file somebody
+  waited five minutes for. `configured: False` when nothing is set, so a deployment without
+  an archive behaves exactly as before.
+  """
+  if not settings.archive_enabled:
+    return {'configured': False}
+  try:
+    if payload is None:
+      payload = pack_piece(PieceStore(settings).directory(slug))
+    result = settings.archive_client().put(archive_name(slug), payload)
+  except Exception as e:                     # noqa: BLE001 - see the docstring
+    log('could not archive %s: %s: %s' % (slug, type(e).__name__, e))
+    return {'configured': True, 'archived': False,
+            'reason': '%s: %s' % (type(e).__name__, e)}
+  log('archived %s (%.1f MB) to %s/%s'
+      % (slug, result['bytes'] / 1e6, settings.archive_bucket, result['name']))
+  return {'configured': True, 'archived': True, 'name': result['name'],
+          'bytes': result['bytes'], 'etag': result['etag']}
+
+
 def publish_remote(settings: Settings, slug: str,
                    log: Callable[[str], None] = lambda _m: None) -> Dict[str, Any]:
   """Hand a finished piece to the page that serves it, through the outbox.
@@ -206,23 +233,44 @@ def publish_remote(settings: Settings, slug: str,
   default, and the previous behaviour), otherwise whether it went -- and why not, if it
   did not.
   """
-  if not settings.publish_url:
-    return {'configured': False,
-            'reason': 'no SERVICE_PUBLISH_URL, so this piece stays on this machine'}
+  archive = {'configured': False}
+  payload: Optional[bytes] = None
 
-  store = PieceStore(settings)
-  try:
-    payload = pack_piece(store.directory(slug))
-  except PackageError as e:
-    return {'configured': True, 'sent': False, 'queued': False,
-            'reason': 'the piece could not be packaged: %s' % e}
+  if settings.publish_url or settings.archive_enabled:
+    # Packed once and used by both destinations: the same bytes go to the page that serves
+    # the piece and to the bucket that keeps it, so the two cannot hold different versions.
+    try:
+      payload = pack_piece(PieceStore(settings).directory(slug))
+    except PackageError as e:
+      if settings.archive_enabled:
+        archive = {'configured': True, 'archived': False,
+                   'reason': 'the piece could not be packaged: %s' % e}
+      if not settings.publish_url:
+        return {'configured': False, 'sent': False, 'queued': False,
+                'reason': 'the piece could not be packaged: %s' % e,
+                'archive': archive}
+      return {'configured': True, 'sent': False, 'queued': False,
+              'reason': 'the piece could not be packaged: %s' % e, 'archive': archive}
+
+  if settings.archive_enabled:
+    # Before the push: the archive is the copy that survives losing the serving machine, and
+    # `publish_remote` may spend a while on the network afterwards.
+    archive = archive_piece(settings, slug, payload=payload, log=log)
+
+  if not settings.publish_url:
+    return {'configured': False, 'sent': False, 'queued': False,
+            'reason': 'no SERVICE_PUBLISH_URL, so this piece stays on this machine',
+            'archive': archive}
 
   marker = outbox.enqueue(settings, slug, payload, url=settings.publish_url)
   entry = outbox.read_marker(marker) or {'slug': slug, 'url': settings.publish_url,
                                          'marker': str(marker)}
   outcome = outbox.push(settings, entry, timeout=settings.publish_timeout_s)
   if outcome.get('ok'):
-    log('sent %s (%.1f MB) to %s' % (slug, outcome['bytes'] / 1e6, settings.publish_url))
+    # `.get`: a push that reports success without a size is still a success, and a KeyError
+    # here would turn a delivered piece into a failed job.
+    log('sent %s (%.1f MB) to %s'
+        % (slug, outcome.get('bytes', 0) / 1e6, settings.publish_url))
   else:
     log('could not send %s yet; it stays queued: %s' % (slug, outcome.get('reason')))
 
@@ -237,7 +285,8 @@ def publish_remote(settings: Settings, slug: str,
           'queued': not outcome.get('ok'),
           'url': package_url(settings.publish_url, slug),
           'pending': outbox.count(settings),
-          'reason': outcome.get('reason', '')}
+          'reason': outcome.get('reason', ''),
+          'archive': archive}
 
 
 def analysis_config(settings: Settings):

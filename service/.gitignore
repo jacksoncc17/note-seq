@@ -17,3 +17,6 @@ broker/worker.env
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+
+# Garage's filled-in configuration: it holds the RPC secret and the admin token.
+deploy/garage/garage.toml

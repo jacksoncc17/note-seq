@@ -120,6 +120,19 @@ class Settings:
     self.accept_pieces = _flag('SERVICE_ACCEPT_PIECES', True)
     self.max_piece_mb = float(os.environ.get('SERVICE_MAX_PIECE_MB', 64))
 
+    # The archive: a copy of every finished piece in an S3-compatible bucket, so the machine
+    # that serves them is disposable -- wipe its volume, run one command, everything is back.
+    # Deliberately not on the request path: the page never reads from here, so a home
+    # connection that is down costs nothing except a stale archive. Empty URL means off.
+    self.archive_url = os.environ.get('SERVICE_ARCHIVE_URL', '').strip()
+    self.archive_bucket = os.environ.get('SERVICE_ARCHIVE_BUCKET', '').strip()
+    self.archive_key = os.environ.get('SERVICE_ARCHIVE_KEY', '').strip()
+    self.archive_secret = os.environ.get('SERVICE_ARCHIVE_SECRET', '').strip()
+    # Must match the store's configured region, or Garage answers AuthorizationHeaderMalformed
+    # -- which reads like a credentials problem and is not one.
+    self.archive_region = os.environ.get('SERVICE_ARCHIVE_REGION', 'garage').strip()
+    self.archive_timeout_s = float(os.environ.get('SERVICE_ARCHIVE_TIMEOUT_S', 120))
+
     # Behind a path-stripping reverse proxy (Traefik `stripPrefix`), this is the public
     # prefix, so the API's own docs and redirects name the right URLs. Empty when the
     # service is served at the root.
@@ -134,6 +147,22 @@ class Settings:
   @property
   def pieces_dir(self) -> pathlib.Path:
     return self.data_dir / 'pieces'
+
+  @property
+  def archive_enabled(self) -> bool:
+    return bool(self.archive_url and self.archive_bucket
+                and self.archive_key and self.archive_secret)
+
+  def archive_client(self):
+    """A client for the archive bucket, built from these settings.
+
+    A method rather than an import at module scope: `s3.py` is only needed by a deployment
+    that archives, and the serving half should not carry even a module it never runs.
+    """
+    from .s3 import Client
+    return Client(self.archive_url, self.archive_bucket, self.archive_key,
+                  self.archive_secret, region=self.archive_region,
+                  timeout=self.archive_timeout_s)
 
   @property
   def outbox_dir(self) -> pathlib.Path:
@@ -187,6 +216,9 @@ class Settings:
     return {'data_dir': str(self.data_dir), 'database': str(self.database),
             'read_only': self.read_only, 'root_path': self.root_path,
             'accept_pieces': self.accept_pieces, 'owner': self.owner or None,
+            # Never the key or the secret: this dict is served to the browser.
+            'archive': ({'endpoint': self.archive_url, 'bucket': self.archive_bucket}
+                        if self.archive_enabled else None),
             'publish_url': self.publish_url or None,
             'frontend': str(self.frontend_dist),
             'frontend_built': (self.frontend_dist / 'index.html').is_file(),

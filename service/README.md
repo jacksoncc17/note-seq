@@ -544,6 +544,54 @@ group table, or an access row keyed by `(piece, subject)` — but each is a diff
 decision, and this is the one that had to come first, because a piece that belongs to
 nobody cannot be shared correctly either.
 
+## An archive at home
+
+The serving deployment keeps each piece on its own disk, which is the right place for it —
+that is what makes a page click fast and keep working when your house is offline. The risk it
+leaves is that the droplet's volume is the *only* copy. So the machine that analyses can also
+write each finished piece to an S3-compatible bucket at home, and a fresh droplet can be
+refilled from it:
+
+```
+worker (LAN)  ──publish──►  droplet     ← serves the page; disposable
+     └─────────archive───►  Garage at home   ← master copy, ~10 MB per piece
+```
+
+Both destinations get **the same bytes**: one package (`pieces/<slug>.zip`, the format in
+`uploads.py`), packed once. `service/deploy/garage/` runs that store in Docker on another
+machine; `bootstrap.sh` there prints the four settings below.
+
+| setting | what it is |
+| --- | --- |
+| `SERVICE_ARCHIVE_URL` | the endpoint, e.g. `http://garage.lan:3900`. Empty means off |
+| `SERVICE_ARCHIVE_BUCKET` | the bucket, `note-seq` in the example deployment |
+| `SERVICE_ARCHIVE_KEY`, `SERVICE_ARCHIVE_SECRET` | an S3 key with read+write on that bucket |
+| `SERVICE_ARCHIVE_REGION` | default `garage`; it must match the store's own region or Garage answers `AuthorizationHeaderMalformed`, which reads like a credentials problem |
+
+Archiving is **never on the request path** and never fails a job: the analysis already
+succeeded, so a store that is down costs a log line and a missing archive entry, and the piece
+is still on the droplet. It happens *before* the push in `publish_remote`, because the bucket
+is the copy that survives losing the serving machine.
+
+**Refilling a wiped deployment** — this is the whole point:
+
+```bash
+python -m service.app.manage --restore-from note-seq            # whatever is missing
+python -m service.app.manage --restore-from note-seq --overwrite  # or everything
+```
+
+It lists `pieces/`, downloads what the local store does not have, and installs each one through
+exactly the same path the upload endpoint uses — so a restored piece is byte-for-byte the
+piece that was archived. Running it twice skips what is already there.
+
+The client is `app/s3.py`: signature v4 over `urllib`, about four verbs. boto3 would add ~40 MB
+to an image whose whole design is 20 packages, for `PUT`, `GET`, `HEAD` and `LIST`. Measured
+against the real store in `test_archive.py::test_the_signing_works_against_a_real_store`
+(opt-in, `SERVICE_ARCHIVE_URL=... pytest`), which is also how two of its own bugs were found:
+`dict(response.headers)` loses the case-insensitive lookup, so a `HEAD` of a real object
+reported zero bytes; and Garage answers `AccessDenied`, not AWS's `SignatureDoesNotMatch`, to a
+wrong secret.
+
 ## Keeping yt-dlp current
 
 A YouTube URL is the one input that depends on something outside this repository, and
@@ -634,7 +682,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 145 tests, ~115 s
+.venv/bin/python -m pytest service/tests -q          # 156 tests, ~115 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists
