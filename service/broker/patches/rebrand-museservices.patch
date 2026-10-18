@@ -1,0 +1,205 @@
+--- a/frontend/index.html
++++ b/frontend/index.html
+@@ -4,7 +4,7 @@
+     <meta charset="UTF-8" />
+     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <title>Full Stack FastAPI Project</title>
++    <title>MuseServices</title>
+     <link rel="icon" type="image/x-icon" href="/assets/images/favicon.png" />
+   </head>
+   <body>
+--- a/frontend/src/components/Common/Logo.tsx
++++ b/frontend/src/components/Common/Logo.tsx
+@@ -4,8 +4,10 @@
+ import { cn } from "@/lib/utils"
+ import icon from "/assets/images/fastapi-icon.svg"
+ import iconLight from "/assets/images/fastapi-icon-light.svg"
+-import logo from "/assets/images/fastapi-logo.svg"
+-import logoLight from "/assets/images/fastapi-logo-light.svg"
++
++/** What the app calls itself. Kept here rather than in the page title so the header, the
++ *  collapsed sidebar and the accessible name cannot drift apart. */
++const APP_NAME = "MuseServices"
+ 
+ interface LogoProps {
+   variant?: "full" | "icon" | "responsive"
+@@ -13,6 +15,16 @@
+   asLink?: boolean
+ }
+ 
++/**
++ * The wordmark is *text* now, not the drawn `fastapi-logo*.svg`.
++ *
++ * A name that is a picture has to be redrawn whenever it changes, at whatever sizes the
++ * layout happens to need, in both themes. As text it is one string, it inherits the theme's
++ * colour and the page's type size, and it is read aloud correctly by a screen reader.
++ *
++ * The icon is still an asset (`fastapi-icon.svg` / `fastapi-icon-light.svg`): replace those
++ * two files with your own mark and nothing here changes.
++ */
+ export function Logo({
+   variant = "full",
+   className,
+@@ -21,35 +33,36 @@
+   const { resolvedTheme } = useTheme()
+   const isDark = resolvedTheme === "dark"
+ 
+-  const fullLogo = isDark ? logoLight : logo
+   const iconLogo = isDark ? iconLight : icon
+ 
++  const wordmark = (extra?: string) => (
++    <span
++      className={cn("text-base font-semibold tracking-tight", extra, className)}
++    >
++      {APP_NAME}
++    </span>
++  )
++
+   const content =
+     variant === "responsive" ? (
+       <>
+-        <img
+-          src={fullLogo}
+-          alt="FastAPI"
+-          className={cn(
+-            "h-6 w-auto group-data-[collapsible=icon]:hidden",
+-            className,
+-          )}
+-        />
++        {wordmark("group-data-[collapsible=icon]:hidden")}
+         <img
+           src={iconLogo}
+-          alt="FastAPI"
++          alt={APP_NAME}
+           className={cn(
+             "size-5 hidden group-data-[collapsible=icon]:block",
+             className,
+           )}
+         />
+       </>
++    ) : variant === "full" ? (
++      <span className={cn("flex items-center gap-2", className)}>
++        <img src={iconLogo} alt="" className="size-5" aria-hidden="true" />
++        {wordmark()}
++      </span>
+     ) : (
+-      <img
+-        src={variant === "full" ? fullLogo : iconLogo}
+-        alt="FastAPI"
+-        className={cn(variant === "full" ? "h-6 w-auto" : "size-5", className)}
+-      />
++      <img src={iconLogo} alt={APP_NAME} className={cn("size-5", className)} />
+     )
+ 
+   if (!asLink) {
+--- a/frontend/src/components/Common/Footer.tsx
++++ b/frontend/src/components/Common/Footer.tsx
+@@ -22,7 +22,7 @@
+     <footer className="border-t py-4 px-6">
+       <div className="flex flex-col items-center justify-between gap-4 sm:flex-row">
+         <p className="text-muted-foreground text-sm">
+-          Full Stack FastAPI Template - {currentYear}
++          MuseServices - {currentYear}
+         </p>
+         <div className="flex items-center gap-4">
+           {socialLinks.map(({ icon: Icon, href, label }) => (
+--- a/frontend/src/routes/reset-password.tsx
++++ b/frontend/src/routes/reset-password.tsx
+@@ -60,7 +60,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Reset Password - FastAPI Template",
++        title: "Reset Password - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/_layout/admin.tsx
++++ b/frontend/src/routes/_layout/admin.tsx
+@@ -30,7 +30,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Admin - FastAPI Template",
++        title: "Admin - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/_layout/items.tsx
++++ b/frontend/src/routes/_layout/items.tsx
+@@ -22,7 +22,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Items - FastAPI Template",
++        title: "Items - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/_layout/index.tsx
++++ b/frontend/src/routes/_layout/index.tsx
+@@ -7,7 +7,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Dashboard - FastAPI Template",
++        title: "Dashboard - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/_layout/settings.tsx
++++ b/frontend/src/routes/_layout/settings.tsx
+@@ -17,7 +17,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Settings - FastAPI Template",
++        title: "Settings - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/login.tsx
++++ b/frontend/src/routes/login.tsx
+@@ -45,7 +45,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Log In - FastAPI Template",
++        title: "Log In - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/recover-password.tsx
++++ b/frontend/src/routes/recover-password.tsx
+@@ -42,7 +42,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Recover Password - FastAPI Template",
++        title: "Recover Password - MuseServices",
+       },
+     ],
+   }),
+--- a/frontend/src/routes/signup.tsx
++++ b/frontend/src/routes/signup.tsx
+@@ -51,7 +51,7 @@
+   head: () => ({
+     meta: [
+       {
+-        title: "Sign Up - FastAPI Template",
++        title: "Sign Up - MuseServices",
+       },
+     ],
+   }),
+--- a/deploy/env.production.example
++++ b/deploy/env.production.example
+@@ -11,7 +11,7 @@
+ # default-secret check and enables dev-only routes.
+ # FASTAPI_ENV=development
+ 
+-PROJECT_NAME="Go Video Broker"
++PROJECT_NAME="MuseServices"
+ 
+ # --- required secrets (generate, do not reuse these) ---
+ SECRET_KEY=GENERATE_ME

@@ -1,4 +1,4 @@
-# Three small patches for the broker: two for the dashboard, one for ownership
+# Patches and operations for the broker: three patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -172,3 +172,92 @@ Verified here: the patch applies cleanly to the current checkout (`git apply --c
 the three patched files compile, and the half that lives on this side is covered by
 `test_the_piece_belongs_to_whoever_asked_for_the_job`, which runs a real broker job through
 the real plugin and then asks the page's API as two different accounts.
+
+
+---
+
+# (d) Rebranding the site: `rebrand-museservices.patch`
+
+Not a functional patch — it renames the front end from the template's `FastAPI` to
+`MuseServices`, and how much of it needs a rebuild depends on which layer you touch.
+
+**What the patch changes** (12 files, applies cleanly to the current checkout):
+
+* `frontend/index.html` — the tab title, which is what a browser shows before the app boots;
+* `frontend/src/routes/**` — the eight per-route titles (`"Dashboard - FastAPI Template"` →
+  `"Dashboard - MuseServices"`);
+* `frontend/src/components/Common/Footer.tsx` — the footer line;
+* `frontend/src/components/Common/Logo.tsx` — **the one real change**: the wordmark is text
+  now, not the drawn `fastapi-logo*.svg`. A name that is a picture has to be redrawn for
+  every size and both themes; as text it is one string, it inherits the theme colour and the
+  page's type size, and a screen reader reads it correctly. The *icon* is still an asset —
+  replace `frontend/public/assets/images/fastapi-icon.svg` (and `-light`) with your own mark
+  and no code changes;
+* `deploy/env.production.example` — `PROJECT_NAME="MuseServices"`, which is what the backend
+  uses for its OpenAPI title, `/docs`, and outbound email subjects.
+
+**The name also lives in `.env`, which the patch deliberately does not touch.** That file is
+tracked in git *and* edited on the server, so patching it would make the droplet's
+`git pull --ff-only` fail — the exact failure `deploy.sh` refuses to deploy through. Set it
+on the droplet instead:
+
+```bash
+# on the droplet, in the broker repo
+sed -i 's/^PROJECT_NAME=.*/PROJECT_NAME="MuseServices"/' .env
+```
+
+**What needs which:**
+
+| change | how it takes effect |
+| --- | --- |
+| `PROJECT_NAME` in `.env` | restart the backend (no rebuild) |
+| anything under `frontend/src`, `index.html` | **rebuild** — the page is baked into the backend image |
+
+So the practical order is: apply the patch → push → `./deploy/deploy.sh` (with the build) →
+edit `.env` on the droplet → `./deploy/deploy.sh --no-build`. Or edit `.env` first and let
+one deploy do both.
+
+---
+
+# Unregistering a service from the site (e.g. `sgf_video`)
+
+There is no unregister endpoint, and it is worth knowing why: a service is a **contract a
+worker publishes about itself** at startup (`POST /worker/services` → `upsert_service`), the
+`service` table is that contract, and `GET /api/v1/jobs/services` — the list the submit form
+renders — returns every row in it. Nothing removes a row when a worker stops, on purpose: the
+broker must be able to validate a job that references a service whose worker is asleep.
+
+So removing one is three steps, in this order:
+
+```bash
+# 1. stop the worker that runs it, or it re-publishes on its next start
+#    (it publishes at startup only, so an already-running idle worker will not re-add it)
+
+# 2. drop the worker's binding, then the contract. The order matters: workerservice.service
+#    is a foreign key to service.name with no cascade, so the row cannot go first.
+docker compose -f compose.yml -f compose.deploy.yml exec -T db \
+  psql -U postgres -d app -c "DELETE FROM workerservice WHERE service = 'sgf_video'; \
+                              DELETE FROM service WHERE name = 'sgf_video';"
+
+# 3. check it is gone
+curl -s https://${DOMAIN}/api/v1/jobs/services -H "Authorization: Bearer $TOKEN" \
+  | python3 -c 'import json,sys; print([s["name"] for s in json.load(sys.stdin)["data"]])'
+```
+
+What survives, and should: **job history**. `job.service` is a plain string with no foreign
+key, so yesterday's jobs stay listed with their artifacts downloadable — unregistering a
+contract does not erase what it produced. What does *not* survive: the submit form no longer
+offers it, and a new submission naming it is refused, because the contract it would be
+validated against is gone.
+
+**If you only want it to stop working**, deactivate the worker instead — that is reversible
+and leaves the contract in place:
+
+```bash
+curl -s -X POST "https://${DOMAIN}/api/v1/admin/workers/${WORKER_ID}/active?active=false" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+It stops claiming new jobs (the job it holds, if any, still has to finish: the lease is what
+prevents a second worker racing it) but the service stays on the form as a service nothing
+will run. Removing the row is the way to take it off the form.
