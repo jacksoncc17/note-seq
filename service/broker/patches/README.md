@@ -342,3 +342,32 @@ Verified: applies cleanly to the current checkout, and both the original and pat
 parse as TSX (0 syntax errors) with the TypeScript compiler from the note-seq frontend, since
 their checkout has no `tsc` on disk to typecheck with. `required` is declared at line 234,
 `submit` at 245, so the reference resolves.
+
+
+---
+
+# Checking whether a frontend change is deployed
+
+Told the hard way: after a redeploy a fix appeared to have had no effect, and the first check
+agreed with that — because it grepped the entry bundle, and the router **code-splits routes**,
+so the form's code lives in a per-route chunk (`submit-<hash>.js`) that the page loads on
+navigation. The rebrand next to it was clearly live; the fix was simply in a file nobody had
+looked at.
+
+```bash
+./verify/check_deployed_bundle.sh https://www.jinshiming.net 'title:e.description'
+#   chunks 44 mentioned by the entry bundle
+#     submit-B1X313cX.js   6886 bytes  title:e.description:1
+#   1 chunk(s) matched: the change is deployed
+```
+
+Look for **minified** text, not source text: comments are stripped, names shortened, and
+whitespace removed, so `title={s.description ?? undefined}` is `title:e.description??void 0`
+in the bundle. The chunk's hash changes on every build, which is why the script discovers the
+names from the entry bundle instead of taking one as an argument.
+
+Worked example, from the deployment this was written for: the rebrand (`<title>MuseServices`,
+and `MuseServices` in the entry bundle) and the hover hint (`title:e.description`) were
+deployed; `optional-fields-may-be-empty.patch` was not — the submit chunk contained **one**
+`delete` (the file-field one) rather than the two the fix adds, which is exactly why leaving
+first/last bar empty still answered with a 422.
