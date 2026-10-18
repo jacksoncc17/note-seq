@@ -60,6 +60,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                       help='only jobs finished (or created) more than this many days ago')
   parser.add_argument('--keep', type=int, default=None,
                       help='keep this many of the newest jobs in the selection')
+  parser.add_argument('--tools', action='store_true',
+                      help='the external tools and their versions, and how to update the '
+                           'one that goes stale (yt-dlp)')
   parser.add_argument('--renders', action='store_true',
                       help='the analyzer\'s derived output (data/output/*)')
   parser.add_argument('--scratch', action='store_true',
@@ -109,6 +112,10 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
   print('  database  %s' % _size(_file_bytes(settings.database)))
+
+  if args.tools:
+    _tools(settings)
+    return 0
 
   removals: List[Dict[str, Any]] = []
 
@@ -249,6 +256,45 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 # ------------------------------------------------------------------------- helpers
+
+def _tools(settings: Settings) -> None:
+  """What the pipeline shells out to, and how current it is.
+
+  `yt-dlp` is the one that decays: YouTube changes how it serves video every few weeks and
+  a fetch starts failing with something cryptic in the job log. Naming the version and the
+  command to fix it is the difference between a five-minute update and an afternoon.
+  """
+  import importlib.metadata
+  import subprocess
+
+  def version(command: List[str]) -> str:
+    try:
+      out = subprocess.run(command, capture_output=True, text=True, timeout=20)
+      first = (out.stdout or out.stderr or '').strip().splitlines()
+      return first[0][:70] if first else 'no output'
+    except Exception as e:                      # noqa: BLE001 - reporting, not doing
+      return 'could not run: %s' % e
+
+  print('tools:')
+  print('  python    %s' % sys.version.split()[0])
+  print('  ffmpeg    %s' % (version([settings.ffmpeg, '-version']) if settings.ffmpeg
+                            else 'MISSING (needed to read every recording)'))
+  print('  ffprobe   %s' % (version([settings.ffprobe, '-version']) if settings.ffprobe
+                            else 'MISSING'))
+  try:
+    ytdlp = importlib.metadata.version('yt-dlp')
+  except Exception:                              # noqa: BLE001
+    ytdlp = None
+  print('  yt-dlp    %s' % (ytdlp or 'MISSING (YouTube URLs will not work)'))
+  if ytdlp:
+    # Not the release date of the package -- the version string is the date for yt-dlp
+    # (YYYY.MM.DD), which is the useful fact.
+    print('            version %s is a date: update when it is more than a few weeks old'
+          % ytdlp)
+    print('            update: %s -m pip install -U yt-dlp' % sys.executable)
+  print('  analyzer  %s' % ('present' if (settings.capabilities()['analyzer'])
+                            else 'MISSING (nothing can be analysed on this machine)'))
+
 
 def _all_jobs(store: JobStore) -> List[Dict[str, Any]]:
   """Every job row, newest first, as plain dicts."""

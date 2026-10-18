@@ -427,7 +427,8 @@ def fetch_youtube(settings: Settings, job_dir: pathlib.Path, url: str,
     with yt_dlp.YoutubeDL(options) as ydl:
       info = ydl.extract_info(url, download=True)
   except Exception as e:
-    raise PipelineError('could not fetch that YouTube URL: %s' % _short(e))
+    raise PipelineError('could not fetch that YouTube URL: %s%s'
+                        % (_short(e), _stale_ytdlp_hint(e)))
   found = sorted(job_dir.glob('download.*'))
   if not found:
     raise PipelineError('the download produced no file')
@@ -445,6 +446,46 @@ def fetch_youtube(settings: Settings, job_dir: pathlib.Path, url: str,
   (job_dir / 'source.txt').write_text(
       json.dumps({'title': title, 'duration': duration, 'url': url}), encoding='utf-8')
   return found[0]
+
+
+# What a *stale* yt-dlp looks like, as opposed to a video that is genuinely unavailable.
+# YouTube changes how it serves video every few weeks and yt-dlp is patched within days, so
+# the commonest cause of "it worked last month" is a version that has drifted. Deliberately
+# not included: "Video unavailable" and "Private video" -- those are the video's fault, and
+# telling somebody to upgrade over them would send them the wrong way at the wrong moment.
+STALE_YTDLP_SIGNS = (
+    'unable to extract',
+    'nsig',
+    'failed to parse data',
+    'player response',
+    'unable to download webpage',
+    'sign in to confirm',
+    'confirm your age',
+    'age-restricted',
+    'http error 403',
+    'requested format is not available',
+    'unsupported url',
+    'this content is not available',
+)
+
+
+def _installed_ytdlp() -> str:
+  try:
+    import importlib.metadata
+    return importlib.metadata.version('yt-dlp')
+  except Exception:                            # noqa: BLE001 - a version is a nicety
+    return '?'
+
+
+def _stale_ytdlp_hint(error: BaseException) -> str:
+  """A sentence naming the likely cause, or nothing when the cause is the video itself."""
+  text = str(error).lower()
+  if not any(sign in text for sign in STALE_YTDLP_SIGNS):
+    return ''
+  import sys
+  return ('  --  yt-dlp %s may be out of date: YouTube changes and the fix is usually '
+          '`%s -m pip install -U yt-dlp`, then retry the job'
+          % (_installed_ytdlp(), sys.executable))
 
 
 def convert_audio(settings: Settings, source: pathlib.Path, dest: pathlib.Path,

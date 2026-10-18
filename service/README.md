@@ -544,6 +544,52 @@ group table, or an access row keyed by `(piece, subject)` — but each is a diff
 decision, and this is the one that had to come first, because a piece that belongs to
 nobody cannot be shared correctly either.
 
+## Keeping yt-dlp current
+
+A YouTube URL is the one input that depends on something outside this repository, and
+`yt-dlp` is the part of it that decays: YouTube changes how it serves video every few weeks,
+the package is patched within days, and a version that has drifted fails with something
+cryptic in a job log. Three things make that a five-minute problem instead of an afternoon.
+
+**It says when it is the likely cause.** A fetch failure whose message looks like a stale
+version (`Unable to extract`, `Sign in to confirm`, `HTTP Error 403`, `nsig`, …) gets a
+sentence appended, naming the installed version and the exact command:
+
+```
+could not fetch that YouTube URL: ERROR: Unable to extract player response
+  --  yt-dlp 2026.8.19 may be out of date: YouTube changes and the fix is usually
+      `/path/to/.venv/bin/python -m pip install -U yt-dlp`, then retry the job
+```
+
+A video that is genuinely unavailable (`Private video`, `This video is unavailable`) does
+*not* get that sentence — sending somebody to upgrade over a deleted video wastes the time
+they needed for the real problem. Both behaviours are pinned in `tests/test_tools.py`.
+
+**Update it where it lives.** It is in the checkout's venv, so:
+
+```bash
+.venv/bin/python -m pip install -U yt-dlp     # what `manage.py --tools` prints, verbatim
+.venv/bin/python -m service.app.manage --tools   # versions of python, ffmpeg, ffprobe, yt-dlp
+```
+
+Unattended, weekly is enough in practice (a `systemd` timer, or the cron line):
+
+```bash
+# ~/.config/systemd/user/ytdlp-update.{service,timer}
+#   ExecStart=/path/to/note-seq/.venv/bin/python -m pip install -U yt-dlp
+#   OnCalendar=weekly
+```
+
+A *pinned* version is the wrong trade here: it reproduces until the day YouTube changes the
+next thing, and then reproduces a failure. Latest is what works; the pinning that matters is
+of the recordings, not of the downloader.
+
+**The recording is kept.** A fetched video is converted to `audio.wav` in the job directory
+and stored with the piece, so YouTube is needed exactly once per piece — re-analysing,
+listening, clipping and moving the piece to another host all work offline afterwards. If a
+download is ever hopeless, an audio file of the same music uploads fine and produces an
+identical piece; the URL only changes `meta.audio.source`.
+
 ## Housekeeping
 
 Nothing here cleans up after itself, and two things grow without limit: **jobs** (a row with
@@ -588,7 +634,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 140 tests, ~115 s
+.venv/bin/python -m pytest service/tests -q          # 145 tests, ~115 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists
