@@ -118,6 +118,77 @@ redirect — and loses the `Authorization` header — if a dev proxy rewrites th
 
 ---
 
+# Applying any patch, in full
+
+Every `.patch` file here is a plain `git diff` against the checkout at
+`~/playground/goGames/selfCommentary/full-stack-fastapi-template`, so the steps are identical
+for all of them; only the message changes. This is the whole sequence, with what each step is
+expected to print.
+
+**Short form** — when you trust the patch, two commands:
+
+```bash
+cd ~/playground/goGames/selfCommentary/full-stack-fastapi-template
+P=/home/wei/music_gen/note-seq/service/broker/patches/capabilities-vs-status.patch
+
+git apply --index "$P" && git commit -m "broker: capabilities and status are two columns, not one"
+git log --oneline -1
+```
+
+`--index` is what makes the pair complete: it updates the working tree *and* the index, so the
+patch's new files (the alembic migration, the test) are staged as `A` rather than left
+untracked — where a `git clean -fd` or a forgotten `git stash -u` would delete them.
+Verified on this patch: `git status --short` afterwards shows six `M` and two `A`, with nothing
+unstaged.
+
+**Long form** — when you want the gate before history changes:
+
+```bash
+git apply --check "$P" && echo "applies clean"   # writes nothing; catches a checkout that moved
+git apply "$P"
+git status --short        # this patch: 6 M, 2 ??   (?? = new, not yet in the index)
+git diff --stat           # how big the commit will be
+git add -A
+git commit -m "broker: capabilities and status are two columns, not one"
+```
+
+`git apply --check` is the step that matters. If it fails, the file has drifted and the answer
+is to **regenerate** the patch; do not reach for `patch -p1`, which applies with fuzz and will
+happily put the change in the wrong place.
+
+Each section below states what the patch does, so its heading is a usable commit subject and
+the paragraph under it is a usable body.
+
+## Then make it live
+
+Committing changes nothing that runs, and restarting changes nothing in git. Both, in the right
+order:
+
+| where | command | why |
+|---|---|---|
+| dev stack (`compose.override.yml`, `docker compose watch`) | `docker compose restart backend` | `./backend` is synced into the container, and the entrypoint runs `alembic upgrade head` |
+| droplet | `./deploy/deploy.sh` | the code is baked into `backend:latest`; a plain restart keeps the old image |
+
+Commit first if you want `git log` to explain what is running, because the database is a third
+state: the migration runs at backend start whether or not a commit exists, and a dropped
+commit does not drop the column.
+
+## Checking that it took
+
+```bash
+docker compose exec backend alembic current                     # expect c3f1a7b9d2e4 for (g)
+docker compose exec db psql -U postgres -d app -c '\d worker'    # the `status` column exists
+docker compose exec backend python -c "import app.models_jobs"  # imports cleanly
+```
+
+## Undoing one
+
+```bash
+git reset --hard HEAD~1                                        # commit + working tree
+docker compose exec backend alembic downgrade d9f3b6c2a4e8     # the column (g) added)
+```
+
+
 # (c) Whose job is it? — `owner-through-the-worker.patch`
 
 A third patch, and the only one that touches the backend. Everything a service publishes
