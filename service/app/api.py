@@ -277,6 +277,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             # Present when the piece's data has been evicted to the archive: the record and
             # the timings stay, the recording and the pages are not on this machine.
             'evicted': pieces.evicted(slug),
+            'public': pieces.public(slug),
             'audio': {'url': '%s/pieces/%s/audio' % (API, slug),
                       'duration_s': meta.get('duration_s') or 0.0}}
 

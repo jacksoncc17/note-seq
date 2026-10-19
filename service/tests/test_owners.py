@@ -128,6 +128,39 @@ def test_a_piece_you_do_not_own_is_absent_rather_than_forbidden(store_dir, monke
                     headers=headers).status_code == 200
 
 
+def test_an_example_is_visible_to_every_signed_in_account(store_dir, monkeypatch):
+  """The demo piece: one recording shown to everybody, without making it everybody's.
+
+  `public` is a flag on the piece, set by `manage.py --public`, and it does not change who
+  owns it -- the same piece still belongs to whoever recorded it. What it changes is the
+  answer to "may this viewer read it", which is what a shared example needs.
+  """
+  from service.app.config import Settings
+  from service.app.pieces import PieceStore
+
+  client = serving(store_dir, monkeypatch, allowed=OPERATOR)
+  pieces = PieceStore(Settings(data_dir=store_dir))
+
+  assert pieces.set_public('mine') is True
+  assert pieces.set_public('mine') is False              # idempotent, not a second write
+
+  assert slugs(client, 'a-stranger') == ['mine']
+  headers = {'Authorization': 'Bearer %s' % token('a-stranger')}
+  assert client.get('/api/v1/pieces/mine', headers=headers).status_code == 200
+  assert client.get('/api/v1/pieces/mine/pages/1.svg', headers=headers).status_code == 200
+  assert client.get('/api/v1/pieces/mine/audio?first_bar=1&last_bar=2',
+                    headers=headers).status_code == 200
+
+  # and it is not visible to nobody: the token is still what gets you in
+  assert client.get('/api/v1/pieces').status_code == 401
+  assert client.get('/api/v1/pieces/mine').status_code == 401
+
+  # taking the mark off puts it back behind its owner
+  assert pieces.set_public('mine', False) is True
+  assert slugs(client, 'a-stranger') == []
+  assert client.get('/api/v1/pieces/mine', headers=headers).status_code == 404
+
+
 def test_an_unowned_piece_is_hidden_from_everyone_but_an_operator(store_dir, monkeypatch):
   """Fail closed. Every piece published before ownership existed is unowned, so the
   alternative is leaving the whole existing store world-readable."""

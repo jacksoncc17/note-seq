@@ -546,6 +546,15 @@ is taken is not this service's business to disclose.
   `curl`): this machine stamps its pieces with that subject, so they show up for the right
   account on the page that serves them.
 
+**Examples.** Somebody has to see the page working before they have analysed anything, so one
+piece can be marked as an example: `python -m service.app.manage --public <slug>` writes
+`"public": true` into its `meta.json`, and from then on every *signed-in* account sees it —
+the gate still runs first, so it is "every user who logged in", not "everybody". The piece
+keeps its owner (who recorded it is still a fact); unmark it with `--unpublic`, and eviction
+skips public pieces so the demonstration does not become a 404. No frontend change is
+needed: the piece lists and opens through the same endpoints as any other, and both the list
+row and the piece JSON carry `public` for a page that wants to badge it.
+
 **What it is not.** Not sharing, and not roles: there is no way to let one account read
 another's piece, and no notion of a teacher. Both are small additions on top of this — a
 group table, or an access row keyed by `(piece, subject)` — but each is a different

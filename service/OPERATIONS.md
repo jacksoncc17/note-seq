@@ -230,6 +230,10 @@ python -m service.app.manage --scratch                   # half-built pieces, or
 python -m service.app.manage --renders                   # data/output/* from the analyzer
 python -m service.app.manage --tools                     # ffmpeg / fluidsynth / yt-dlp versions
 python -m service.app.manage --adopt-unowned --owner <user-id>   # pieces from before ownership
+
+# the demo piece: one recording every signed-in account can open
+python -m service.app.manage --public <slug>        # writes "public": true into meta.json
+python -m service.app.manage --unpublic <slug>      # and back behind its owner
 ```
 
 There is **no automatic rehydration yet**: the droplet cannot reach the archive, so a page that
@@ -247,6 +251,12 @@ python -m service.app.publish --queue <slug>      # one piece
 
 A 401 from the page means `SERVICE_PUBLISH_TOKEN` is wrong or missing; the piece is safe in the
 outbox, and `/api/v1/status` shows `outbox: N`.
+
+**The example piece.** Marking one is a metadata write on whichever store serves it -- the
+droplet's volume, so inside the stack: `docker compose exec note-seq python -m
+service.app.manage --public <slug>`. It takes effect on the next request: no deploy, no page
+change. Every signed-in account then lists and opens it, it keeps its owner, and `--evict`
+skips it. The gate still runs first, so this is "every user who logged in", not "everybody".
 
 ---
 

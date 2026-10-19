@@ -100,6 +100,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                            'before ownership was recorded')
   parser.add_argument('--owner', default=None,
                       help="the owner to adopt pieces for (the broker's user id)")
+  parser.add_argument('--public', default=None, metavar='SLUGS',
+                      help='mark these pieces (comma separated) as examples, visible to '
+                           'every signed-in account; eviction leaves them alone')
+  parser.add_argument('--unpublic', default=None, metavar='SLUGS',
+                      help='take the example mark off these pieces (comma separated)')
   parser.add_argument('--delete', action='store_true',
                       help='actually remove what the summary listed')
   parser.add_argument('--force', action='store_true',
@@ -131,10 +136,15 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('  jobs      %-4d %s   (%s on disk)'
         % (len(jobs), by_status or '', _size(_directory_bytes(settings.jobs_dir))))
   unowned = [row['slug'] for row in piece_rows if not pieces.owner(row['slug'])]
+  examples = [row['slug'] for row in piece_rows if pieces.public(row['slug'])]
+  notes = []
+  if examples:
+    notes.append('%d public: %s' % (len(examples), ', '.join(examples[:3])))
+  if unowned:
+    notes.append('%d with no owner: only an operator can see those' % len(unowned))
   print('  pieces    %-4d %s%s'
         % (len(piece_rows), _size(_directory_bytes(settings.pieces_dir)),
-           '' if not unowned else '   (%d with no owner: only an operator can see those)'
-           % len(unowned)))
+           '' if not notes else '   (%s)' % '; '.join(notes)))
   print('  renders   %s' % _size(_directory_bytes(settings.data_dir / 'output')))
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
@@ -196,6 +206,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                      'label': '%-40s %s' % (slug, _size(_directory_bytes(
                          settings.piece_dir(slug)))),
                      'blockers': []})
+
+  # ------------------------------------------------------------------ examples
+  if args.public or args.unpublic:
+    # A metadata write, like adoption: the page asks "may this viewer see it", and for an
+    # example the answer is yes for anyone holding a token.
+    for attr, value in (('public', True), ('unpublic', False)):
+      wanted = [s.strip() for s in (getattr(args, attr) or '').split(',') if s.strip()]
+      for slug in dict.fromkeys(wanted):
+        if slug not in [row['slug'] for row in piece_rows]:
+          print('no such piece: %s' % slug, file=sys.stderr)
+          return 2
+        changed = pieces.set_public(slug, value)
+        print('  %s %-40s %s' % ('public' if value else 'private', slug,
+                                 '' if changed else '(already)'))
 
   # ------------------------------------------------------------------ ownership
   if args.adopt or args.adopt_unowned:
@@ -344,6 +368,11 @@ def _evict(settings: Settings, pieces: PieceStore, store: JobStore, args) -> int
   planned: List[Dict[str, Any]] = []
   for row in candidates:
     slug = row['slug']
+    if pieces.public(slug):
+      # An example is the one piece somebody may open *because* it is on the page;
+      # evicting it would turn the demonstration into a 404.
+      print('  skip     %-40s an example (public)' % slug)
+      continue
     if not pieces.complete(slug):
       print('  skip     %-40s already evicted (or incomplete)' % slug)
       continue

@@ -128,16 +128,31 @@ class PieceStore:
     """
     return str(((self.meta(slug) or {}).get('owner') or ''))
 
+  def public(self, slug: str) -> bool:
+    """Is this piece an example, meant to be seen by every signed-in account?
+
+    Different from an owner: an owner is whose recording it is, and this is the decision
+    to show it around anyway. It is a flag in `meta.json`, set by `manage.py --public`,
+    so marking one changes no music and needs no migration.
+    """
+    return bool((self.meta(slug) or {}).get('public'))
+
   def may_see(self, slug: str, viewer: Optional[Dict[str, Any]] = None) -> bool:
     """May this viewer read `slug`? `viewer` is what `Gate.viewer` returns.
 
     No viewer means nothing is filtered, which is right for a caller that has already
     decided for itself: `service.app.manage`, and the tests.
+
+    A `public` piece is visible to anyone who got this far -- the gate has already
+    required a token, so that reads as "every signed-in account", not "everybody".
     """
     if viewer is None or viewer.get('all'):
       return True
+    meta = self.meta(slug) or {}
+    if meta.get('public'):
+      return True
     subject = str(viewer.get('sub') or '')
-    return bool(subject) and subject == self.owner(slug)
+    return bool(subject) and subject == str(meta.get('owner') or '')
 
   def listing(self, viewer: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Every piece the viewer may see, newest first -- cheap, from meta only."""
@@ -153,7 +168,8 @@ class PieceStore:
                   'duration_s': meta.get('duration_s') or 0.0,
                   'created_at': meta.get('created_at') or 0.0,
                   'pages': meta.get('pages') or 0,
-                  'warnings': len(meta.get('warnings') or [])})
+                  'warnings': len(meta.get('warnings') or []),
+                  'public': bool(meta.get('public'))})
     out.sort(key=lambda row: row['created_at'], reverse=True)
     return out
 
@@ -202,6 +218,23 @@ class PieceStore:
                       'archive': 'pieces/%s.zip' % slug}
     _write_json(self.path(slug, 'meta.json'), meta)
     return freed
+
+  def set_public(self, slug: str, public: bool = True) -> bool:
+    """Mark a piece as an example, or stop. True if it changed anything.
+
+    `service.app.manage --public` is the caller. Like `adopt` this is a metadata write:
+    nothing about the music changes, and unmarking it makes the piece private again
+    without touching the recording.
+    """
+    meta = self.meta(slug)
+    if meta is None or bool(meta.get('public')) == public:
+      return False
+    if public:
+      meta['public'] = True
+    else:
+      meta.pop('public', None)
+    _write_json(self.path(slug, 'meta.json'), meta)
+    return True
 
   def adopt(self, slug: str, owner: str) -> bool:
     """Give an existing piece an owner, in place. True if it changed anything.
