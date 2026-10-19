@@ -71,8 +71,10 @@ instead, and the unit would be restart-looping rather than idling.
 ## The soundfont, which is not a detail
 
 The alignment renders the reference MIDI with FluidSynth and compares it to the recording, so
-the soundfont is part of the measurement. `analyzer/analyzer/align.py` prefers
-`~/soundfonts/Sonatina_Symphonic_Orchestra.sf2` and falls back to the system `FluidR3_GM.sf2`.
+the soundfont is part of the measurement. `analyzer/analyzer/align.py` takes
+`NOTE_SEQ_SOUNDFONT` when it is set, otherwise prefers `~/soundfonts/Sonatina_Symphonic_Orchestra.sf2`,
+and falls back to the system `FluidR3_GM.sf2`. A `NOTE_SEQ_SOUNDFONT` pointing at nothing is
+loud rather than silent: the render refuses instead of using the other timbre.
 
 Measured on the Chopin waltz, same audio, same score, same machine: Sonatina gives bars 1–18 as
 **30.53 s**, FluidR3_GM gives **30.02 s**, and the raw bar-length range moves from 0.09–7.24 s to

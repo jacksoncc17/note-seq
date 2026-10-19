@@ -116,7 +116,11 @@ MISSING=()
 
 soundfont_file() {
   local f
-  for f in "$HOME/soundfonts/Sonatina_Symphonic_Orchestra.sf2" \
+  # NOTE_SEQ_SOUNDFONT first, then the same order analyzer/analyzer/align.py uses:
+  # $HOME/soundfonts, then the system package. A set-but-missing override falls through
+  # here the way find_soundfont() does, and the analyzer refuses to render with another
+  # timbre rather than quietly changing the map.
+  for f in "${NOTE_SEQ_SOUNDFONT:-$HOME/soundfonts/Sonatina_Symphonic_Orchestra.sf2}" \
            /usr/share/sounds/sf2/FluidR3_GM.sf2 \
            /etc/alternatives/default-GM.sf2; do
     [ -f "$f" ] && { echo "$f"; return 0; }
@@ -230,8 +234,9 @@ if [ "$CHECK" = 1 ]; then
     case "$sf" in
       */Sonatina_Symphonic_Orchestra.sf2) ;;
       *) warn "another machine using Sonatina will map the same piece slightly differently
-         (30.53 s vs 30.02 s for bars 1-18 of the Chopin waltz). Same file at
-         $HOME/soundfonts/Sonatina_Symphonic_Orchestra.sf2 makes them agree." ;;
+         (30.53 s vs 30.02 s for bars 1-18 of the Chopin waltz). Put the same file at
+         $HOME/soundfonts/Sonatina_Symphonic_Orchestra.sf2, or set NOTE_SEQ_SOUNDFONT to
+         where it lives, to make them agree." ;;
     esac
   else
     warn "no soundfont: the alignment cannot render its reference MIDI"
