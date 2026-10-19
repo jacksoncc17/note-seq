@@ -1,4 +1,4 @@
-# Patches and operations for the broker: seven patches, two procedures
+# Patches and operations for the broker: eight patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -610,3 +610,36 @@ Not verified: the frontend build. `frontend/src/routes/_layout/workers.tsx` is t
 the frontend's installed toolchain. Regenerating the API client (`scripts/generate-client.sh`)
 will add `status` to `WorkerPublic` in `types.gen.ts`; until then the page reads the row as
 `any`, which is why the column needs no type change to work.
+
+# (h) The example piece, on the dashboard: `example-piece-on-the-dashboard.patch`
+
+The note-seq page is served under the broker's own origin (`/note-seq`), which is why it needs
+no login of its own. That same fact makes a link from the dashboard cheap: the pieces it can
+see are one same-origin fetch away, using the token the browser already holds.
+
+The card lists the pieces marked `"public": true` — the examples (see
+`service/OPERATIONS.md`, "The example piece") — and links each one to
+`/note-seq/pieces/<slug>`. It renders nothing when there is no example, or when note-seq is not
+deployed behind this origin at all, so a broker without the page looks exactly as before.
+
+```bash
+git apply --index /home/wei/music_gen/note-seq/service/broker/patches/example-piece-on-the-dashboard.patch
+git commit -m "dashboard: show the example piece"
+docker compose restart backend      # the droplet: ./deploy/deploy.sh, because the page is a build
+```
+
+Three files: a new `frontend/src/components/Dashboard/ExamplePiece.tsx`, one line in
+`frontend/src/routes/_layout/index.tsx` to render it, and `VITE_NOTE_SEQ_BASE` declared in
+`vite-env.d.ts` (the deployment can move the page's prefix; unset means `/note-seq`).
+
+**Why not the Items page.** `Items` is the FastAPI template's demo CRUD — a per-user table of
+title/description rows with its own API and migration. Putting the link there would mean either
+emptying out a working page or adding a card to one nobody visits; the dashboard is where a new
+account already lands, and this is one component with no routing change. The sidebar was the
+other obvious place and is *more* work than it looks: `components/Sidebar/Main.tsx` renders
+every entry through the router's `Link`, which cannot point outside the SPA, so a sidebar entry
+to `/note-seq` needs that component changed as well.
+
+Not verified: a real `tsc -b` (the frontend toolchain does not run in this environment). Both
+files parse with esbuild, and the fetch tolerates a missing page or a 401 by rendering nothing.
+
