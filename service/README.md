@@ -218,6 +218,14 @@ secret is retyped. The controller sends SIGTERM and *waits* rather than killing:
 worker down mid-alignment loses that alignment and leaves the job claimed until the broker's
 lease expires, so `stop` says so and leaves `kill -9` to you.
 
+The machine that runs it does not have to be this one, and needs no desktop: the plugin
+only calls `pipeline.analyse`, so all it needs is the analyzer's stack — ffmpeg, FluidSynth
+and a soundfont. `service/deploy/worker/install.sh` puts exactly that on a bare machine (a
+pinned venv, the broker's `worker.py`, this machine's `worker.env`, a systemd user unit) and
+`--check` reports what is missing without touching anything; `service/deploy/worker/README.md`
+has the details. One vCPU is enough: the pipeline is single-threaded, measured at 6.4 s pinned
+to one core against 6.7 s on sixteen.
+
 The worker publishes the contract at startup (`POST /worker/services`) — that *is* the
 whole registration: the service appears in their web app's submit form, rendered from
 `param_schema`, with a file picker for the score and the recording. Run it with the

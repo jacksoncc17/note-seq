@@ -209,7 +209,10 @@ prompt() {   # message, default -- asks only when someone is there to answer
 # ------------------------------------------------------------------------------- --check
 if [ "$CHECK" = 1 ]; then
   say "checking $REPO"
-  printf '  python  %s\n' "$(python3 -V 2>&1)"
+  printf '  system  python %s\n' "$(python3 -V 2>&1 | awk '{print $2}')"
+  if [ -x "$AVENV" ]; then
+    printf '  venv    python %s\n' "$("$AVENV" -V 2>&1 | awk '{print $2}')"
+  fi
   printf '  home    %s\n' "$HOME"
   report "system packages (ffmpeg, fluidsynth, soundfont, libcairo2, python3-venv)" apt_ok
   apt_missing | sed 's/^/          needs apt: /'
