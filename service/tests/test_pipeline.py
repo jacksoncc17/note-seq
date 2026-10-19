@@ -9,10 +9,14 @@ kind of thing a green test suite made of stubs would never notice.
 
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 
 import pytest
+import soundfile as sf
+
+from service.app.pieces import PieceStore
 
 from conftest import RECORDING, SCORE, have_material
 
@@ -97,9 +101,11 @@ def test_a_job_runs_and_stores_a_piece_on_disk(analyzed):
   settings, slug = analyzed['settings'], analyzed['slug']
   assert slug == 'chopin-waltz-in-a-minor', 'the title decides the slug'
   directory = settings.piece_dir(slug)
-  for name in ('score.musicxml', 'score.mid', 'audio.wav', 'map.json', 'meta.json',
-               'geometry.json'):
+  for name in ('score.musicxml', 'score.mid', 'map.json', 'meta.json', 'geometry.json'):
     assert (directory / name).is_file(), name
+  # New pieces store the recording as FLAC (a third to two-fifths of the WAV, bit-exact).
+  recording = PieceStore(settings).audio(slug)
+  assert recording.is_file() and recording.name in ('audio.flac', 'audio.wav')
   assert len(list((directory / 'pages').glob('*.svg'))) == 9
 
   meta = json.loads((directory / 'meta.json').read_text())
@@ -187,7 +193,8 @@ def test_the_clip_for_a_range_of_bars_is_the_music_of_those_bars(analyzed):
                                                             abs=0.01)
   # And it really is that part of the recording, sample for sample.
   import soundfile as sf
-  whole = sf.read(str(analyzed['settings'].piece_dir(slug) / 'audio.wav'), dtype='float32')[0]
+  stored = PieceStore(analyzed['settings']).audio(slug)
+  whole = sf.read(str(stored), dtype='float32')[0]
   start = int(round(float(clip.headers['X-Clip-Start']) * 22050))
   import io
   piece_of_clip = sf.read(io.BytesIO(clip.content), dtype='float32')[0]
@@ -209,9 +216,15 @@ def test_a_single_bar_can_be_asked_for(analyzed):
 @have_material
 def test_the_whole_recording_can_be_streamed_as_well(analyzed):
   slug, client = analyzed['slug'], analyzed['client']
+  stored = PieceStore(analyzed['settings']).audio(slug)
   response = client.get('/api/v1/pieces/%s/audio' % slug)
   assert response.status_code == 200
-  assert len(response.content) == pytest.approx(309.7 * 22050 * 2, rel=0.01)
+  # Served as the file it is: WAV for an older piece, FLAC for a new one. Either way it is the
+  # whole recording, and the audio itself decodes to the same 309.7 seconds.
+  assert response.headers['content-type'] in ('audio/wav', 'audio/flac')
+  assert len(response.content) == stored.stat().st_size
+  decoded = sf.read(io.BytesIO(response.content), dtype='float32')[0]
+  assert len(decoded) == pytest.approx(309.7 * 22050, rel=0.01)
 
 
 @have_material

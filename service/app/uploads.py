@@ -29,8 +29,11 @@ from typing import Any, Dict, List, Optional
 
 # What a package may contain. `CARRY` is what the packer writes when it is there;
 # `REQUIRED` is what a piece cannot be served without.
-CARRY = ('meta.json', 'map.json', 'geometry.json', 'audio.wav')
-REQUIRED = ('meta.json', 'map.json', 'audio.wav')
+CARRY = ('meta.json', 'map.json', 'geometry.json')
+REQUIRED = ('meta.json', 'map.json')
+# The recording is one of these, never both: a piece may carry either spelling. Storing it as
+# FLAC is why the archive's zips are ~9 MB rather than ~16 MB.
+AUDIO_NAMES = ('audio.flac', 'audio.wav')
 PAGE_RE = re.compile(r'^pages/(\d{4})\.svg$')
 
 # A slug is a directory name on the serving side, so this is a security boundary as much
@@ -64,8 +67,11 @@ def pack_piece(directory: pathlib.Path) -> bytes:
   for name in REQUIRED:
     if not (directory / name).is_file():
       raise PackageError('%s is missing from %s' % (name, directory))
+  if not any((directory / name).is_file() for name in AUDIO_NAMES):
+    raise PackageError('no recording (audio.flac or audio.wav) in %s' % directory)
 
   members: List[str] = [name for name in CARRY if (directory / name).is_file()]
+  members += [name for name in AUDIO_NAMES if (directory / name).is_file()]
   members += sorted('pages/%s' % path.name for path in (directory / 'pages').glob('*.svg'))
   if not any(name.startswith('pages/') for name in members):
     raise PackageError('no engraved pages in %s' % directory)
@@ -105,9 +111,10 @@ def unpack_piece(payload: bytes, dest: pathlib.Path, *,
       continue
     if name.startswith('/') or '\\' in name or '..' in name.split('/'):
       raise PackageError('refusing a path that leaves the piece directory: %r' % name)
-    if name not in CARRY and not PAGE_RE.match(name):
-      raise PackageError('unexpected file in the package: %r (a piece carries %s and '
-                         'pages/NNNN.svg)' % (name, ', '.join(CARRY)))
+    if name not in CARRY and name not in AUDIO_NAMES and not PAGE_RE.match(name):
+      raise PackageError('unexpected file in the package: %r (a piece carries %s, one of '
+                         '%s, and pages/NNNN.svg)'
+                         % (name, ', '.join(CARRY), ' or '.join(AUDIO_NAMES)))
     # The declared size first, so a zip bomb is refused before it is inflated.
     total += info.file_size
     if total > max_bytes:
@@ -117,6 +124,8 @@ def unpack_piece(payload: bytes, dest: pathlib.Path, *,
   missing = [name for name in REQUIRED if name not in names]
   if missing:
     raise PackageError('the package is missing %s' % ', '.join(missing))
+  if not any(name in names for name in AUDIO_NAMES):
+    raise PackageError('the package carries no recording (%s)' % ' or '.join(AUDIO_NAMES))
   if not any(name.startswith('pages/') for name in names):
     raise PackageError('the package carries no engraved pages')
 
@@ -190,5 +199,6 @@ def describe(directory: pathlib.Path) -> Optional[Dict[str, Any]]:
   return {'slug': meta.get('slug') or directory.name,
           'title': meta.get('title') or directory.name,
           'pages': len(list((directory / 'pages').glob('*.svg'))),
-          'audio_bytes': (directory / 'audio.wav').stat().st_size
-                         if (directory / 'audio.wav').is_file() else 0}
+          'audio_bytes': next((p.stat().st_size for p in
+                               (directory / name for name in ('audio.flac', 'audio.wav'))
+                               if p.is_file()), 0)}

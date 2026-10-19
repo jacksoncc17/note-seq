@@ -264,7 +264,8 @@ def test_restore_brings_back_everything_that_is_missing(archived, monkeypatch, c
 
   back = PieceStore(Settings(data_dir=archived['tmp'] / 'data'))
   assert back.slugs() == ['another-piece', 'one-piece']
-  assert (back.directory('one-piece') / 'audio.wav').is_file()
+  assert any((back.directory('one-piece') / name).is_file()
+             for name in ('audio.flac', 'audio.wav'))
   assert len(list((back.directory('one-piece') / 'pages').glob('*.svg'))) == 2
   printed = capsys.readouterr().out
   assert '2 restored, 0 already here, 0 failed' in printed

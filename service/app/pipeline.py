@@ -181,7 +181,20 @@ def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
   }
   store.write(slug, score=score, reference_midi=analysis.reference_midi, audio=audio,
               map_dict=result.to_dict(), geometry=geometry, pages=pages, meta=meta)
+  # What the store actually wrote: `audio` metadata is read from the source before the
+  # conversion, so it still says what was uploaded. What the page needs is what is on disk.
+  stored = PieceStore(settings).audio(slug)
+  meta.setdefault('audio', {})['stored_as'] = stored.name
+  meta['audio']['duration_s'] = meta['audio'].get('duration_s') or meta.get('duration_s')
+  _write_meta(settings, slug, meta)
   return slug, meta
+
+
+def _write_meta(settings: Settings, slug: str, meta: Dict[str, Any]) -> None:
+  """Rewrite meta.json after the store has produced the piece. Small, and explicit."""
+  import json as _json
+  path = PieceStore(settings).path(slug, 'meta.json')
+  path.write_text(_json.dumps(meta, indent=1, sort_keys=True), encoding='utf-8')
 
 
 # How many *older* pieces one job will try to deliver. A backlog is drained as jobs run,

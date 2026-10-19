@@ -544,6 +544,27 @@ group table, or an access row keyed by `(piece, subject)` — but each is a diff
 decision, and this is the one that had to come first, because a piece that belongs to
 nobody cannot be shared correctly either.
 
+## How a piece stores its recording
+
+The recording is written as **FLAC** (22050 Hz mono, 16-bit, lossless) rather than WAV. Nothing
+downstream notices: every reader in this service goes through `soundfile`, so slicing a clip,
+serving the whole file and archiving it all work on either spelling, and a piece stored before
+this change keeps its `audio.wav` and keeps working.
+
+Measured on two real recordings, which is why the saving is a range rather than a number:
+
+| piece | WAV | FLAC | ratio | whole piece |
+| --- | --- | --- | --- | --- |
+| Chopin waltz, 309.7 s | 13.7 MB | 3.2 MB | 24% | 16.4 → **7.4 MB** |
+| Serenade, 263.6 s | 11.6 MB | 4.4 MB | 38% | 16.4 → **9.2 MB** |
+
+The round trip is bit-exact (`max |sample difference| = 0.0`), and the archive's package shrinks
+with it: 10.9 MB → **3.9 MB** for the Chopin. `meta.audio.format` keeps meaning *what was
+uploaded* and `meta.audio.stored_as` says what is on disk, so the two are never confused.
+
+Clips are still WAV: `slice_file` encodes them, and a browser plays a WAV without asking. Only
+the whole-recording download is FLAC-typed, and only when the piece is stored that way.
+
 ## An archive at home
 
 The serving deployment keeps each piece on its own disk, which is the right place for it —
@@ -699,7 +720,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 160 tests, ~120 s
+.venv/bin/python -m pytest service/tests -q          # 161 tests, ~120 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

@@ -311,10 +311,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
       start_s = float(start or 0.0)
       end_s = float(end if end is not None else meta.get('duration_s') or 0.0)
     else:
-      # The whole recording: a real file response, so the browser can seek in it and
-      # ask for the parts it wants rather than pulling 13 MB before playing a note.
-      return FileResponse(str(audio_path), media_type='audio/wav',
-                          filename='%s.wav' % slug)
+      # The whole recording: a real file response, so the browser can seek in it and ask
+      # for the parts it wants rather than pulling the whole thing before playing a note.
+      # The type follows the file: new pieces store FLAC (38% of the size, bit-exact), older
+      # ones WAV. Clips are always WAV either way -- `slice_file` encodes them.
+      import mimetypes
+      media, _ = mimetypes.guess_type(audio_path.name)
+      return FileResponse(str(audio_path), media_type=media or 'audio/wav',
+                          filename='%s%s' % (slug, audio_path.suffix))
 
     from .clips import slice_file
     payload, problem = slice_file(audio_path, max(0.0, start_s), end_s)

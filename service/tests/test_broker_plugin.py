@@ -477,7 +477,8 @@ def test_a_job_publishes_a_piece_its_own_page_can_serve(plugin, settings, tmp_pa
 
   # The piece is on disk, and the API serves it exactly as it serves its own.
   assert (settings.piece_dir(slug) / 'map.json').is_file()
-  assert (settings.piece_dir(slug) / 'audio.wav').is_file()
+  assert any((settings.piece_dir(slug) / name).is_file()
+             for name in ('audio.flac', 'audio.wav'))
   assert len(list((settings.piece_dir(slug) / 'pages').glob('*.svg'))) == 9
 
   client = TestClient(create_app(settings))

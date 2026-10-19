@@ -61,6 +61,34 @@ def serving_client(tmp_path, monkeypatch, **env):
 
 # --------------------------------------------------------------------------- uploads
 
+def test_a_piece_stored_as_flac_serves_like_any_other(tmp_path, monkeypatch, piece_dir):
+  """The recording's spelling is not part of the contract: FLAC is the default for new pieces
+  (a third to two-fifths of the WAV, bit-exact), a `.wav` piece keeps working, and the clip
+  that the page asks for is cut from either with libsndfile."""
+  import soundfile as sf
+
+  # turn the test piece into the shape a *new* piece has
+  data, rate = sf.read(str(piece_dir / 'audio.wav'))
+  sf.write(str(piece_dir / 'audio.flac'), data, rate, format='FLAC', subtype='PCM_16')
+  (piece_dir / 'audio.wav').unlink()
+  assert 0 < (piece_dir / 'audio.flac').stat().st_size < 0.5 * (len(data) * 2)
+
+  client, settings = serving_client(tmp_path, monkeypatch)
+  response = client.put('/api/v1/pieces/hand-made', content=package(piece_dir),
+                        headers={'X-Upload-Token': TOKEN})
+  assert response.status_code == 201, response.text
+
+  piece = client.get('/api/v1/pieces/hand-made')
+  assert piece.status_code == 200
+  clip = client.get('/api/v1/pieces/hand-made/audio?first_bar=2&last_bar=3')
+  assert clip.status_code == 200, clip.text
+  assert clip.content[:4] == b'RIFF'                  # clips are always WAV
+  whole = client.get('/api/v1/pieces/hand-made/audio')
+  assert whole.status_code == 200
+  assert whole.headers['content-type'] == 'audio/flac'
+  assert list(settings.pieces_dir.joinpath('hand-made').glob('audio.*'))[0].name == 'audio.flac'
+
+
 def test_a_piece_can_be_uploaded_and_served(tmp_path, monkeypatch, piece_dir):
   """The whole hop: pack it here, send it, read it back through the page's own API."""
   client, settings = serving_client(tmp_path, monkeypatch)
@@ -641,7 +669,13 @@ def test_a_real_piece_packs_and_arrives(tmp_path, monkeypatch, analyzed):
   assert summary['pages'] == 9                       # the Chopin waltz's nine pages
   assert summary['bars'] == 204
   assert (target / 'pages' / '0009.svg').is_file()
-  assert (target / 'audio.wav').stat().st_size > 10_000_000
+  # The recording is FLAC for a new piece (38% of the WAV, bit-exact). What matters here is
+  # that the whole recording made the round trip, not which spelling it arrived in.
+  recording = next(p for p in (target / 'audio.flac', target / 'audio.wav') if p.is_file())
+  # The ratio varies with the material: 24% of the WAV on this Chopin recording, 38% on the
+  # Serenade. So the assertion is "the whole recording is here", not a size threshold.
+  assert recording.stat().st_size > 2_000_000
+  assert recording.name == 'audio.flac'
   assert outbox.count(settings) == 0
 
 
