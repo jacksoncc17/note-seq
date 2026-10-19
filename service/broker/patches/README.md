@@ -511,6 +511,31 @@ stale row, not a live one: watch it across a couple of beats and it will not cha
 is the redeploy below, not another patch, and deploying in either order is harmless once the
 broker is new — its route reads a legacy `capabilities` payload as status.
 
+### Rows written before the migration
+
+`capabilities` was written on every beat until this patch, so a worker that was already running
+has a heartbeat report sitting in the column — and after the patch nothing will ever overwrite
+it again, because only registration writes that column now. Clear the stale rows once, on the
+broker's database:
+
+```bash
+docker compose exec -T db psql -U postgres -d app -c "
+  UPDATE worker SET capabilities = NULL
+   WHERE capabilities->>'processed' IS NOT NULL
+      OR capabilities->>'toolkit'   IS NOT NULL
+      OR capabilities->>'fake'      IS NOT NULL;"
+```
+
+The predicate is deliberate: it matches a heartbeat report by the keys it carries, so a
+declaration like `{"soundfont": "Sonatina_Symphonic_Orchestra.sf2"}` survives. Verified on
+Postgres 18 against a table holding all three shapes — both reports became NULL, the
+declaration stayed.
+
+Note that `capabilities ? 'processed'` does **not** work here: the column is `json`, and the
+containment operators (`?`, `?|`, `@>`) are `jsonb`-only — Postgres answers "No operator
+matches the given name and argument types". `->>` is defined for both, which is why the
+predicate uses it.
+
 The capability actually worth declaring for this service is the **soundfont**, because it is
 what makes two workers map the same piece slightly differently (measured: bars 1–18 of the
 Chopin waltz at 30.53 s with Sonatina, 30.02 s with FluidR3_GM):
