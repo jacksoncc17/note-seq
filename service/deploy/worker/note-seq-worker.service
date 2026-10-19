@@ -1,0 +1,28 @@
+# The note-seq worker, as a user service -- the same shape as the Garage unit beside it:
+# it restarts on any exit, and its settings live in service/broker/worker.env, which
+# run_worker.sh sources itself. No secret is in this file, in the unit's argv, or in `ps`.
+#
+# `@REPO@` is replaced by install.sh with the absolute path of the checkout; the file is
+# kept in the repository so that what gets installed is reviewable rather than generated.
+#
+# One job at a time, on purpose: the analysis is single-threaded (measured: the same 204-bar
+# piece takes 6.4 s pinned to one core and 6.7 s on sixteen), so throughput comes from more
+# workers, and a lease in the broker makes a stalled one harmless either way.
+[Unit]
+Description=note-seq_align worker (broker jobs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/service/broker/run_worker.sh
+Restart=always
+RestartSec=5
+# A job is seconds; a graceful stop gets a moment, a hung one does not get to keep the box.
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
