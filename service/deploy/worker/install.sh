@@ -318,8 +318,12 @@ else
   [ -n "$BROKER_URL" ] || die "no broker URL: pass --broker-url https://<broker>/api/v1"
   [ -n "$VIEWER_URL" ] || VIEWER_URL="${BROKER_URL%/api/v1}/note-seq"
 
+  # The two flags win over --secrets-from, which is the whole point of having both: copy the
+  # machine's four secrets from another worker, or override one of them on the command line.
   key="$(secret_from "$KEY_FILE" WORKER_KEY)"
+  [ -n "$key" ] || key="$(secret_from "$SECRETS_FROM" WORKER_KEY)"
   token="$(secret_from "$TOKEN_FILE" SERVICE_PUBLISH_TOKEN)"
+  [ -n "$token" ] || token="$(secret_from "$SECRETS_FROM" SERVICE_PUBLISH_TOKEN)"
   akey="$(secret_from "$SECRETS_FROM" SERVICE_ARCHIVE_KEY)"
   asecret="$(secret_from "$SECRETS_FROM" SERVICE_ARCHIVE_SECRET)"
   [ -n "$key" ] && [ -n "$token" ] \
