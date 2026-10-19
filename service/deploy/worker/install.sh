@@ -19,7 +19,7 @@
 #      instead of hanging on a prompt nobody can answer.
 #   2. the interpreter -- Python 3.12 via uv, then the pinned venv from requirements.txt
 #      beside this script. The system python on Ubuntu 22.04 is 3.10, where pip stops at
-#      librosa 0.11.0; uv fetches 3.12 without root. This is the slow step: ~770 MB of wheels.
+#      librosa 0.11.0; uv fetches 3.12 without root. This is the slow step: ~650 MB on disk.
 #   3. the broker's worker.py -- deliberately NOT in this repository, and run_worker.sh refuses
 #      to start without it. Both worker.py and the `worker_plugins` package beside it are
 #      copied, because worker.py imports that package.
@@ -280,7 +280,7 @@ else
     say "creating $REPO/.venv"
     "$UV" venv --python 3.12 "$REPO/.venv"
   fi
-  say "installing requirements.txt (~770 MB of wheels, once)"
+  say "installing requirements.txt (about 650 MB on disk, once)"
   "$UV" pip install -q --python "$AVENV" -r "$HERE/requirements.txt"
   venv_ok || die "still cannot import librosa/verovio after installing requirements.txt"
   say "venv ready: $("$AVENV" -V 2>&1)"

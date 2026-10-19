@@ -32,7 +32,7 @@ Throughput comes from more workers, not from more cores.
 | step | what | cost |
 |---|---|---|
 | 1 | `ffmpeg`, `fluidsynth` + soundfont, `libcairo2`, `python3-venv` | seconds, needs sudo |
-| 2 | Python 3.12 via `uv`, then `requirements.txt` | ~770 MB of wheels, a few minutes, **no root** |
+| 2 | Python 3.12 via `uv`, then `requirements.txt` | ~650 MB on disk, a few minutes, **no root** |
 | 3 | broker's `worker.py` + `worker_plugins/` | one copy |
 | 4 | `service/broker/worker.env` | secrets, `0600`, never committed |
 | 5 | `~/.config/systemd/user/note-seq-worker.service` | enabled and started only if the key is real |
