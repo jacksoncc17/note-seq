@@ -26,6 +26,34 @@ capacity 950 GB (it was 100 GB before the capacity was re-assigned — Garage's 
 uses that number, so it is worth fixing once). A fresh archive write landed on the disk, and
 `--restore-from` brought all fifteen back with the audio hashing identically.
 
+## The web UI, on the VM
+
+`native/garage-webui.service` runs [khairul169/garage-webui](https://github.com/khairul169/garage-webui)
+as a **user** service next to Garage: it reads the admin token from `garage.toml`, talks to the
+admin API on `127.0.0.1:3903`, and serves on `:3909` with a login. `native/garage-webui.env.example`
+is the settings file (600, because it holds the token and the hash).
+
+```
+~/.local/bin/garage-webui                 # the 14.9 MB release binary, no runtime needed
+~/.config/garage-webui/env                # CONFIG_PATH, PORT, API_ADMIN_KEY, AUTH_USER_PASS
+~/.config/systemd/user/garage-webui.service
+```
+
+Two things that cost an hour to learn, both worth keeping in mind:
+
+* **A bcrypt hash does not survive a shell heredoc.** `AUTH_USER_PASS=user:$2b$10$…` written with
+  an unquoted `<<EOF` arrives as `$2` and `$10` expanded to nothing — a truncated hash, no error,
+  and the UI starts *without* a login. Same family as the backtick trap in `install.sh`. Build the
+  file elsewhere and copy it, or quote the heredoc and substitute afterwards.
+* **The page is not behind the login; the API is.** Auth wraps `/api/*` (the SPA at `/` is
+  static and public), so `curl /` answering 200 says nothing about whether a login is required.
+  The honest probes are `GET /api/config` (401 without a session, 200 with) and
+  `POST /api/auth/login` with `{"username":…,"password":…}`.
+
+Verified on the VM: the login page appears, a bad password gets 401, the generated password
+gets a session that makes `/api/config` 200, and the dashboard then reports the live cluster
+(`Healthy`, 1 node, 256 partitions, 155.9 MB) — which is the archive's content.
+
 ## Two ways to run it
 
 `compose.yml` here runs it in Docker, which is the quickest way to try it on a machine that

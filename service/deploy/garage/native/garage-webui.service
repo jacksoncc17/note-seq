@@ -1,0 +1,28 @@
+# Garage Web UI as a user service, on the same machine as Garage.
+#
+#   cp garage-webui.service ~/.config/systemd/user/
+#   cp garage-webui.env.example ~/.config/garage-webui/env   # then fill it in, chmod 600
+#   systemctl --user daemon-reload && systemctl --user enable --now garage-webui
+#
+# Why a user unit rather than a container or root: it only needs to reach Garage's admin API on
+# loopback (127.0.0.1:3903), which the daemon binds there for exactly this reason. Under a user
+# service that API still never listens on the LAN, and `Linger=yes` keeps the service running
+# after you log out.
+[Unit]
+Description=Garage Web UI (admin console for the note-seq archive)
+After=garage.service
+Wants=garage.service
+
+[Service]
+Type=simple
+# The env file holds the admin token and the login hash, so it is 600 and this unit (which is
+# world-readable) holds neither.
+EnvironmentFile=%h/.config/garage-webui/env
+ExecStart=%h/.local/bin/garage-webui
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
