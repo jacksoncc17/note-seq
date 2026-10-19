@@ -7,7 +7,32 @@ nothing but a pinned version.
 **In this repository it is only deployed here for testing.** The point of it is to run on a
 home machine that is not the droplet and not the laptop that analyses music.
 
-## Run it
+## Two ways to run it
+
+`compose.yml` here runs it in Docker, which is the quickest way to try it on a machine that
+already has Docker. On a **dedicated Linux machine** the container adds nothing: Garage is one
+static binary, one config file and two directories. `native/` is that install, and it is what
+the deployment described below actually uses:
+
+```
+native/install.sh            # binary + config + systemd unit (system-wide, or for your user
+                             #   when sudo needs a password)
+native/setup-data-disk.sh    # mount a dedicated disk for the blocks (needs sudo, once)
+native/bootstrap.sh          # layout, key, bucket
+```
+
+Two things about the native path worth knowing before reading the scripts:
+
+* **metadata and data belong on different disks.** The blocks (`data_dir`) are what grows, so
+  they go on the big disk; LMDB (`metadata_dir`) wants the SSD the system is on. The blocks are
+  immutable files named by their hash, so moving them is a copy; only the metadata needs the
+  snapshot discipline.
+* **`nofail` in fstab is a quiet danger.** A dedicated disk that fails to mount leaves Garage
+  writing to the root filesystem, and nobody notices until it fills. `install.sh` prints a
+  warning when `OBJECTS_DIR` is not a mountpoint, and `setup-data-disk.sh` prints the check to
+  run afterwards (`findmnt --target`).
+
+## Run it in Docker
 
 ```bash
 cp garage.toml.example garage.toml     # then replace the two generated secrets in it

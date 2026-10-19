@@ -225,6 +225,57 @@ class Settings:
             'capabilities': self.capabilities()}
 
 
+def apply_worker_env(settings: Settings) -> list:
+  """Fill gaps in `settings` from the worker's env file. Returns which keys were taken.
+
+  `service/broker/worker.env` is what `run_worker.sh` sources, and it is where secrets live
+  because they must not be retyped into a command line. Everything that runs on the machine
+  that analyses music reads that file through here -- the worker, `service.app.publish` and
+  `service.app.manage` -- because the alternative is what happened once: a token sitting in
+  the file while a CLI read only the environment, and a failure that looked like TLS.
+
+  A deliberately small parser rather than `source`: `KEY=value` lines, `#` comments, matching
+  quotes stripped, nothing evaluated. Anything already in the environment wins, so a one-off
+  override on the command line still works.
+  """
+  path = pathlib.Path(os.environ.get('NOTE_SEQ_WORKER_ENV')
+                      or (SERVICE_DIR / 'broker' / 'worker.env'))
+  if not path.is_file():
+    return []
+  taken: list = []
+  for line in path.read_text(encoding='utf-8').splitlines():
+    line = line.strip()
+    if not line or line.startswith('#') or '=' not in line:
+      continue
+    key, _, value = line.partition('=')
+    key, value = key.strip(), value.strip().strip('"').strip("'")
+    if not key or not value:
+      continue
+    if key in ('SERVICE_PUBLISH_TOKEN', 'SERVICE_UPLOAD_TOKEN') and not settings.publish_token:
+      settings.publish_token = value
+      taken.append(key)
+    elif key in ('SERVICE_PUBLISH_URL', 'NOTE_SEQ_VIEWER_URL') and not settings.publish_url:
+      settings.publish_url = value.rstrip('/')
+      taken.append(key)
+    elif key == 'SERVICE_ARCHIVE_URL' and not settings.archive_url:
+      settings.archive_url = value.rstrip('/')
+      taken.append(key)
+    elif key == 'SERVICE_ARCHIVE_BUCKET' and not settings.archive_bucket:
+      settings.archive_bucket = value
+      taken.append(key)
+    elif key == 'SERVICE_ARCHIVE_KEY' and not settings.archive_key:
+      settings.archive_key = value
+      taken.append(key)
+    elif key == 'SERVICE_ARCHIVE_SECRET' and not settings.archive_secret:
+      settings.archive_secret = value
+      taken.append(key)
+    elif key == 'SERVICE_ARCHIVE_REGION':
+      if settings.archive_region == 'garage':          # the default, not a choice made here
+        settings.archive_region = value
+        taken.append(key)
+  return taken
+
+
 def _flag(env: str, default: bool = True) -> bool:
   raw = os.environ.get(env)
   if raw is None:

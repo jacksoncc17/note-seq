@@ -35,7 +35,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from .config import Settings
+from .config import Settings, apply_worker_env
 from .jobs import JobStore
 from .pieces import PieceStore
 
@@ -60,6 +60,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                       help='only jobs finished (or created) more than this many days ago')
   parser.add_argument('--keep', type=int, default=None,
                       help='keep this many of the newest jobs in the selection')
+  parser.add_argument('--archive-all', action='store_true',
+                      help='copy every piece in this store into the archive bucket (for '
+                           'pieces published before an archive was configured)')
   parser.add_argument('--restore-from', default=None, metavar='BUCKET',
                       help='copy every archived piece into this store from an S3 bucket '
                            '(needs SERVICE_ARCHIVE_URL/_KEY/_SECRET)')
@@ -96,8 +99,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     import os
     os.environ['SERVICE_DATA'] = args.data
   settings = Settings()
+  # worker.env is where the archive and publish settings live; read it here too, so
+  # --archive-all and --restore-from work with the same file the worker uses.
+  taken = apply_worker_env(settings)
   settings.ensure_dirs()
   store, pieces = JobStore(settings), PieceStore(settings)
+  if taken:
+    print('worker.env: took %s' % ', '.join(taken))
 
   running = store.stats().get('running', 0) + store.stats().get('queued', 0)
 
@@ -119,6 +127,9 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
   print('  database  %s' % _size(_file_bytes(settings.database)))
+
+  if args.archive_all:
+    return _archive_all(settings, pieces)
 
   if args.restore_from:
     return _restore(settings, pieces, args)
@@ -266,6 +277,44 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 # ------------------------------------------------------------------------- helpers
+
+def _archive_all(settings: Settings, pieces: PieceStore) -> int:
+  """Backfill: copy every piece in this store into the archive bucket.
+
+  The archive is written by `publish_remote`, so pieces analysed before an archive existed
+  are not in it. This is the migration command -- and the recovery command, after an archive
+  was lost -- and it reuses the same packer and the same "never fail the thing you are
+  copying" rule: a piece that cannot be archived is reported and the rest continue.
+  """
+  from .pipeline import archive_piece
+
+  if not settings.archive_enabled:
+    print('the archive is not configured: set SERVICE_ARCHIVE_URL, _BUCKET, _KEY and _SECRET',
+          file=sys.stderr)
+    return 2
+
+  slugs = pieces.slugs()
+  if not slugs:
+    print('no pieces in %s' % settings.pieces_dir)
+    return 0
+  print('archiving %d piece(s) from %s to %s/%s'
+        % (len(slugs), settings.pieces_dir, settings.archive_url, settings.archive_bucket))
+
+  archived = failed = 0
+  written = 0
+  for slug in slugs:
+    result = archive_piece(settings, slug, log=lambda _m: None)
+    if result.get('archived'):
+      archived += 1
+      written += int(result.get('bytes') or 0)
+      print('  archived %-40s %6.1f MB' % (slug, (result.get('bytes') or 0) / 1e6))
+    else:
+      failed += 1
+      print('  failed   %-40s %s' % (slug, result.get('reason', 'unknown')), file=sys.stderr)
+
+  print('\n%d archived (%.1f MB), %d failed' % (archived, written / 1e6, failed))
+  return 0 if archived else 1
+
 
 def _restore(settings: Settings, pieces: PieceStore, args) -> int:
   """Refill this store from the archive bucket. The "the serving machine is disposable" bit.

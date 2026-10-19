@@ -573,6 +573,23 @@ succeeded, so a store that is down costs a log line and a missing archive entry,
 is still on the droplet. It happens *before* the push in `publish_remote`, because the bucket
 is the copy that survives losing the serving machine.
 
+**Backfilling what predates the archive** — the archive is written when a piece is published,
+so anything analysed before it existed is missing:
+
+```bash
+python -m service.app.manage --archive-all
+```
+
+Measured on the deployment this was written for: 15 pieces, 152.6 MB, **10.9 s** over the LAN.
+Garage's own accounting afterwards said 15 objects / 145.5 MiB, and `du` on its data directory
+said **112 MB** — zstd plus the fact that several pieces share one recording, whose blocks are
+then stored once. Restoring all fifteen into an empty store gave back audio that hashes
+identically.
+
+Settings come from `service/broker/worker.env` when they are not in the environment — the same
+file `run_worker.sh` sources — so `publish`, `manage --archive-all` and `manage --restore-from`
+all find the same bucket without anything being retyped.
+
 **Refilling a wiped deployment** — this is the whole point:
 
 ```bash
@@ -682,7 +699,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 156 tests, ~115 s
+.venv/bin/python -m pytest service/tests -q          # 159 tests, ~120 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

@@ -53,8 +53,17 @@ def read_marker(path: pathlib.Path) -> Optional[Dict[str, Any]]:
 
 
 def pending(settings) -> List[Dict[str, Any]]:
-  """The pieces waiting to be pushed, as the log and `/status` show them."""
-  return [entry for entry in (read_marker(path) for path in markers(settings)) if entry]
+  """The pieces waiting to be pushed, oldest first, as the log and `/status` show them.
+
+  Sorting by file mtime alone is not enough: two pieces queued in the same loop can land in
+  the same timestamp tick, and `glob` then returns them in whatever order the directory
+  happens to have -- so "oldest first" was not actually guaranteed, and a test that queued two
+  pieces and drained them saw them come out reversed. `queued_at` (written by `enqueue`) with
+  the file name as a tie-break makes it deterministic.
+  """
+  entries = [entry for entry in (read_marker(path) for path in markers(settings)) if entry]
+  entries.sort(key=lambda entry: (float(entry.get('queued_at') or 0), entry.get('marker') or ''))
+  return entries
 
 
 def count(settings) -> int:

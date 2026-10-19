@@ -28,7 +28,7 @@ import urllib.parse
 from typing import List, Optional
 
 from . import outbox
-from .config import SERVICE_DIR, Settings
+from .config import Settings, apply_worker_env
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -69,7 +69,7 @@ def main(argv: Optional[List[str]] = None) -> int:
   # environment, which the page refuses *before* reading the body -- so what comes back is
   # `URLError: [SYS] unknown error (_ssl.c:2406)` rather than a 401, and nothing says the
   # token is what is missing. Anything already in the environment wins.
-  from_worker_env = _worker_settings(settings)
+  from_worker_env = apply_worker_env(settings)
   if from_worker_env:
     print('worker.env: took %s' % ', '.join(from_worker_env))
 
@@ -120,38 +120,6 @@ def main(argv: Optional[List[str]] = None) -> int:
       if first:
         print('  still failing: %s' % first.get('reason'))
     time.sleep(max(5.0, args.interval))
-
-
-def _worker_settings(settings: Settings) -> List[str]:
-  """Fill gaps in `settings` from the worker's env file. Returns what was taken.
-
-  A deliberately small parser rather than `source`: this reads a file of `KEY=value` lines,
-  ignores comments and blank lines, strips matching quotes, and never evaluates anything.
-  Anything already set in the environment wins, so a one-off override still works.
-  """
-  path = pathlib.Path(os.environ.get('NOTE_SEQ_WORKER_ENV')
-                      or (SERVICE_DIR / 'broker' / 'worker.env'))
-  if not path.is_file():
-    return []
-  taken: List[str] = []
-  for line in path.read_text(encoding='utf-8').splitlines():
-    line = line.strip()
-    if not line or line.startswith('#') or '=' not in line:
-      continue
-    key, _, value = line.partition('=')
-    key, value = key.strip(), value.strip().strip('"').strip("'")
-    if not key or not value:
-      continue
-    if key == 'SERVICE_PUBLISH_TOKEN' and not settings.publish_token:
-      settings.publish_token = value
-      taken.append('SERVICE_PUBLISH_TOKEN')
-    elif key == 'SERVICE_UPLOAD_TOKEN' and not settings.publish_token:
-      settings.publish_token = value
-      taken.append('SERVICE_UPLOAD_TOKEN')
-    elif key in ('SERVICE_PUBLISH_URL', 'NOTE_SEQ_VIEWER_URL') and not settings.publish_url:
-      settings.publish_url = value.rstrip('/')
-      taken.append(key)
-  return taken
 
 
 def _is_loopback(url: str) -> bool:

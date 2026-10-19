@@ -21,6 +21,7 @@ from __future__ import annotations
 import http.server
 import json
 import pathlib
+import time
 import threading
 import urllib.error
 import zipfile
@@ -363,6 +364,7 @@ def test_a_piece_that_did_not_arrive_is_retried_before_newer_ones(tmp_path, monk
   settings = outbox_settings(tmp_path, monkeypatch)
   for slug in ('first-piece', 'second-piece'):
     outbox.enqueue(settings, slug, package(piece_dir), url=settings.publish_url)
+    time.sleep(0.02)          # distinct queued_at: same-tick order is a tie-break, not FIFO
   order = []
   outbox.drain(settings, opener=lambda request, timeout=None: (
       order.append(request.get_full_url()),
@@ -481,7 +483,11 @@ def test_the_command_takes_its_settings_from_the_workers_env_file(tmp_path, monk
   env_file.write_text('# the worker\'s own file\n'
                       'BROKER_URL=https://example.com/api/v1\n'
                       "NOTE_SEQ_VIEWER_URL='https://example.com/note-seq'\n"
-                      'SERVICE_PUBLISH_TOKEN="a-token-from-the-file"\n')
+                      'SERVICE_PUBLISH_TOKEN="a-token-from-the-file"\n'
+                      'SERVICE_ARCHIVE_URL=http://192.168.1.11:3900\n'
+                      'SERVICE_ARCHIVE_BUCKET=note-seq\n'
+                      'SERVICE_ARCHIVE_KEY=GK-test\n'
+                      'SERVICE_ARCHIVE_SECRET=shh\n')
   monkeypatch.setenv('NOTE_SEQ_WORKER_ENV', str(env_file))
   monkeypatch.setenv('SERVICE_DATA', str(tmp_path / 'data'))
   monkeypatch.delenv('SERVICE_PUBLISH_TOKEN', raising=False)
@@ -490,15 +496,20 @@ def test_the_command_takes_its_settings_from_the_workers_env_file(tmp_path, monk
 
   publish = importlib.import_module('service.app.publish')
   settings = Settings(data_dir=tmp_path / 'data')
-  taken = publish._worker_settings(settings)
-  assert sorted(taken) == ['NOTE_SEQ_VIEWER_URL', 'SERVICE_PUBLISH_TOKEN']
+  taken = publish.apply_worker_env(settings)
+  assert sorted(taken) == ['NOTE_SEQ_VIEWER_URL', 'SERVICE_ARCHIVE_BUCKET',
+                           'SERVICE_ARCHIVE_KEY', 'SERVICE_ARCHIVE_SECRET',
+                           'SERVICE_ARCHIVE_URL', 'SERVICE_PUBLISH_TOKEN']
   assert settings.publish_token == 'a-token-from-the-file'
   assert settings.publish_url == 'https://example.com/note-seq'
+  assert settings.archive_enabled is True
+  assert settings.archive_url == 'http://192.168.1.11:3900'
+  assert settings.archive_bucket == 'note-seq'
 
   # what is already in the environment still wins over the file
   monkeypatch.setenv('SERVICE_PUBLISH_TOKEN', 'from-the-environment')
   other = Settings(data_dir=tmp_path / 'data')
-  publish._worker_settings(other)
+  publish.apply_worker_env(other)
   assert other.publish_token == 'from-the-environment'
 
 

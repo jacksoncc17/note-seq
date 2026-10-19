@@ -170,6 +170,43 @@ def _configure_restore_env(monkeypatch, bucket='note-seq'):
   monkeypatch.setenv('SERVICE_ARCHIVE_BUCKET', bucket)
 
 
+def test_archive_all_backfills_pieces_published_before_there_was_an_archive(archived, capsys):
+  """The migration command: the archive is written at publish time, so everything older is
+  missing from it. Reuses the same packer, and the same rule that one failure does not stop
+  the rest."""
+  from service.app.manage import main
+
+  assert main(['--archive-all', '--data', str(archived['tmp'] / 'data')]) == 0
+  assert sorted(archived['store'].objects) == ['pieces/another-piece.zip',
+                                               'pieces/one-piece.zip']
+  printed = capsys.readouterr().out
+  assert '2 archived' in printed and '0 failed' in printed
+
+  # idempotent: running it again re-uploads the same bytes (a PUT is a PUT) and still works
+  assert main(['--archive-all', '--data', str(archived['tmp'] / 'data')]) == 0
+  assert len(archived['store'].objects) == 2
+
+
+def test_archive_all_refuses_to_guess_where_the_bucket_is(archived, monkeypatch, capsys):
+  from service.app.manage import main
+
+  for key in ARCHIVE_ENV:
+    monkeypatch.delenv(key, raising=False)
+  assert main(['--archive-all', '--data', str(archived['tmp'] / 'data')]) == 2
+  assert 'the archive is not configured' in capsys.readouterr().err
+
+
+def test_archive_all_survives_a_store_that_is_down(archived, capsys):
+  from service.app.manage import main
+  from service.app.s3 import S3Error
+
+  archived['store'].fail_puts = S3Error('connect refused')
+  assert main(['--archive-all', '--data', str(archived['tmp'] / 'data')]) == 1
+  captured = capsys.readouterr()
+  assert '0 archived' in captured.out and '2 failed' in captured.out
+  assert 'connect refused' in captured.err
+
+
 def test_restore_brings_back_everything_that_is_missing(archived, monkeypatch, capsys):
   """The disposable-serving-machine story, in one test: archive, wipe, restore, verify."""
   from service.app import pipeline
