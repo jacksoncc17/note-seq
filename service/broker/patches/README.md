@@ -1,4 +1,4 @@
-# Patches and operations for the broker: six patches, two procedures
+# Patches and operations for the broker: seven patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -497,8 +497,8 @@ status   {"fake":false,"plugins":["note_seq_align"],"service":"note_seq_align","
 and the same dictionary plus `"processed": 1` after the first one. `plugins` is a one-element
 list because `run_worker.sh` passes `--service note_seq_align`, which narrows the dict before
 the report is built — drop that flag if the column should list every plugin a machine loads.
-`toolkit` is `null` for our worker because the flag is never passed, and that is the point:
-the report carries no path nobody can use.
+`toolkit` is `null` for our worker, but only after the second patch below: `--toolkit` has a
+default, so the first version of this change reported that default path anyway.
 
 ### The value you will see if you update a worker before the broker
 
@@ -510,6 +510,44 @@ column **freezes at whatever the old worker last reported** — typically
 stale row, not a live one: watch it across a couple of beats and it will not change. The fix
 is the redeploy below, not another patch, and deploying in either order is harmless once the
 broker is new — its route reads a legacy `capabilities` payload as status.
+
+### The toolkit path, which took a second patch: `status-toolkit-default.patch`
+
+The first version of (g) still put a path in the status column:
+
+```
+{"service": "note_seq_align", "plugins": ["note_seq_align"],
+ "toolkit": "/home/wei/playground/goGames/selfCommentary/sgf_tools", "fake": false}
+```
+
+because `--toolkit` has a **default** — the SGF toolkit directory the `sgf_video` plugin needs —
+so `args.toolkit if args.toolkit else None` is never None. The path is the same on every machine
+that expands the same `$HOME`, which is why a worker on another box showed a path from this one.
+
+The follow-up compares the value with that default and reports only a deviation: null when
+unchanged, the real path when someone passed `--toolkit /somewhere/else`. It applies **on top of**
+the (g) patch, not instead of it:
+
+```bash
+git apply --index /home/wei/music_gen/note-seq/service/broker/patches/status-toolkit-default.patch
+git commit -m "broker: the toolkit default is not news in the status report"
+```
+
+What the worker sends was captured rather than reasoned about — a stub broker on :8899 logging
+the heartbeat body, the worker run with `--once` against it:
+
+```
+before  {"status": {"service": "note_seq_align", "plugins": ["note_seq_align"],
+                    "toolkit": "/home/wei/playground/goGames/selfCommentary/sgf_tools", "fake": false}}
+after   {"status": {"service": "note_seq_align", "plugins": ["note_seq_align"],
+                    "toolkit": null, "fake": false}}
+after, with --toolkit /tmp/other-toolkit
+        {"status": {"service": "note_seq_align", "plugins": ["note_seq_align"],
+                    "toolkit": "/tmp/other-toolkit", "fake": false}}
+```
+
+A worker that runs a *copy* of `worker.py` — the VM does, at `~/note-seq-worker/worker.py` —
+needs the copy updated and the unit restarted before its next beat, or the old path stays.
 
 ### Rows written before the migration
 
