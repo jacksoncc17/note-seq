@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import outbox
-from .config import Settings
+from .config import Settings, apply_worker_env
 from .jobs import JobStore
 from .pieces import AUDIO_SUFFIXES, SCORE_SUFFIXES, PieceStore
 from .uploads import PackageError, unpack_piece, valid_slug
@@ -45,6 +45,12 @@ API = '/api/v1'
 
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
   settings = settings or Settings()
+  # `service/broker/worker.env` is where the secrets live, and this process needs the same
+  # ones the worker does: a job submitted to *this* service archives its piece through the
+  # same `publish_remote`. Reading it here rather than only in the worker and the CLIs is why
+  # a locally-submitted analysis is archived at all -- exporting the variables into whatever
+  # shell happened to start the service is not a configuration anyone remembers.
+  apply_worker_env(settings)
   settings.ensure_dirs()
   store = JobStore(settings)
   pieces = PieceStore(settings)

@@ -7,6 +7,25 @@ nothing but a pinned version.
 **In this repository it is only deployed here for testing.** The point of it is to run on a
 home machine that is not the droplet and not the laptop that analyses music.
 
+## The deployment this was written for
+
+A VM (`vm2`, Ubuntu 22.04, 16 GB RAM) with two disks: `sda` (200 G, the system) and `sdb`
+(1000 G, ext4, labelled `data_vol`). The blocks live on `sdb`, the metadata stays with the
+system's SSD — LMDB wants the fast device, the blocks are sequential reads and want the room.
+
+```
+install.sh                     → v2.1.0 in ~/.local/bin, user unit, user unit + linger/cron
+setup-data-disk.sh /dev/sdb /srv/garage/data wei   (sudo, once)
+rsync -a ~/garage/data/ /srv/garage/data/          # existing blocks
+data_dir = "/srv/garage/data"                      # one line in ~/.config/garage/garage.toml
+garage layout assign -z dc1 -c 950GB <node>; garage layout apply --version 2
+```
+
+Measured after the move: 15 objects / 145.5 MiB in the bucket, `112 MB` on `sdb`, layout
+capacity 950 GB (it was 100 GB before the capacity was re-assigned — Garage's placement maths
+uses that number, so it is worth fixing once). A fresh archive write landed on the disk, and
+`--restore-from` brought all fifteen back with the audio hashing identically.
+
 ## Two ways to run it
 
 `compose.yml` here runs it in Docker, which is the quickest way to try it on a machine that

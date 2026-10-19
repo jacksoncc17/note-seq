@@ -32,6 +32,19 @@ ARCHIVE_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_worker_env(monkeypatch):
+  """Keep these tests independent of the developer's `service/broker/worker.env`.
+
+  That file holds the real archive credentials on a machine that has been configured, and two
+  tests here assert what happens when *nothing* is configured -- which they could not do if a
+  real bucket were reachable. Found exactly that way: the whole file passed until the archive
+  settings were added to worker.env, and then the "refuses to guess where the bucket is" tests
+  started finding a real bucket.
+  """
+  monkeypatch.setenv('NOTE_SEQ_WORKER_ENV', '/nonexistent/worker.env')
+
+
 class FakeStore:
   """An in-memory bucket with the four verbs the archive uses."""
 
@@ -160,6 +173,28 @@ def test_the_status_reports_the_bucket_but_never_the_secret(archived):
   assert described['archive'] == {'endpoint': 'http://archive.invalid',
                                   'bucket': 'note-seq'}
   assert 'secret-test' not in repr(described)
+
+
+def test_the_service_process_reads_the_worker_env_file(tmp_path, monkeypatch):
+  """A job submitted to this service archives through the same path, so the *service* has to
+  see the same settings as the worker -- not just whatever its shell was started with."""
+  from fastapi.testclient import TestClient
+
+  from service.app.api import create_app
+
+  env_file = tmp_path / 'worker.env'
+  env_file.write_text('SERVICE_ARCHIVE_URL=http://192.168.1.11:3900\n'
+                      'SERVICE_ARCHIVE_BUCKET=note-seq\n'
+                      'SERVICE_ARCHIVE_KEY=GK-test\n'
+                      'SERVICE_ARCHIVE_SECRET=shh\n')
+  monkeypatch.setenv('NOTE_SEQ_WORKER_ENV', str(env_file))
+  for key in ARCHIVE_ENV:
+    monkeypatch.delenv(key, raising=False)
+
+  settings = Settings(data_dir=tmp_path / 'data')
+  client = TestClient(create_app(settings))
+  assert client.get('/api/v1/status').json()['archive'] == {
+      'endpoint': 'http://192.168.1.11:3900', 'bucket': 'note-seq'}
 
 
 # --------------------------------------------------------------------------- restoring
