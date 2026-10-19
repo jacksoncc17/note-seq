@@ -491,12 +491,25 @@ What it changes:
 A worker registered without capabilities shows `—` there and, before its first job:
 
 ```
-status   {"fake":false,"plugins":[],"processed":0,"service":null,"toolkit":null}
+status   {"fake":false,"plugins":["note_seq_align"],"service":"note_seq_align","toolkit":null}
 ```
 
-`plugins` is empty for our worker because `run_worker.sh` passes `--service note_seq_align`,
-which narrows the dict before the report is built — widen that if the column should list every
-plugin a machine *could* run.
+and the same dictionary plus `"processed": 1` after the first one. `plugins` is a one-element
+list because `run_worker.sh` passes `--service note_seq_align`, which narrows the dict before
+the report is built — drop that flag if the column should list every plugin a machine loads.
+`toolkit` is `null` for our worker because the flag is never passed, and that is the point:
+the report carries no path nobody can use.
+
+### The value you will see if you update a worker before the broker
+
+A broker built before this patch parses the heartbeat with a model that has only
+`capabilities`, and pydantic drops the unknown `status` key (default `extra="ignore"`). So it
+calls `touch_worker(capabilities=None)`, which writes nothing when the value is None, and the
+column **freezes at whatever the old worker last reported** — typically
+`{"toolkit":"None","fake":false}`. That looks exactly like the bug that is not fixed. It is a
+stale row, not a live one: watch it across a couple of beats and it will not change. The fix
+is the redeploy below, not another patch, and deploying in either order is harmless once the
+broker is new — its route reads a legacy `capabilities` payload as status.
 
 The capability actually worth declaring for this service is the **soundfont**, because it is
 what makes two workers map the same piece slightly differently (measured: bars 1–18 of the
