@@ -272,23 +272,16 @@ def test_an_uploaded_piece_belongs_to_whoever_sent_it(store_dir, monkeypatch):
                     headers={'Authorization': 'Bearer %s' % token(OWNER)}).status_code == 404
 
 
-def test_a_piece_analysed_here_is_owned_by_whoever_this_machine_is(store_dir, monkeypatch):
-  """`SERVICE_OWNER` is for a machine that analyses without a broker job to tell it whose
-  work it is -- the LAN page, or `curl`."""
-  from service.app.config import Settings
-  from service.app.pipeline import publish_piece
-
-  monkeypatch.setenv('SERVICE_OWNER', OPERATOR)
-  settings = Settings(data_dir=store_dir)
-  assert settings.owner == OPERATOR
+def fake_analysis(store_dir):
+  """Only what `publish_piece` reads, so a test can stay about the thing it is testing."""
+  clip = str(store_dir / 'pieces' / 'mine' / 'audio.wav')
 
   class FakeAnalysis:
-    """Only what `publish_piece` reads, so this stays a test about ownership."""
-    audio = str(store_dir / 'pieces' / 'mine' / 'audio.wav')
-    reference_midi = audio
     pages = []
     page_warnings = []
     score_meta = {'title': 'Analysed here'}
+    audio = clip
+    reference_midi = clip
 
     class result:                                       # noqa: N801 - it is a stand-in
       measures: list = []
@@ -302,7 +295,49 @@ def test_a_piece_analysed_here_is_owned_by_whoever_this_machine_is(store_dir, mo
       def to_dict():
         return {'measures': []}
 
-  slug, meta = publish_piece(settings, FakeAnalysis(),
+  return FakeAnalysis()
+
+
+def test_analysing_the_same_score_again_keeps_it_an_example(store_dir, monkeypatch):
+  """The mark is about the piece, not about the analysis that produced it.
+
+  Re-uploading the same score reuses the slug and replaces the piece -- that is what
+  `claim_slug` is for -- so a demo that was re-analysed would otherwise drop off every
+  other account's page for no reason anybody could see.
+  """
+  from service.app.config import Settings
+  from service.app.pieces import PieceStore
+  from service.app.pipeline import publish_piece
+
+  settings = Settings(data_dir=store_dir)
+  pieces = PieceStore(settings)
+  score = store_dir / 'pieces' / 'mine' / 'audio.wav'
+
+  # a title of its own: the fixture's 'mine' piece holds a different score under that name,
+  # which is exactly the case `claim_slug` answers with '-2'
+  slug, _ = publish_piece(settings, fake_analysis(store_dir), score=score,
+                          title='Example waltz')
+  assert slug == 'example-waltz'
+  assert pieces.set_public(slug) is True
+
+  slug_again, meta_again = publish_piece(settings, fake_analysis(store_dir), score=score,
+                                         title='Example waltz')
+  assert slug_again == slug
+  assert meta_again.get('public') is True
+  assert pieces.public(slug) is True
+
+
+def test_a_piece_analysed_here_is_owned_by_whoever_this_machine_is(store_dir, monkeypatch):
+  """`SERVICE_OWNER` is for a machine that analyses without a broker job to tell it whose
+  work it is -- the LAN page, or `curl`."""
+  from service.app.config import Settings
+  from service.app.pipeline import publish_piece
+
+  monkeypatch.setenv('SERVICE_OWNER', OPERATOR)
+  settings = Settings(data_dir=store_dir)
+  assert settings.owner == OPERATOR
+
+  slug, meta = publish_piece(settings, fake_analysis(store_dir),
                              score=store_dir / 'pieces' / 'mine' / 'audio.wav',
                              title='Analysed here')
   assert meta['owner'] == OPERATOR

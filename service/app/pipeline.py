@@ -153,11 +153,16 @@ def publish_piece(settings: Settings, analysis: 'Analysis', *, score,
   title = title or analysis.score_meta.get('title') or score.stem.replace('_', ' ')
   audio_meta = read_audio_meta(audio) if audio.is_file() else {}
   slug = store.claim_slug(slugify(title), fingerprint(score))
+  # A reused slug means the same score (that is what `claim_slug` checks), so this is a new
+  # attempt at the same piece and not a different one. The example mark belongs to the piece,
+  # so it has to survive: re-analysing a demo must not quietly take it off the page.
+  previous = store.meta(slug) or {}
   geometry = {'slug': slug,
               'pages': [page.to_dict() for page in pages],
               'warnings': list(analysis.page_warnings)}
   meta = {
       'slug': slug,
+      **({'public': True} if previous.get('public') else {}),
       # Whose it is: the broker account whose job produced it, or whatever this machine was
       # told with SERVICE_OWNER. It travels with the piece -- into `meta.json`, into the
       # package a worker uploads, and so into the store that serves it -- which is what lets
