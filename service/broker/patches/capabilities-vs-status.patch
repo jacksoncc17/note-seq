@@ -1,0 +1,324 @@
+diff --git a/backend/app/alembic/versions/c3f1a7b9d2e4_add_worker_status.py b/backend/app/alembic/versions/c3f1a7b9d2e4_add_worker_status.py
+new file mode 100644
+index 0000000..34df385
+--- /dev/null
++++ b/backend/app/alembic/versions/c3f1a7b9d2e4_add_worker_status.py
+@@ -0,0 +1,33 @@
++"""add worker status
++
++Revision ID: c3f1a7b9d2e4
++Revises: d9f3b6c2a4e8
++Create Date: 2026-10-19 00:00:00.000000
++
++A second JSON column on `worker`: what the node says it is *doing* (its heartbeat
++report) as opposed to what it *can* do (`capabilities`, declared once at registration).
++
++Splitting them is what stops a heartbeat from overwriting a declaration -- before this,
++the heartbeat wrote the same column, so an admin's capabilities survived at most one
++beat and the admin page showed `{"processed": 3}` under a heading about capabilities.
++
++The add is compatible in both directions: an older API build ignores the column, and a
++row written before the migration simply has NULL status, which the admin page renders as
++a dash.
++"""
++
++import sqlalchemy as sa
++from alembic import op
++
++revision = "c3f1a7b9d2e4"
++down_revision = "d9f3b6c2a4e8"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    op.add_column("worker", sa.Column("status", sa.JSON(), nullable=True))
++
++
++def downgrade():
++    op.drop_column("worker", "status")
+diff --git a/backend/app/api/routes/admin_workers.py b/backend/app/api/routes/admin_workers.py
+index 0879370..85e13ff 100644
+--- a/backend/app/api/routes/admin_workers.py
++++ b/backend/app/api/routes/admin_workers.py
+@@ -69,6 +69,7 @@ def read_workers_detail(session: SessionDep, _admin: SuperUser) -> Any:
+         out.append({
+             "id": str(w.id), "name": w.name, "is_active": w.is_active,
+             "capabilities": w.capabilities,
++            "status": w.status,
+             "last_heartbeat_at": hb.isoformat() if hb else None,
+             "seconds_since_heartbeat": int((now - hb).total_seconds()) if hb else None,
+             "online": online,
+diff --git a/backend/app/api/routes/worker.py b/backend/app/api/routes/worker.py
+index 74e85e0..d9050c8 100644
+--- a/backend/app/api/routes/worker.py
++++ b/backend/app/api/routes/worker.py
+@@ -236,7 +236,12 @@ def heartbeat(
+     session: SessionDep, worker: CurrentWorker, body: WorkerHeartbeat | None = None
+ ) -> Any:
+     body = body or WorkerHeartbeat()
+-    cj.touch_worker(session=session, worker=worker, capabilities=body.capabilities)
++    # A worker built before the split posts its report under `capabilities`. Reading it as
++    # status is what keeps that worker working against this broker; deliberately NOT
++    # writing it into `capabilities`, which is the admin's declaration and must survive
++    # every beat.
++    status = body.status if body.status is not None else body.capabilities
++    cj.touch_worker(session=session, worker=worker, status=status)
+     return {"worker": worker.name, "ok": True}
+ 
+ 
+diff --git a/backend/app/crud_jobs.py b/backend/app/crud_jobs.py
+index 9a12ccc..cd69af7 100644
+--- a/backend/app/crud_jobs.py
++++ b/backend/app/crud_jobs.py
+@@ -127,11 +127,17 @@ def list_services(*, session: Session) -> list[Service]:
+ 
+ 
+ def touch_worker(
+-    *, session: Session, worker: Worker, capabilities: dict | None = None
++    *, session: Session, worker: Worker, status: dict | None = None
+ ) -> Worker:
++    """Record a heartbeat: when it happened, and what the worker says it is doing.
++
++    `status` replaces the previous report rather than merging into it, because it is a
++    report: a counter the worker stops sending should stop being displayed. What the
++    worker *can* do lives in `capabilities` and is written only by `register_worker`.
++    """
+     worker.last_heartbeat_at = get_datetime_utc()
+-    if capabilities is not None:
+-        worker.capabilities = capabilities
++    if status is not None:
++        worker.status = status
+     session.add(worker)
+     session.commit()
+     session.refresh(worker)
+diff --git a/backend/app/models_jobs.py b/backend/app/models_jobs.py
+index aad0a07..076393b 100644
+--- a/backend/app/models_jobs.py
++++ b/backend/app/models_jobs.py
+@@ -118,6 +118,13 @@ class Worker(SQLModel, table=True):
+     `capabilities` is free-form JSON so a worker can advertise what it supports
+     (e.g. {"formats": ["mp4", "webp"], "has_katago": true}) without a schema
+     change. `api_key_hash` is a hash, never the key itself.
++
++    `status` is the other half, and it used to be the same column. Capabilities are
++    *declared* -- by the admin when it registers the worker -- and answer "can this node
++    do X?". Status is *reported*, replaced on every heartbeat, and answers "what is this
++    node doing right now?" (counters, a toolkit path, the plugins it loaded). Writing
++    both through one field is what made the admin page print `{"processed": 3}` under a
++    column headed "Capabilities".
+     """
+ 
+     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+@@ -127,6 +134,10 @@ class Worker(SQLModel, table=True):
+     # column ("cannot adapt type 'dict'"), which surfaced as a 500 on the
+     # worker heartbeat the first time a worker reported its capabilities.
+     capabilities: dict | None = Field(default=None, sa_column=Column(JSON))
++    # What the worker last said it was doing. Replaced wholesale, not merged: it is a
++    # report, so a key the worker stops mentioning disappears from the page rather than
++    # lingering as a stale fact.
++    status: dict | None = Field(default=None, sa_column=Column(JSON))
+     is_active: bool = True
+     last_heartbeat_at: datetime | None = Field(
+         default=None, sa_type=DateTime(timezone=True)  # type: ignore
+@@ -509,7 +520,16 @@ class ServicesPublic(SQLModel):
+ 
+ 
+ class WorkerHeartbeat(SQLModel):
+-    capabilities: dict | None = None
++    """What a worker reports it is doing, on every beat.
++
++    `capabilities` survives only for workers older than this split: they post their
++    report under that name, and the route reads it as status. It is never written to the
++    `capabilities` column -- that is a declaration, and a heartbeat must not overwrite
++    what an admin declared.
++    """
++
++    status: dict | None = None
++    capabilities: dict | None = None      # legacy spelling of `status`
+ 
+ 
+ # ---- admin-facing payloads --------------------------------------------------
+@@ -543,6 +563,7 @@ class WorkerPublic(SQLModel):
+     id: uuid.UUID
+     name: str
+     capabilities: dict | None = None
++    status: dict | None = None
+     is_active: bool
+     last_heartbeat_at: datetime | None = None
+     created_at: datetime | None = None
+diff --git a/backend/tests/api/routes/test_worker_status.py b/backend/tests/api/routes/test_worker_status.py
+new file mode 100644
+index 0000000..7282991
+--- /dev/null
++++ b/backend/tests/api/routes/test_worker_status.py
+@@ -0,0 +1,104 @@
++"""What a heartbeat reports, and what it must not touch.
++
++The split this pins down is capabilities (declared once, at registration: "this node has
++katago") versus status (reported on every beat: "processed 3 jobs"). Both used to be the
++`capabilities` column, so a heartbeat silently replaced what an admin had declared.
++"""
++
++import uuid
++
++from fastapi.testclient import TestClient
++
++from app.core.config import settings
++
++
++def _name() -> str:
++    return f"status-test-{uuid.uuid4().hex[:8]}"
++
++
++def _register(
++    client: TestClient, headers: dict[str, str], name: str,
++    capabilities: dict | None = None,
++) -> dict:
++    body: dict = {"name": name}
++    if capabilities is not None:
++        body["capabilities"] = capabilities
++    r = client.post(f"{settings.API_V1_STR}/admin/workers/", headers=headers, json=body)
++    assert r.status_code == 200, r.text
++    return r.json()
++
++
++def _beat(client: TestClient, key: str, body: dict | None) -> None:
++    r = client.post(
++        f"{settings.API_V1_STR}/worker/heartbeat",
++        headers={"X-Worker-Key": key},
++        json=body,
++    )
++    assert r.status_code == 200, r.text
++
++
++def _shown(client: TestClient, headers: dict[str, str], name: str) -> dict:
++    """The row as the admin page sees it: the detail list, capabilities and status."""
++    r = client.get(f"{settings.API_V1_STR}/admin/workers/list", headers=headers)
++    assert r.status_code == 200, r.text
++    rows = {w["name"]: w for w in r.json()["data"]}
++    assert name in rows, sorted(rows)
++    return rows[name]
++
++
++def test_a_heartbeat_reports_status_and_leaves_capabilities_alone(
++    client: TestClient, superuser_token_headers: dict[str, str]
++) -> None:
++    name = _name()
++    worker = _register(
++        client, superuser_token_headers, name, capabilities={"has_katago": True}
++    )
++
++    _beat(client, worker["api_key"], {"status": {"processed": 2}})
++
++    row = _shown(client, superuser_token_headers, name)
++    assert row["status"] == {"processed": 2}
++    # the declaration, not the report -- this is the assertion the split exists for
++    assert row["capabilities"] == {"has_katago": True}
++
++
++def test_an_old_worker_posting_capabilities_is_read_as_status(
++    client: TestClient, superuser_token_headers: dict[str, str]
++) -> None:
++    """A worker built before the split still posts its report as `capabilities`."""
++    name = _name()
++    worker = _register(client, superuser_token_headers, name)
++
++    _beat(client, worker["api_key"], {"capabilities": {"processed": 1}})
++
++    row = _shown(client, superuser_token_headers, name)
++    assert row["status"] == {"processed": 1}
++    assert row["capabilities"] is None
++
++
++def test_a_heartbeat_replaces_the_whole_report(
++    client: TestClient, superuser_token_headers: dict[str, str]
++) -> None:
++    name = _name()
++    worker = _register(client, superuser_token_headers, name)
++
++    _beat(client, worker["api_key"], {"status": {"processed": 1, "fake": False}})
++    _beat(client, worker["api_key"], {"status": {"processed": 2}})
++
++    row = _shown(client, superuser_token_headers, name)
++    assert row["status"] == {"processed": 2}
++
++
++def test_a_heartbeat_without_a_report_keeps_the_last_one(
++    client: TestClient, superuser_token_headers: dict[str, str]
++) -> None:
++    """A bare heartbeat is a liveness ping; it must not erase what the worker last said."""
++    name = _name()
++    worker = _register(client, superuser_token_headers, name)
++
++    _beat(client, worker["api_key"], {"status": {"processed": 7}})
++    _beat(client, worker["api_key"], None)
++
++    row = _shown(client, superuser_token_headers, name)
++    assert row["status"] == {"processed": 7}
++    assert row["seconds_since_heartbeat"] is not None
+diff --git a/frontend/src/routes/_layout/workers.tsx b/frontend/src/routes/_layout/workers.tsx
+index 823b519..1f0006c 100644
+--- a/frontend/src/routes/_layout/workers.tsx
++++ b/frontend/src/routes/_layout/workers.tsx
+@@ -111,6 +111,7 @@ function WorkersPage() {
+                 <th className="p-3 text-left font-medium">State</th>
+                 <th className="p-3 text-left font-medium">Last heartbeat</th>
+                 <th className="p-3 text-left font-medium">Capabilities</th>
++                <th className="p-3 text-left font-medium">Status</th>
+                 <th className="p-3" />
+               </tr>
+             </thead>
+@@ -133,6 +134,9 @@ function WorkersPage() {
+                   <td className="text-muted-foreground p-3 font-mono text-xs">
+                     {w.capabilities ? JSON.stringify(w.capabilities) : "—"}
+                   </td>
++                  <td className="text-muted-foreground p-3 font-mono text-xs">
++                    {w.status ? JSON.stringify(w.status) : "—"}
++                  </td>
+                   <td className="p-3 text-right">
+                     <Button
+                       onClick={() =>
+diff --git a/worker.py b/worker.py
+index f1966ae..d7407ab 100644
+--- a/worker.py
++++ b/worker.py
+@@ -155,9 +155,10 @@ class Broker:
+             {"worker_name": worker_name, "lease_seconds": lease_seconds},
+         )
+ 
+-    def heartbeat(self, capabilities=None):
++    def heartbeat(self, status=None):
++        """Report what this worker is doing. Replaces the previous report on the broker."""
+         return self._request("POST", "/worker/heartbeat",
+-                             {"capabilities": capabilities or {}})
++                             {"status": status or {}})
+ 
+     def publish_service(self, *, name, title, description=None,
+                         param_schema=None, artifact_kinds=None, version="1"):
+@@ -443,9 +444,14 @@ def main() -> int:
+     signal.signal(signal.SIGINT, lambda *_: STOP.set())
+     signal.signal(signal.SIGTERM, lambda *_: STOP.set())
+ 
++    # One report, sent unchanged with every beat. The broker replaces its stored status
++    # rather than merging, so a beat that mentioned only some keys would erase the others.
++    status = {"service": args.service,
++              "plugins": sorted(plugins),
++              "toolkit": str(args.toolkit) if args.toolkit else None,
++              "fake": args.fake_pipeline}
+     try:
+-        broker.heartbeat({"toolkit": str(args.toolkit),
+-                          "fake": args.fake_pipeline})
++        broker.heartbeat(status)
+     except BrokerError as e:
+         # A single failed heartbeat at startup is not proof the broker is gone
+         # (a restarting API is the common case), so warn and let the claim loop
+@@ -522,7 +528,7 @@ def main() -> int:
+                     args.fake_pipeline, list(args.extra_arg))
+         processed += 1
+         try:
+-            broker.heartbeat({"processed": processed})
++            broker.heartbeat({**status, "processed": processed})
+         except BrokerError:
+             pass
+         if args.once or (args.max_jobs and processed >= args.max_jobs):

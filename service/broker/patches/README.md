@@ -1,4 +1,4 @@
-# Patches and operations for the broker: five patches, two procedures
+# Patches and operations for the broker: six patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -371,3 +371,95 @@ and `MuseServices` in the entry bundle) and the hover hint (`title:e.description
 deployed; `optional-fields-may-be-empty.patch` was not — the submit chunk contained **one**
 `delete` (the file-field one) rather than the two the fix adds, which is exactly why leaving
 first/last bar empty still answered with a 422.
+
+# (g) Capabilities versus status: `capabilities-vs-status.patch`
+
+The Workers page has a column headed **Capabilities**, and it was showing things like
+`{"processed": 3}`, or `{"toolkit":"None","fake":false}` on a worker that had not finished a
+job yet. Neither is a capability, and neither survived the next beat.
+
+The cause is one column doing two jobs. `worker.py` posts its report as
+`{"capabilities": {…}}`, and `touch_worker` assigned that straight into `worker.capabilities`,
+so a heartbeat overwrote whatever an admin had declared when registering the worker. Two
+different questions were sharing one field:
+
+| | answers | written | kind |
+|---|---|---|---|
+| `capabilities` | *can* this node do X? | once, at registration (an admin) | declaration |
+| `status` | what is it *doing*? | every heartbeat (the worker) | report |
+
+Nothing routed on either — `claim_job` filters on the worker's bound service — so this was
+cosmetic, but it made an admin-declared field unusable and printed nonsense under a heading
+that invites interpretation.
+
+## Apply
+
+```bash
+cd ~/playground/goGames/selfCommentary/full-stack-fastapi-template
+git apply /home/wei/music_gen/note-seq/service/broker/patches/capabilities-vs-status.patch
+docker compose restart backend      # the entrypoint runs `alembic upgrade head`
+```
+
+and restart the worker when convenient: the patch changes `worker.py`'s heartbeat body from
+`capabilities` to `status` (the broker reads the old spelling as status too, so the order does
+not actually matter — that compatibility is the point).
+
+What it changes:
+
+* `worker.status`, a second JSON column (`c3f1a7b9d2e4`, revises `d9f3b6c2a4e8`).
+* `WorkerHeartbeat.status`. `capabilities` stays in that model only so a worker built before
+  the split keeps working; the route treats it as status and never writes it to the column.
+* `touch_worker(status=…)`, and the admin list returns both fields.
+* `worker.py` sends one stable report with every beat — `service`, `plugins`, `toolkit`,
+  `fake`, plus `processed` once it has run a job — because the broker replaces the stored
+  report rather than merging, so a beat that mentioned only some keys erased the others.
+* The Workers page grows a **Status** column beside **Capabilities**.
+
+## After it applies
+
+A worker registered without capabilities shows `—` there and, before its first job:
+
+```
+status   {"fake":false,"plugins":[],"processed":0,"service":null,"toolkit":null}
+```
+
+`plugins` is empty for our worker because `run_worker.sh` passes `--service note_seq_align`,
+which narrows the dict before the report is built — widen that if the column should list every
+plugin a machine *could* run.
+
+The capability actually worth declaring for this service is the **soundfont**, because it is
+what makes two workers map the same piece slightly differently (measured: bars 1–18 of the
+Chopin waltz at 30.53 s with Sonatina, 30.02 s with FluidR3_GM):
+
+```bash
+curl -s -X POST https://www.jinshiming.net/api/v1/admin/workers/ \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "vm-note-seq", "capabilities": {"soundfont": "Sonatina_Symphonic_Orchestra.sf2"}}'
+```
+
+Registration of an existing name **rotates that worker's key**, so that call also mints a new
+one: do it when you are ready to paste a new `WORKER_KEY` into `worker.env` and restart.
+
+## What was verified, and what was not
+
+Verified here:
+
+```
+git apply --check                       clean, all 8 files
+alembic upgrade head (fresh Postgres 18)  … -> d9f3b6c2a4e8 -> c3f1a7b9d2e4, add worker status
+pytest tests -q (patched)               60 passed, 2 failed
+pytest tests -q (unpatched baseline)    56 passed, 2 failed   # the same two
+```
+
+The four new tests are `tests/api/routes/test_worker_status.py`: a heartbeat writes status and
+leaves capabilities alone; an old worker posting `capabilities` lands in status; a second beat
+replaces the whole report rather than merging; a beat with no body keeps the last report. The
+two failures are the same before and after the patch and have nothing to do with workers —
+`test_recovery_password` needs an SMTP server, and `test_create_user` gets a 404 from the
+private route in this environment.
+
+Not verified: the frontend build. `frontend/src/routes/_layout/workers.tsx` is two lines (a
+`<th>` and a `<td>` that print `w.status`) and parses with esbuild, but a real `tsc -b` needs
+the frontend's installed toolchain. Regenerating the API client (`scripts/generate-client.sh`)
+will add `status` to `WorkerPublic` in `types.gen.ts`; until then the page reads the row as
+`any`, which is why the column needs no type change to work.
