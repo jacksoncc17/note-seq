@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS jobs_lease ON jobs(status, lease_expires_at);
 
+-- When each piece was last read, for the eviction policy. One row per piece; see access.py.
+CREATE TABLE IF NOT EXISTS piece_access (
+  slug         TEXT PRIMARY KEY,
+  last_access  REAL NOT NULL,
+  accesses     INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS pieces (
   slug        TEXT PRIMARY KEY,
   job_id      TEXT,

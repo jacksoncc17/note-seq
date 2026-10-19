@@ -37,6 +37,7 @@ export function ScoreScreen({ slug }: { slug: string }) {
   const audio = useRef<HTMLAudioElement | null>(null)
 
   const data = piece.data
+  const evicted = data?.evicted
   const pages = data?.geometry.pages ?? []
   const current = page ?? pages[0]?.number ?? 1
   const svg = usePage(slug, data ? current : null)
@@ -136,6 +137,40 @@ export function ScoreScreen({ slug }: { slug: string }) {
   const selection = first !== null && last !== null ? { first, last } : null
   const pageOfCurrent =
     currentBar !== null ? pages.find((p) => p.measures.some((m) => m.number === currentBar)) : null
+
+  // An evicted piece has its record and its timings and none of what the page draws. Say so
+  // instead of asking for a page that is not here. Deliberately here, at the end: everything
+  // above is hooks, and an early return in the middle of them would change the hook count
+  // between renders -- which is the bug this placement exists to avoid.
+  if (evicted) {
+    const when = new Date(evicted.at * 1000).toLocaleDateString()
+    return (
+      <div className="mx-auto max-w-2xl p-4 lg:p-6">
+        <Card>
+          <CardBody className="space-y-2 text-sm text-stone-700">
+            <p className="text-base font-medium text-stone-900">
+              {data?.meta.title || slug} is in the archive
+            </p>
+            <p>
+              Its recording and engraved pages were moved to the archive on {when} to free
+              space here, because it had not been opened for a while. The title and the map
+              stayed, which is why this page can still name it.
+            </p>
+            <p className="text-stone-500">
+              Ask the machine that analyses music to bring it back, then reload:{' '}
+              <code className="rounded bg-stone-100 px-1 py-0.5">
+                python -m service.app.manage --restore-from note-seq
+              </code>
+            </p>
+            <p className="text-xs text-stone-400">
+              {data?.map.measures?.length ?? 0} bars · {evicted.archive} ·{' '}
+              {(evicted.bytes / 1e6).toFixed(1)} MB retrieved when moved
+            </p>
+          </CardBody>
+        </Card>
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-4 p-4 lg:p-6">

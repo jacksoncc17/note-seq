@@ -630,6 +630,58 @@ against the real store in `test_archive.py::test_the_signing_works_against_a_rea
 reported zero bytes; and Garage answers `AccessDenied`, not AWS's `SignatureDoesNotMatch`, to a
 wrong secret.
 
+## Reclaiming space: eviction
+
+The serving deployment keeps each piece so pages are fast; the archive keeps a copy so it does
+not have to. Eviction sits between them: when the serving disk passes a watermark, pieces
+nobody has opened for a while give up their recording and their pages, and keep their record.
+
+```bash
+python -m service.app.manage --evict              # dry run: what would go, and why not
+python -m service.app.manage --evict --delete     # do it
+```
+
+**"Nobody has opened it"** is answered by `piece_access(slug, last_access, accesses)` in the
+service's own SQLite, written from the three read endpoints — the piece, its page image, its
+audio — and **coalesced to one write an hour**. A page load is three reads and a practice
+session is hundreds; the question has a resolution of days, so `accesses` deliberately counts
+sessions rather than requests, and the docstring says so rather than looking precise and being
+wrong. A piece with no row (published before the ledger existed) is dated from `created_at`,
+which fails in the safe direction.
+
+**Two preconditions, enforced per piece:**
+
+* the archive must hold `pieces/<slug>.zip` **with exactly the size of a freshly packed
+  package**. A stale entry, a different recording behind the same slug, or an archive write that
+  failed that afternoon all fail this check, and the piece stays;
+* the **watermark**: `--max-used-percent` (default 80). A disk with room is not a reason to
+  delete somebody's piece — and, the other way round, an age rule alone would make the first
+  access after eviction a slow rehydrate for no benefit. `--older-than` (default 15 days) and
+  `--keep-used N` say what to age out; `--max-used-percent 0` evicts regardless of free space.
+
+**What stays and what goes.** `meta.json`, `map.json`, `geometry.json` stay — the title and the
+timings, which is what lets the piece still list and still describe itself. The recording, the
+pages and the score files go, and `meta.evicted = {at, bytes, archive}` records that it happened.
+The page shows a notice instead of a broken score, and the page image and audio answer 404 until
+the piece is back.
+
+**Getting one back** is one command, on the machine that can reach the archive:
+
+```bash
+python -m service.app.manage --restore-from note-seq
+```
+
+`--restore-from` asks `complete` rather than `exists`, so it treats an evicted piece as missing
+and restores exactly what needs restoring. It is not automatic *yet*: the droplet cannot reach
+the archive, so the fetch has to happen on the LAN — this command by hand, or a broker-mediated
+"rehydrate" job, which is the next piece of work.
+
+Measured on the real store: the dry run reports `serving disk: 77.2% used (162.4 GB free of
+914.8 GB), watermark 80%` and declines to reclaim anything, which is the policy working. In a
+test store, an evicted piece still listed and opened (`evicted` in its JSON, 8 bars still known),
+its page image and audio answered 404, and `--restore-from` brought its data back with the
+recording hashing identically.
+
 ## Keeping yt-dlp current
 
 A YouTube URL is the one input that depends on something outside this repository, and
@@ -720,7 +772,7 @@ filesystem is the truth, so deleting piece *files* is what removes a piece.
 ## Tests
 
 ```bash
-.venv/bin/python -m pytest service/tests -q          # 161 tests, ~120 s
+.venv/bin/python -m pytest service/tests -q          # 174 tests, ~125 s
 cd service/frontend && npm run check:browser         # the whole flow, from an upload
 cd service/frontend && npm run check:page -- http://localhost:8100/pieces/<slug>
                                                      # ... or a page that already exists

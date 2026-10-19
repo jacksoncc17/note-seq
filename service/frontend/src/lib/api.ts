@@ -79,6 +79,9 @@ export type Piece = {
   map: PieceMap
   geometry: { pages: PageGeometry[]; warnings: string[]; slug: string }
   audio: { url: string; duration_s: number }
+  /** Set when the recording and the pages were evicted to the archive: the record and the
+   *  timings stay, so the piece still lists and can say what it is. */
+  evicted?: { at: number; bytes: number; archive: string } | null
 }
 
 export type PieceSummary = {

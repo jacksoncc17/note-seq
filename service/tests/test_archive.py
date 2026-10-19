@@ -67,9 +67,11 @@ class FakeStore:
     return self.objects[name]
 
   def head(self, name):
-    from service.app.s3 import S3Error
+    # None for a missing object, exactly like `s3.Client.head` -- the real client answers
+    # 404 with None, and a fake that raises instead made every eviction look like "the archive
+    # is unreachable" rather than "this piece is not in it".
     if name not in self.objects:
-      raise S3Error('no such object', status=404)
+      return None
     return {'name': name, 'bytes': len(self.objects[name]), 'etag': 'etag'}
 
   def list(self, prefix=''):

@@ -21,6 +21,7 @@ by reading two small JSON documents, whatever the piece's size.
 from __future__ import annotations
 
 import hashlib
+import time
 import json
 import pathlib
 import shutil
@@ -156,6 +157,52 @@ class PieceStore:
     out.sort(key=lambda row: row['created_at'], reverse=True)
     return out
 
+  def complete(self, slug: str) -> bool:
+    """Is everything the page needs here? (The record, the timings, the recording, a page.)
+
+    Different from `exists`, which is only `meta.json`: an evicted piece keeps its record and
+    its timings on purpose, so a restore has to ask this question and not that one.
+    """
+    return (self.exists(slug)
+            and self.map(slug) is not None
+            and self.geometry(slug) is not None
+            and self.audio(slug).is_file()
+            and any((self.directory(slug) / 'pages').glob('*.svg')))
+
+  def evicted(self, slug: str) -> Optional[Dict[str, Any]]:
+    """What was removed and when, or None. The field the page uses to say so."""
+    return (self.meta(slug) or {}).get('evicted') or None
+
+  def evict(self, slug: str) -> int:
+    """Drop the recording and the engraved pages, keep the record and the timings.
+
+    Returns the bytes freed. What stays is deliberately everything needed to *name* the piece
+    and to know its bars -- title, composer, map, geometry -- so it still appears in the list,
+    and what leaves is exactly what the archive's package can put back. The caller is expected
+    to have verified that package first: `service.app.manage --evict` does, per piece, and
+    refuses any piece whose archive copy it cannot see.
+    """
+    target = self.directory(slug)
+    freed = 0
+    audio = self.audio(slug)
+    if audio.is_file():
+      freed += audio.stat().st_size
+      audio.unlink()
+    for page in sorted((target / 'pages').glob('*.svg')):
+      freed += page.stat().st_size
+      page.unlink()
+    for extra in sorted(target.glob('score.*')):
+      # The MusicXML and the reference MIDI are not in the package and cannot be restored --
+      # but they are not what the page reads either, and keeping them would leave 50 kB of a
+      # piece behind for the pleasure of a half-evicted directory.
+      freed += extra.stat().st_size
+      extra.unlink()
+    meta = self.meta(slug) or {}
+    meta['evicted'] = {'at': time.time(), 'bytes': freed,
+                      'archive': 'pieces/%s.zip' % slug}
+    _write_json(self.path(slug, 'meta.json'), meta)
+    return freed
+
   def adopt(self, slug: str, owner: str) -> bool:
     """Give an existing piece an owner, in place. True if it changed anything.
 
@@ -213,6 +260,7 @@ class PieceStore:
     _store_audio(audio, staging)
     _write_json(staging / 'map.json', map_dict)
     _write_json(staging / 'geometry.json', geometry)
+    meta = {k: v for k, v in meta.items() if k != 'evicted'}   # a re-analysis is not evicted
     _write_json(staging / 'meta.json', meta)
     for page in pages:
       (staging / 'pages' / ('%04d.svg' % page.number)).write_text(page.svg,
@@ -255,6 +303,10 @@ class PieceStore:
     staging = pathlib.Path(staging)
     if not (staging / 'meta.json').is_file():
       raise PieceError('nothing staged at %s' % staging)
+    # A package restored from the archive describes a piece that is, by definition, here.
+    staged_meta = _read_json(staging / 'meta.json') or {}
+    if staged_meta.pop('evicted', None) is not None:
+      _write_json(staging / 'meta.json', staged_meta)
     target = self.directory(slug)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():

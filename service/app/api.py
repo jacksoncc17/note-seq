@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import outbox
+from .access import AccessLog
 from .config import Settings, apply_worker_env
 from .jobs import JobStore
 from .pieces import AUDIO_SUFFIXES, SCORE_SUFFIXES, PieceStore
@@ -54,6 +55,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
   settings.ensure_dirs()
   store = JobStore(settings)
   pieces = PieceStore(settings)
+  # The access ledger lives in the same database as the queue: one SQLite file, one connection
+  # per thread, no second store to keep in step.
+  access = AccessLog(store.database)
   # Clear what a killed process left half-written before serving anything out of that
   # directory: see `PieceStore.swab`, which also puts a piece back if a crash landed
   # between the two renames of a replacement.
@@ -120,6 +124,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return {'service': 'note-seq', 'version': app.version,
             'jobs': store.stats(),
             'pieces': len(pieces.slugs()),
+            # What the eviction policy bases its decisions on; counts only, no slugs.
+            'access': access.stats(),
             # Pieces analysed here that their page has not accepted yet. Always zero on a
             # serving deployment -- this is the *sending* side's backlog -- and the number
             # that says whether the page is up to date on the machine that analyses.
@@ -265,7 +271,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     if meta is None or map_dict is None or geometry is None \
         or not pieces.may_see(slug, viewer):
       raise HTTPException(404, 'no such piece: %s' % slug)
+    # Opening a piece is what "accessed" means. Coalesced, and never fatal.
+    access.record(slug)
     return {'meta': meta, 'map': map_dict, 'geometry': geometry,
+            # Present when the piece's data has been evicted to the archive: the record and
+            # the timings stay, the recording and the pages are not on this machine.
+            'evicted': pieces.evicted(slug),
             'audio': {'url': '%s/pieces/%s/audio' % (API, slug),
                       'duration_s': meta.get('duration_s') or 0.0}}
 
@@ -274,6 +285,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     path = pieces.page_path(slug, number)
     if not path.is_file() or not pieces.may_see(slug, viewer):
       raise HTTPException(404, 'no page %d for %s' % (number, slug))
+    access.record(slug)
     return Response(path.read_text(encoding='utf-8'), media_type='image/svg+xml',
                     headers={'Cache-Control': 'public, max-age=86400'})
 
@@ -295,6 +307,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     audio_path = pieces.audio(slug)
     if not audio_path.is_file():
       raise HTTPException(404, 'the recording for %s is missing' % slug)
+    access.record(slug)
 
     if first_bar is not None or last_bar is not None:
       if first_bar is None or last_bar is None:

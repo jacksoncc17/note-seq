@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 from .config import Settings, apply_worker_env
 from .jobs import JobStore
 from .pieces import PieceStore
+from .uploads import pack_piece
 
 DAY = 86400.0
 LIVE = ('queued', 'running')
@@ -57,9 +58,20 @@ def main(argv: Optional[List[str]] = None) -> int:
   parser.add_argument('--keepers', type=int, default=None,
                       help='keep this many of the newest pieces, remove the rest')
   parser.add_argument('--older-than', type=float, default=None, metavar='DAYS',
-                      help='only jobs finished (or created) more than this many days ago')
+                      help='only jobs finished (or created) more than this many days ago; '
+                           'with --evict, pieces untouched for longer than this '
+                           '(default 15)')
   parser.add_argument('--keep', type=int, default=None,
                       help='keep this many of the newest jobs in the selection')
+  parser.add_argument('--evict', action='store_true',
+                      help='remove the data of pieces nobody has opened recently, keeping '
+                           'their record, once the archive copy is verified')
+  parser.add_argument('--keep-used', type=int, default=None, metavar='N',
+                      help='with --evict: never evict the N most recently used pieces '
+                           '(default 0)')
+  parser.add_argument('--max-used-percent', type=float, default=None, metavar='P',
+                      help='with --evict: only evict while this filesystem is at least P%% '
+                           'full (default 80; pass 0 to evict regardless of free space)')
   parser.add_argument('--archive-all', action='store_true',
                       help='copy every piece in this store into the archive bucket (for '
                            'pieces published before an archive was configured)')
@@ -127,6 +139,9 @@ def main(argv: Optional[List[str]] = None) -> int:
   print('  outbox    %-4d %s' % (len(_outbox_markers(settings)),
                                  _size(_directory_bytes(settings.outbox_dir))))
   print('  database  %s' % _size(_file_bytes(settings.database)))
+
+  if args.evict:
+    return _evict(settings, pieces, store, args)
 
   if args.archive_all:
     return _archive_all(settings, pieces)
@@ -278,6 +293,107 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 # ------------------------------------------------------------------------- helpers
 
+def _evict(settings: Settings, pieces: PieceStore, store: JobStore, args) -> int:
+  """Remove the data of pieces nobody has opened, keeping their record.
+
+  The policy is deliberately conditional rather than a plain age rule: pieces go only when the
+  archive provably has them **and** the serving disk is actually under pressure. A 15-day rule
+  alone would delete pieces that cost nothing to keep and then make the first access after that
+  a slow rehydrate for no benefit; a watermark alone would never age anything out. Together they
+  mean "reclaim space from what nobody is using, oldest first".
+
+  What the record keeps is what the archive cannot be asked for quickly: the title, the map,
+  the geometry. The recording and the pages are what the package restores.
+  """
+  from .access import AccessLog, usage_order
+  from .pipeline import archive_piece
+  from .s3 import archive_name
+
+  # The same flag the job cleanup uses: "older than N days", applied to last access here.
+  older_days = 15.0 if args.older_than is None else args.older_than
+  keep_used = 0 if args.keep_used is None else args.keep_used
+  watermark = 80.0 if args.max_used_percent is None else args.max_used_percent
+
+  usage = usage_order(pieces, AccessLog(store.database))
+  if not usage:
+    print('no pieces')
+    return 0
+
+  used = shutil.disk_usage(settings.data_dir)
+  used_percent = 100.0 * used.used / used.total if used.total else 0.0
+  print('serving disk: %.1f%% used (%s free of %s), watermark %g%%'
+        % (used_percent, _size(used.free), _size(used.total), watermark))
+  if used_percent < watermark:
+    print('below the watermark: nothing to reclaim')
+    return 0
+
+  cutoff = time.time() - older_days * 86400
+  oldest_first = usage[:-keep_used] if keep_used else usage
+  candidates = [row for row in oldest_first if row['last_access'] < cutoff]
+  print('%d piece(s) untouched for more than %g days (of %d)'
+        % (len(candidates), older_days, len(usage)))
+  if not candidates:
+    return 0
+
+  if not settings.archive_enabled:
+    print('the archive is not configured, so nothing can be evicted safely: set '
+          'SERVICE_ARCHIVE_* (see deploy/garage)', file=sys.stderr)
+    return 2
+  client = settings.archive_client()
+
+  planned: List[Dict[str, Any]] = []
+  for row in candidates:
+    slug = row['slug']
+    if not pieces.complete(slug):
+      print('  skip     %-40s already evicted (or incomplete)' % slug)
+      continue
+    try:
+      payload = pack_piece(pieces.directory(slug))
+    except Exception as e:                   # noqa: BLE001 - cannot package, cannot verify
+      print('  skip     %-40s cannot be packaged: %s' % (slug, e), file=sys.stderr)
+      continue
+    try:
+      remote = client.head(archive_name(slug))
+    except Exception as e:                   # noqa: BLE001
+      print('  skip     %-40s archive unreachable: %s' % (slug, e), file=sys.stderr)
+      continue
+    if remote is None:
+      print('  skip     %-40s not in the archive -- refusing to remove the only copy' % slug)
+      continue
+    if remote['bytes'] != len(payload):
+      # Same name, different bytes: the archive copy is not of this piece, so removing the
+      # local one would leave a different recording behind the same slug.
+      print('  skip     %-40s archive copy differs (%d vs %d bytes)'
+            % (slug, remote['bytes'], len(payload)))
+      continue
+    planned.append({**row, 'bytes': len(payload)})
+
+  if not planned:
+    print('nothing evictable')
+    return 0
+
+  freed_total = sum(row['bytes'] for row in planned)
+  print('\n%s:' % ('evicting' if args.delete else
+                   'would evict (nothing removed; add --delete)'))
+  freed = 0
+  for row in planned:
+    when = time.strftime('%Y-%m-%d', time.localtime(row['last_access']))
+    print('  %-8s %-40s %6.1f MB   last opened %s%s'
+          % ('evict' if args.delete else 'would', row['slug'], row['bytes'] / 1e6, when,
+             '' if row['recorded'] else '  (no record: dated from creation)'))
+    if args.delete:
+      freed += pieces.evict(row['slug'])
+
+  if args.delete:
+    print('\n%d evicted, %.1f MB freed; %d kept for now. '
+          'Their records remain, so they still list and their archive copy can restore them:'
+          % (len(planned), freed / 1e6, len(usage) - len(planned)))
+    print('  python -m service.app.manage --restore-from %s' % settings.archive_bucket)
+  else:
+    print('\n%d piece(s), %.1f MB would be freed' % (len(planned), freed_total / 1e6))
+  return 0
+
+
 def _archive_all(settings: Settings, pieces: PieceStore) -> int:
   """Backfill: copy every piece in this store into the archive bucket.
 
@@ -352,7 +468,9 @@ def _restore(settings: Settings, pieces: PieceStore, args) -> int:
 
   restored = skipped = failed = 0
   for slug, item in sorted(names):
-    if pieces.exists(slug) and not args.overwrite:
+    # `complete`, not `exists`: an evicted piece has its record and its timings and none of
+    # what the page draws, so it has to be restored like a missing one.
+    if pieces.complete(slug) and not args.overwrite:
       skipped += 1
       print('  have     %-40s %s' % (slug, _size(item['bytes'])))
       continue
