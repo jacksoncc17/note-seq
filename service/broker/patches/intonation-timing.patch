@@ -1,0 +1,235 @@
+diff --git a/services/intonationCheck/README.md b/services/intonationCheck/README.md
+index 6ffd246..a158f2d 100644
+--- a/services/intonationCheck/README.md
++++ b/services/intonationCheck/README.md
+@@ -15,8 +15,8 @@ out of tune.
+ 
+ | artifact | what |
+ |---|---|
+-| `intonation_report.pdf` | the engraved score with off-pitch notes highlighted, behind a cover page with the numbers and the colour key |
+-| `intonation.json` | every note's measured deviation in cents, for tooling |
++| `intonation_report.pdf` | the engraved score with off-pitch notes highlighted, behind a cover page with the numbers (including the timing block below) and the colour key |
++| `intonation.json` | every note's deviation in cents and its onset error in milliseconds, for tooling |
+ 
+ ## How it works
+ 
+@@ -167,6 +167,35 @@ apt-get install -y libcairo2         # Debian/Ubuntu; python:3.14-slim ships WIT
+ `.venv-intonation/` in the workspace root has all of them. Imports are inside `run()`
+ and `build_report()`, so listing services on a machine without them still works.
+ 
++## Timing, which is not rhythm
++
++`analysis.summary()["timing"]` and the cover page report how far each note landed from the
++take's **own average pulse**: `onset_s` (where the DTW path put it) minus `score_onset_s`
++(the same note on a metronome at `implied_tempo_bpm`), in milliseconds. Per note it is
++`onset_error_ms` in the JSON; in summary it is the median, the 90th percentile, the signed
++mean (a take that drags reads positive), how many notes are outside 100 ms, and the worst one
++by name and bar.
++
++What it is good for: "this one ran away in bar 25" and "this take is uneven" — the drift is
++visible per note and per bar.
++
++What it is not:
++
++* **not a tempo check.** The reference line is the take's own average tempo, so a steady
++  performance at 92 BPM where the score says 100 reports near-zero timing spread and an
++  implied tempo of 92. The tempo IS the separate line above it.
++* **not a rhythm grade.** Onsets come from a DTW path over a *pitch* track, so a repeated
++  note has no boundary to find and a soft attack has nothing to detect. A duration is only
++  as good as that path. Real onset detection (`librosa.onset.onset_detect`, spectral flux) is
++  what a per-note rhythm mark would need.
++* **frame-level.** One `pyin` frame is 23 ms (512 samples at 22 050 Hz), so an onset is
++  resolved to about that. On the straight-tempo fixture the median spread measures **29 ms**;
++  on the real-score fixture, which has deliberate rubato, it measures **681 ms** — that is the
++  drift of a human take against its own average, not sloppiness.
++
++The cover page says this in as many words, so a report that lands in front of a student does
++not read as a rhythm grade.
++
+ ## Known limitations
+ 
+ * **Monophonic.** `pyin` tracks one fundamental, so a chord is measured as whichever
+diff --git a/services/intonationCheck/align.py b/services/intonationCheck/align.py
+index 17464fd..3a31c81 100644
+--- a/services/intonationCheck/align.py
++++ b/services/intonationCheck/align.py
+@@ -64,6 +64,11 @@ SILENCE_COST = 2.0
+ # window is on the wrong note.
+ MISALIGNED_CENTS = 50.0
+ 
++# How late or early a note may land before the timing block names it. 100 ms is about a
++# tenth of a beat at 100 BPM -- audible, and well past the wander of onsets that come out
++# of a pitch-based DTW path on a steady take.
++TIMING_THRESHOLD_MS = 100.0
++
+ class AlignmentError(RuntimeError):
+     """The recording could not be aligned to the score."""
+ 
+@@ -94,6 +99,18 @@ class NoteCheck:
+     def in_tune(self) -> bool:
+         return self.status == "ok"
+ 
++    @property
++    def onset_error_ms(self) -> float | None:
++        """How late (positive) or early (negative) this note landed, in milliseconds.
++
++        Measured against `score_onset_s`, which is the note's position on a metronome at
++        the tempo the *recording* implies on average -- see `Analysis.timing` for what
++        that does and does not mean.
++        """
++        if self.score_onset_s is None:
++            return None
++        return (self.onset_s - self.score_onset_s) * 1000.0
++
+ 
+ @dataclass
+ class Analysis:
+@@ -140,6 +157,44 @@ class Analysis:
+                   "cents": round(n.cents, 1), "status": n.status} for n in m),
+                 key=lambda d: abs(d["cents"]), default=None,
+             ),
++            "timing": self.timing(),
++        }
++
++    def timing(self) -> dict:
++        """Onset error per note, relative to the recording's OWN average tempo.
++
++        What this measures: whether the notes landed where this performance's own pulse
++        says they should. `score_onset_s` is the note's position on a metronome at
++        `implied_tempo_bpm`, so a take that is uniformly slower shows near-zero error here
++        and a tempo away from the score's instead -- deliberately, because "played the
++        whole thing at 92 BPM" and "rushed bar 3" are different faults and this block is
++        only the second one.
++
++        What it does not measure: rhythm. The onsets come from a DTW path over a *pitch*
++        track, so a repeated note has no boundary to find and a soft attack has nothing to
++        detect; a duration is only as good as that path. It also says nothing about the
++        right tempo, which is the separate question above it.
++        """
++        rows = [n for n in self.notes
++                if n.score_onset_s is not None and n.status != "misaligned"]
++        if not rows:
++            return {"notes_measured": 0, "threshold_ms": TIMING_THRESHOLD_MS}
++        errors = {n.index: n.onset_error_ms for n in rows}
++        ordered = sorted(abs(errors[n.index]) for n in rows)
++        beyond = [n for n in rows if abs(errors[n.index]) > TIMING_THRESHOLD_MS]
++        worst = max(rows, key=lambda n: abs(errors[n.index]))
++        return {
++            "notes_measured": len(rows),
++            "threshold_ms": TIMING_THRESHOLD_MS,
++            "median_abs_ms": round(float(np.median(ordered)), 1),
++            "p90_abs_ms": round(float(np.percentile(ordered, 90)), 1),
++            "max_abs_ms": round(ordered[-1], 1),
++            # signed, so a whole take that drags reads as positive rather than as noise
++            "mean_signed_ms": round(float(np.mean([errors[n.index] for n in rows])), 1),
++            "notes_beyond": len(beyond),
++            "worst": {"index": worst.index, "note": worst.written_name,
++                      "measure": worst.measure,
++                      "error_ms": round(errors[worst.index], 1)},
+         }
+ 
+ 
+diff --git a/services/intonationCheck/report.py b/services/intonationCheck/report.py
+index 2c12ded..de18b1b 100644
+--- a/services/intonationCheck/report.py
++++ b/services/intonationCheck/report.py
+@@ -314,6 +314,28 @@ def draw_cover(path: Path, analysis, score_meta: dict, reference_name: str,
+              f"{worst['cents']:+.1f} cents ({worst['status']})",
+              font="courier", gap=15)
+ 
++    timing = summary.get("timing") or {}
++    if timing.get("notes_measured"):
++        rule()
++        line(f"implied tempo:   {analysis.tempo_bpm:.1f} bpm, averaged over the take",
++             font="courier", gap=15)
++        line(f"timing spread:   median {timing['median_abs_ms']:.0f} ms against this "
++             f"take's average pulse", font="courier", gap=15)
++        line(f"                 (90th percentile {timing['p90_abs_ms']:.0f} ms)",
++             font="courier", gap=15)
++        line(f"outside {timing['threshold_ms']:.0f} ms:  {timing['notes_beyond']} of "
++             f"{timing['notes_measured']} notes", font="courier", gap=15)
++        late = timing.get("worst")
++        if late:
++            line(f"least in time:   {late['note']} in bar {late['measure']} at "
++                 f"{late['error_ms']:+.0f} ms", font="courier", gap=15)
++        y += 4
++        line("Timing is relative to this take's own average tempo, and the onsets come "
++             "from a pitch-based alignment:", size=9, colour=(0.35, 0.35, 0.35), gap=12)
++        line("repeated notes and soft attacks are where it is least reliable. It is not a "
++             "grade on rhythm, and not one on tempo either.",
++             size=9, colour=(0.35, 0.35, 0.35), gap=13)
++
+     for warning in analysis.warnings:
+         line(f"note: {warning}", size=9, colour=(0.35, 0.35, 0.35), gap=13)
+ 
+diff --git a/services/intonationCheck/service.py b/services/intonationCheck/service.py
+index 931eac0..0d81186 100644
+--- a/services/intonationCheck/service.py
++++ b/services/intonationCheck/service.py
+@@ -156,6 +156,10 @@ class IntonationCheck:
+                 {
+                     "index": n.index, "measure": n.measure, "note": n.written_name,
+                     "onset_s": round(n.onset_s, 3),
++                    "score_onset_s": (round(n.score_onset_s, 3)
++                                      if n.score_onset_s is not None else None),
++                    "onset_error_ms": (round(n.onset_error_ms, 1)
++                                       if n.onset_error_ms is not None else None),
+                     "cents": round(n.cents, 1) if n.cents is not None else None,
+                     "cents_vs_reference": (
+                         round(n.cents_reference, 1)
+diff --git a/services/intonationCheck/tests/run_check.py b/services/intonationCheck/tests/run_check.py
+index 7310b9c..ab258a6 100644
+--- a/services/intonationCheck/tests/run_check.py
++++ b/services/intonationCheck/tests/run_check.py
+@@ -600,6 +600,51 @@ def run_viewer_check():
+           len(visited) >= 0.95 * len(aligned),
+           f"{len(visited)}/{len(aligned)} visited")
+ 
++    print("\n=== 10. timing ===")
++    # The synthetic fixture is straight-tempo, so a correct alignment puts every onset on
++    # the pulse. A loose threshold: this is a report block, not a metronome -- what matters
++    # is that the number is the right order of magnitude and that nothing gets flagged.
++    straight_notes, _ = score.parse_musicxml(FIX / "score.musicxml")
++    straight_times, straight_f0 = pitch.pitch_track(FIX / "checked.wav")
++    straight = align.measure_aligned(straight_notes, straight_times, straight_f0,
++                                     tempo_bpm=100.0, threshold_cents=25.0)
++    t = straight.summary()["timing"]
++    # One pyin frame is 512/22050 s = 23 ms, and the onset comes from a path over those
++    # frames, so "on the pulse" cannot mean sub-frame. Two frames is the honest bar.
++    check("the straight-tempo fixture lands on its own pulse",
++          t["median_abs_ms"] < 50.0, f"median {t['median_abs_ms']} ms (one frame is 23)")
++    check("nothing on the fixture is outside the timing threshold",
++          t["notes_beyond"] == 0, f"{t['notes_beyond']} of {t['notes_measured']}")
++    check("every measured note reports an onset error",
++          all(n.onset_error_ms is not None for n in straight.measured))
++
++    # The real take is not straight-tempo, and that is what this block reports: drift away
++    # from the take's own average pulse. If it came out near zero on a rubato performance,
++    # the measurement would be showing nothing.
++    real_t = analysis.summary()["timing"]
++    check("a rubato take shows drift against its own average pulse",
++          real_t["notes_measured"] > 100 and real_t["median_abs_ms"] > 50.0,
++          f"median {real_t['median_abs_ms']} ms over {real_t['notes_measured']} notes")
++
++    # And the arithmetic, on a copy with a known lateness applied by hand: a uniformly
++    # late take has to read as late (signed), not as noise around zero.
++    import copy
++    shifted = copy.deepcopy(straight)
++    for n in shifted.notes:
++        n.onset_s += 0.15
++    st = shifted.summary()["timing"]
++    # Relative to the unshifted reading: the shift is the thing being tested, not the
++    # fixture's own residual.
++    moved = st["mean_signed_ms"] - t["mean_signed_ms"]
++    check("a take that is 150 ms late everywhere moves the reading by 150 ms",
++          abs(moved - 150.0) < 1.0,
++          f"{t['mean_signed_ms']:+.1f} -> {st['mean_signed_ms']:+.1f} ms")
++    check("and every note crosses the 100 ms threshold",
++          st["notes_beyond"] == st["notes_measured"], f"{st['notes_beyond']}")
++    check("the worst note is named with its bar",
++          st["worst"]["measure"] >= 1 and st["worst"]["note"],
++          f"{st['worst']['note']} bar {st['worst']['measure']} at {st['worst']['error_ms']:+.0f} ms")
++
+ 
+ 
+ if __name__ == "__main__":

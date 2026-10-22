@@ -1,4 +1,4 @@
-# Patches and operations for the broker: eight patches, two procedures
+# Patches and operations for the broker: nine patches, two procedures
 
 The job dashboard shows an artifact as `kind · size MB` and always downloads it. Two
 things are worth changing there for a service whose result is *somewhere to go*:
@@ -642,4 +642,50 @@ to `/note-seq` needs that component changed as well.
 
 Not verified: a real `tsc -b` (the frontend toolchain does not run in this environment). Both
 files parse with esbuild, and the fetch tolerates a missing page or a 401 by rendering nothing.
+
+# (i) Timing in the intonation report: `intonation-timing.patch`
+
+Not a broker patch this time, but the same repository: `services/intonationCheck` is the
+plugin `intonationCheck` that `deploy/worker-intonation.service` runs. Asked whether it can
+check rhythm accuracy, the answer was no — and reading it showed why that is annoying: the
+alignment already computes each note's onset (from the DTW path) and its nominal onset (at the
+take's implied tempo), keeps both on `NoteCheck`, and then never compares them.
+
+So the patch compares them, and calls the result what it is:
+
+* `analysis.summary()["timing"]` — median / 90th-percentile |onset error| in ms, the signed
+  mean (a take that drags reads positive), how many notes are outside 100 ms, and the worst one
+  by name and bar;
+* `onset_error_ms` and `score_onset_s` per note in `intonation.json`;
+* four lines on the PDF cover — implied tempo, timing spread, notes outside the threshold, the
+  least-in-time note — and a paragraph on the cover that says what it is not;
+* seven checks in `tests/run_check.py`.
+
+**What it measures:** how far each note landed from the take's *own average pulse*. Steady but
+slower is not a timing fault here; it shows up as `implied_tempo_bpm` instead.
+
+**What it does not measure:** rhythm. The onsets come from a DTW path over a pitch track, so a
+repeated note has no boundary to find and a soft attack has nothing to detect; one `pyin` frame
+is 23 ms, so that is the resolution. A per-note rhythm mark needs real onset detection
+(`librosa.onset.onset_detect`, spectral flux) — that is the next piece of work, not this one.
+
+Measured on the fixtures, through the service's own `tests/run_check.py`:
+
+```
+straight-tempo fixture   median 29 ms, 0 of 8 notes beyond 100 ms   (synthetic ground truth)
+rubato fixture           median 681 ms over 204 notes               (a human take, by design)
+a uniform +150 ms shift  moves the signed mean by exactly 150 ms
+75/75 checks passed      (68 before the patch)
+```
+
+```bash
+cd ~/playground/goGames/selfCommentary
+git apply --index /home/wei/music_gen/note-seq/service/broker/patches/intonation-timing.patch
+git commit -m "intonationCheck: report timing, and say what it is not"
+sudo systemctl restart worker-intonation     # the plugin is imported once, at worker start
+```
+
+The cover was rendered and its text extracted to check the new lines are actually on the page
+(`build_report` → 2 pages, all six new strings present), because a report that prints the
+caveat only in the code has not printed it.
 
